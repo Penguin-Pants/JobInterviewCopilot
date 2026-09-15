@@ -24,7 +24,7 @@ req2tc = collections.defaultdict(list)
 rows = []
 for tid, name, tr, vb in blocks:
     trs = re.findall(r"(?:FR|NFR)-\d+", tr)
-    vbs = mws if "MW-01 to MW-10" in vb else re.findall(r"(?:TC|MW)-\d+", vb)
+    vbs = mws if re.search(r"MW-01 to MW-\d+", vb) else re.findall(r"(?:TC|MW)-\d+", vb)
     rows.append((tid, name.strip(), trs, vbs))
     for r in trs:
         req2task[r].append(tid)

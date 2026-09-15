@@ -201,6 +201,28 @@ All trigger tests run on fake timers with the pure state-machine module.
 | TC-132 | I | Offline | With the network disabled the app starts, imports documents and embeds. `session:start` warns that transcription is unavailable |
 | TC-133 | I | Latency harness | With scripted fakes at fixed delays, the measured turn-end to first-line path adds under 150 ms of app-side overhead. Real end-to-end `NFR-001` numbers come from MW-06 |
 
+### 3.12 Added from independent review
+
+| ID | Level | Case | Pass condition |
+|---|---|---|---|
+| TC-134 | I | Transcript ordering under cancellation | A turn end during `GENERATING` appends the cancelled entry, carrying the bullets already flushed, before the replacing generation's entry. `seq` is strictly increasing with no gaps |
+| TC-135 | I | Torn write and lock recovery | A `.ndjson` whose final line is truncated mid-object compacts successfully, keeping every complete line. With both a `.json` and a `.ndjson` present, the `.json` wins and the `.ndjson` is deleted. A stale `session.lock` from a killed process is cleared and does not block the next session |
+| TC-136 | U | Chunk duration is exactly 1000 ms | The chunker emits at exactly 16000 frames. A 999 ms or 1001 ms chunk fails the test |
+| TC-137 | I | No audio reaches the filesystem | A filesystem write monitor wrapping `fs` records every write during a synthetic session with Whisper active. No write contains PCM, and the app-owned temp directory is empty at session end |
+| TC-138 | E | Overlay ready gate | With the overlay renderer start delayed, a suggestion generated before `overlay:ready` is buffered and delivered after the consent reminder renders. Nothing is dropped. A second generation while buffered discards the first |
+| TC-139 | U | Redaction covers non-IPC paths | A key leaked into a health-probe error, a path that never crosses IPC, is masked in the log line. Redaction exists in exactly one module |
+| TC-140 | I | Adoption and reconciliation | A file copied into `kb/` outside `doc:import` gets a `DocumentRecord`, a tag and embeddings, and appears in the listing. A document left in `converting` or `embedding` is reset to `pending` at startup and re-processed |
+| TC-141 | I | Chunk and vector integrity | A `vectors.bin` whose row count disagrees with `chunkCount` causes both to be discarded and re-embedded, with no partial results served from `query` |
+| TC-142 | E | Acrylic mode switch | Switching translucency mode recreates the overlay window and preserves position, monitor, click-through state and the card stack. Switching opacity alone does not recreate it. On a simulated Windows 10 build the acrylic option is disabled with a note |
+| TC-143 | I | Credential-keyed health | With OpenAI as STT backup and LLM primary, one rejected OpenAI key produces one Dashboard badge naming both capabilities, and exactly one probe timer runs |
+| TC-144 | I | STT switch-back boundary | A recovery switch-back never closes the STT socket mid-utterance. The switch lands on a turn boundary with no audio in flight, and no transcript text is lost across it |
+| TC-145 | U | Cost warning is edge-triggered upward | A threshold warns once. An estimate that decreases after a cancelled generation and then crosses again does not warn a second time |
+| TC-146 | U | Vendored license coverage | A fixture file under `src/renderer/**/vendor/` with no `VENDORED.md` entry fails the check |
+| TC-147 | I | Retention caps | `main.log` rotates at 5 MB keeping 3 files. A fourth `settings.corrupt-*.json` deletes the oldest |
+| TC-148 | E | Reset Overlay | With the overlay click-through and positioned off-screen, Reset Overlay returns it to the primary monitor default position, sets interactive mode and re-registers both hotkeys |
+| TC-149 | I | Document recovery paths | A document in `error` retries from the Dashboard without re-import. A user doc-type override resets to `auto` and re-runs the guess |
+| TC-150 | I | Whisper-primary latency harness | With Whisper active and scripted fakes at fixed delays, the measured path is inside the `NFR-017` budget. Real numbers come from MW-11 |
+
 ---
 
 ## 4. Coverage policy
@@ -250,7 +272,9 @@ Record the result against the release tag. A failure blocks the release.
 | MW-07 | Drag the overlay across two monitors with different DPI, then relaunch | Position and monitor are restored. Text stays crisp |
 | MW-08 | Both hotkeys while another application has focus | Interaction toggle and pause both work from any focused app |
 | MW-09 | Unplug the network mid-session | The Dashboard badge turns red, the overlay stays idle with no error card, and the session continues when the network returns |
-| MW-10 | Kill the process mid-session, relaunch | The transcript up to the last flushed entry appears in Session History as `crash-recovered` |
+| MW-10 | Kill the process mid-session, relaunch | The transcript up to the last flushed entry appears in Session History as `crash-recovered`. No torn line breaks recovery, and the next session starts without a stale lock |
+| MW-11 | Whisper-primary rehearsal, 20 turns | Latency is inside `NFR-017` (p50 under 7.0 s, p95 under 10.0 s) and the degraded-mode badge states the latency cost |
+| MW-12 | Play music and fire a desktop notification during a session | Both are transcribed onto the interviewer stream, as `ADR-021` predicts. The session-prep note advising the user to close other audio sources is present. This check confirms the documented limitation, it does not fail on it |
 
 ---
 
@@ -262,4 +286,6 @@ Record the result against the release tag. A failure blocks the release.
 | Real screen-capture exclusion | Cannot be asserted from inside the process. `setContentProtection` is the only observable | TC-004, TC-005, MW-01 |
 | Real provider accuracy and cost | Non-deterministic and paid | MW-05, MW-06, and the price table version label |
 | Multi-DPI rendering | No multi-monitor CI runner | MW-07 |
+| Real acrylic rendering | `backgroundMaterial` needs real Windows 11 compositing | TC-142 covers the window lifecycle, MW-01 and MW-07 cover the look |
+| Interviewer-only audio isolation | Impossible with WASAPI loopback. Not a v1 goal | ADR-021, MW-12 |
 | Installer on a clean machine | No clean-VM CI stage in v1 | TASK-051 acceptance criteria |

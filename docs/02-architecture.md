@@ -47,13 +47,13 @@ Electron gives three process kinds. This app uses four window contexts.
 | CMP-03b | Audio Worker | Two `MediaStream`s, two `AudioContext`s at 16 kHz, PCM framing | Persist anything, render UI |
 | CMP-04 | STT Layer | Provider adapters, per-stream sessions, normalized events | Decide when a turn ends |
 | CMP-05 | Trigger | Turn-end state machine, candidate context ring, pause state | Call an LLM provider directly |
-| CMP-06 | RAG Engine | Ingest, convert, chunk, embed, cache, watch, query | Know about sessions |
+| CMP-06 | RAG Engine | Ingest, convert, chunk, embed, cache, watch, query, startup reconciliation | Know about sessions. Only `rag.ts` is importable from outside, enforced by a lint rule against deep imports |
 | CMP-07 | LLM Layer | Provider adapters, prompt assembly, line buffering, cancellation | Write to the transcript |
-| CMP-08 | Session Manager | Session lifecycle, transcript append, consent gate, profile binding | Own provider retry logic |
-| CMP-09 | Cost Meter | Token and audio-minute accounting, spend estimate, threshold warnings | Stop a session |
-| CMP-10 | IPC Router | Channel registration, payload validation, error redaction | Hold state |
+| CMP-08 | Session Manager | Session lifecycle, sole writer of the session file, `seq` assignment, consent gate, profile binding | Own provider retry logic |
+| CMP-09 | Cost Meter | Token and audio-minute accounting, spend estimate, threshold warnings | Stop a session, or hold a session file handle (ADR-018) |
+| CMP-10 | IPC Router | Channel registration and payload validation | Hold session or business state, or redact (redaction lives in the logger alone, FR-034) |
 | CMP-11 | Hotkey Manager | Global shortcut registration, rebinding, conflict reporting | Interpret app state |
-| CMP-12 | Provider Health | Failover state, backoff, background re-probe | Be duplicated per provider |
+| CMP-12 | Provider Health | Failover state keyed by **credential**, backoff, background re-probe | Be keyed by capability (ADR-017) |
 | CMP-13 | Dashboard renderer | All configuration and history UI | Hold authoritative state |
 | CMP-14 | Overlay renderer | Idle card, suggestion stack, consent reminder, font control | Fetch from any network |
 
@@ -152,6 +152,12 @@ two. The Dashboard must state this.
 
 ### 2.3 Profile and documents
 
+**Authority rule (ADR-014, FR-077).** The `kb/` folder is the source of truth for
+which documents exist. `profile.json` is a derived index. A file that appears in
+`kb/` outside `doc:import` is adopted, not ignored. A file that disappears takes
+its record, chunks and vectors with it. A startup reconciliation pass runs before
+the watcher starts and resets any document left in a non-terminal state.
+
 ```ts
 interface Profile {
   id: string;            // uuid v4
@@ -217,11 +223,15 @@ interface Session {
   endReason: 'user' | 'crash-recovered' | null;
 }
 
-type TranscriptEntry =
+type TranscriptEntry = { seq: number } & (
   | { kind: 'turn'; source: 'interviewer' | 'candidate'; text: string; at: string }
   | { kind: 'suggestion'; forQuestion: string; bullets: string[];
       model: string; providerId: LlmProviderId; at: string;
-      status: 'complete' | 'cancelled' };
+      status: 'complete' | 'cancelled' }
+);
+// `seq` is monotonic and assigned by CMP-08 at append time. Order is seq order,
+// not file order. A cancelled generation is appended, carrying the bullets
+// already flushed, before the replacing generation's entry. (ADR-018, FR-106)
 
 interface UsageRecord {
   sttAudioSeconds: { interviewer: number; candidate: number };
@@ -234,9 +244,14 @@ interface UsageRecord {
 ```
 
 Sessions are appended to disk as newline-delimited JSON during the session
-(`<sessionId>.ndjson`) and compacted into `<sessionId>.json` on clean stop. A
-`.ndjson` file found at startup means a crash. It is compacted with
-`endReason: 'crash-recovered'`. This satisfies `FR-105`.
+(`<sessionId>.ndjson`) and compacted into `<sessionId>.json` on clean stop. Each
+entry is one `write()` of one complete line ending in a newline, so a crash can
+lose a line but cannot tear one. A `.ndjson` file found at startup means a crash.
+It is compacted with `endReason: 'crash-recovered'`, discarding an unparseable
+final line. When both a `.json` and a `.ndjson` exist for one session the `.json`
+wins and the `.ndjson` is deleted. A `session.lock` file next to the sessions
+folder enforces one session at a time across restarts and is cleared by the same
+recovery pass. This satisfies `FR-105`, `FR-107` and `FR-108`.
 
 ### 2.6 Runtime events (not persisted)
 
@@ -351,7 +366,8 @@ interface ProviderError extends Error {
 }
 ```
 
-State machine per capability (`stt`, `llm`):
+State machine per **credential** (`deepgram`, `openai`, `anthropic`), not per
+capability, because one OpenAI key serves both Whisper and GPT (ADR-017):
 
 ```
 USING_PRIMARY
@@ -366,6 +382,9 @@ USING_BACKUP (sticky for the session)            -- if a backup is configured
   |  probe primary every 60s, 2 consecutive passes
   v
 USING_PRIMARY (at next clean boundary)
+       clean boundary = the next turn for LLM, and for STT the next turn
+       boundary with no audio in flight. An STT provider switch never
+       happens mid-utterance.
 
 If no backup is configured:
 DEGRADED  -- keep retrying primary with backoff capped at 10 s,
@@ -587,7 +606,9 @@ is preferable to a network call during an interview.
 | `react`, `react-dom` | Both renderers | FR-002 | Low |
 | `tailwindcss` | Styling | FR-094 | Low |
 | `framer-motion` | Card animation | FR-091 | Low |
-| Magic UI | Card components, copied into the repo, not an npm dependency | FR-094 | Low |
+| Magic UI | Card components, copied into the repo, not an npm dependency. Listed in `VENDORED.md` with source, version and license, because the npm license check cannot see it | FR-094, NFR-016 | Medium, invisible to CI licensing without `VENDORED.md` |
+| *(none)* | Acrylic translucency uses Electron's built-in `backgroundMaterial`. No native blur module is added | FR-089 | Low |
+| *(none)* | The Whisper WAV container is written by hand in `src/main/ai/stt/wav.ts`, about 44 bytes of header. No encoder package | FR-049 | Low |
 
 ### Build and test
 
@@ -618,6 +639,9 @@ work begins.
 | Renderer isolation | `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`, preload allowlist | TC-086 |
 | No remote code in renderers | CSP without `unsafe-eval`, `will-navigate` and `setWindowOpenHandler` both deny | TC-087 |
 | Overlay hidden from capture | `setContentProtection(true)` at creation, never disabled | TC-005, manual MW-01 |
+| Audio never spooled by a dependency | Whisper body built in memory, app-owned temp dir asserted empty at session end | TC-137 |
+| Transcript ordering under cancellation | Single writer, monotonic `seq`, cancel append awaited before the next begin | TC-134 |
+| Torn write survivability | One line per `write()`, unparseable final line discarded on compaction | TC-135 |
 
 ---
 

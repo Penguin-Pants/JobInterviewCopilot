@@ -32,7 +32,7 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 ## Milestone 0 — Foundations
 
 ### TASK-001 Project scaffold
-**Traces** FR-001, FR-086, NFR-006, NFR-015
+**Traces** FR-001, FR-086, NFR-006, NFR-015, NFR-016
 **Depends on** nothing
 **Acceptance criteria**
 - `npm ci && npm run build && npm run package` produces a Windows x64 installer
@@ -45,7 +45,12 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
   `setWindowOpenHandler` both deny.
 - `npm run lint`, `npm run typecheck`, `npm run test`, `npm run licenses` all
   exist and pass.
-**Verified by** TC-001, TC-007, TC-008, TC-009
+- `VENDORED.md` exists. `npm run licenses` fails when a file under
+  `src/renderer/**/vendor/` has no entry naming its source, version and license
+  (NFR-016).
+- A lint rule forbids deep imports into `src/main/rag/*` from outside
+  `src/main/rag.ts`.
+**Verified by** TC-001, TC-007, TC-008, TC-009, TC-146
 
 ### TASK-002 Shared types and IPC contract
 **Traces** FR-086, CMP-10
@@ -62,7 +67,7 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 **Verified by** TC-002, TC-003
 
 ### TASK-003 Settings store
-**Traces** FR-020, FR-023, FR-024, FR-025, FR-029, FR-030, FR-031, FR-032, FR-033
+**Traces** FR-020, FR-023, FR-024, FR-025, FR-029, FR-030, FR-031, FR-032, FR-033, FR-035, FR-036
 **Depends on** TASK-002
 **Acceptance criteria**
 - Every field and default from `Settings` in `02-architecture.md` section 2.1 is
@@ -75,10 +80,12 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
   version 0.
 - Out-of-range values are clamped, not rejected: `overlayOpacity` to 0.30-1.00,
   `overlayFontSizePx` to 16-32, `turnEndGapMs` to 500-1500.
-**Verified by** TC-030, TC-031, TC-032, TC-033
+- `main.log` rotates at 5 MB keeping 3 files. At most 3
+  `settings.corrupt-*.json` files are kept, oldest deleted first.
+**Verified by** TC-030, TC-031, TC-032, TC-033, TC-147
 
 ### TASK-004 Secret vault
-**Traces** FR-021, FR-022, FR-026, NFR-003
+**Traces** FR-021, FR-022, FR-026, FR-034, NFR-003
 **Depends on** TASK-002
 **Acceptance criteria**
 - Keys are encrypted with `safeStorage.encryptString` and written to
@@ -88,14 +95,16 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 - `secrets:status` (CH-104) returns booleans only. Grep across the codebase
   finds no channel whose response type can carry a key string.
 - A redaction helper masks any value matching a known key shape in log output
-  and in serialized `Error` objects. It is applied at the logger, not at call
-  sites.
+  and in serialized `Error` objects. It is applied at the logger and the error
+  serializer, and nowhere else. The IPC router does not redact. A test proves a
+  key leaked from a health-probe error, which never crosses IPC, is still masked
+  (FR-034).
 - `secrets:set` validates the key live before saving. A failed validation saves
   nothing and returns the provider's reason.
-**Verified by** TC-020, TC-021, TC-022, TC-023, TC-024, TC-025
+**Verified by** TC-020, TC-021, TC-022, TC-023, TC-024, TC-025, TC-139
 
 ### TASK-005 Window orchestrator and content protection
-**Traces** FR-002, FR-005, FR-080, FR-081, FR-082, FR-083, NFR-012
+**Traces** FR-002, FR-005, FR-009, FR-080, FR-081, FR-082, FR-083, FR-089, NFR-012
 **Depends on** TASK-003
 **Acceptance criteria**
 - Dashboard window: resizable, standard frame, follows `theme.mode`.
@@ -110,7 +119,16 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
   notice that the overlay renders as a black rectangle in captures.
 - A single-instance lock is held. A second launch focuses the existing
   Dashboard.
-**Verified by** TC-004, TC-005, TC-009, TC-036
+- Acrylic uses Electron `backgroundMaterial: 'acrylic'` with
+  `transparent: false`. Flat opacity uses `transparent: true`. Changing the mode
+  destroys and recreates the overlay, preserving position, monitor,
+  click-through state and the card stack. Changing opacity alone applies live.
+  On Windows 10 acrylic is disabled with a note (FR-089).
+- A Reset Overlay action returns the overlay to the primary monitor default
+  position, sets interactive mode and re-registers both hotkeys (FR-009).
+- The pre-19041 capture warning shows once per session alongside the consent
+  reminder, not once per install (NFR-012).
+**Verified by** TC-004, TC-005, TC-009, TC-036, TC-142, TC-148
 
 ### TASK-006 Hotkey manager
 **Traces** FR-030, FR-053, FR-084
@@ -135,6 +153,9 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
   audio `MediaStream` in a hidden renderer on both Windows 10 and Windows 11.
 - The result is written into `docs/00-decision-log.md` as a confirmation note,
   or as a new ADR selecting the replacement approach if it fails.
+- If the package fails, the fallback is already designed in ADR-005 and is
+  selected here rather than invented. No new ADR is required, only a note
+  recording which of the three paths was chosen.
 - This task gates TASK-011. Do not start TASK-011 before it closes.
 **Verified by** MW-02
 
@@ -158,7 +179,7 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 - Unexpected stream end retries 3 times before surfacing an error badge.
 - `session:stop` destroys both contexts, stops all tracks and closes the worker
   window. No `AudioContext` remains after stop.
-**Verified by** TC-040, TC-041, TC-042, TC-043, TC-044, TC-045
+**Verified by** TC-040, TC-041, TC-042, TC-043, TC-044, TC-045, TC-136
 
 ### TASK-012 STT interface and Deepgram adapter
 **Traces** FR-047, FR-048, FR-100
@@ -174,7 +195,7 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 **Verified by** TC-050, TC-051, TC-052, TC-053, TC-054
 
 ### TASK-013 Whisper adapter, degraded mode
-**Traces** FR-047, FR-049, ADR-008
+**Traces** FR-047, FR-049, NFR-017, ADR-008
 **Depends on** TASK-012
 **Acceptance criteria**
 - Buffers 4000 ms of PCM, wraps it in a valid WAV container and posts one
@@ -183,14 +204,24 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 - `supportsInterim` and `supportsEndpointing` are both `false`, and the trigger
   reads those flags rather than checking the provider ID.
 - When Whisper is the active STT provider the Dashboard shows an informational
-  badge naming the accuracy and latency penalty.
-**Verified by** TC-055, TC-056, TC-057
+  badge naming the accuracy penalty and the latency penalty, quoting the
+  `NFR-017` budget rather than `NFR-001`.
+- The WAV header is written by hand in `src/main/ai/stt/wav.ts`. The body is
+  built in memory. No file stream and no path is ever passed to the HTTP client
+  (ADR-019).
+**Verified by** TC-055, TC-056, TC-057, TC-150
 
 ### TASK-014 Provider health and failover
-**Traces** FR-100, FR-104, ADR-009, ADR-010
+**Traces** FR-100, FR-104, ADR-009, ADR-010, ADR-017
 **Depends on** TASK-012
 **Acceptance criteria**
-- One shared implementation serves both the STT and the LLM capability.
+- One shared implementation serves both the STT and the LLM capability, keyed by
+  credential (`deepgram`, `openai`, `anthropic`), not by capability. One probe
+  timer per credential (ADR-017).
+- A rejected OpenAI key produces one Dashboard badge naming every affected
+  capability, not one badge per capability.
+- An STT switch-back lands on a turn boundary with no audio in flight. It never
+  closes the socket mid-utterance.
 - Errors classify to `auth`, `rate-limit`, `network`, `timeout`, `server`,
   `client`. `auth` and `client` are `retryable: false`.
 - Retry backoff is 250, 500, 1000 ms with up to 20 percent jitter, 3 attempts.
@@ -201,7 +232,7 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 - With no backup configured the state is `DEGRADED`, retries continue with
   backoff capped at 10 s, and the overlay is never touched.
 - `CH-202 state:providers` reflects every transition.
-**Verified by** TC-100, TC-101, TC-102, TC-103
+**Verified by** TC-100, TC-101, TC-102, TC-103, TC-143, TC-144
 
 ---
 
@@ -255,7 +286,7 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 **Verified by** TC-068, TC-069, TC-070, TC-071
 
 ### TASK-023 Auto-tagging and user override
-**Traces** FR-064
+**Traces** FR-064, FR-079
 **Depends on** TASK-020
 **Acceptance criteria**
 - Guesses `resume`, `company-notes` or `job-description` from filename and
@@ -263,7 +294,9 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 - A user override sets `docTypeSource: 'user'`. Re-import or a file change never
   overwrites a user override.
 - An override updates chunk metadata in place without re-embedding.
-**Verified by** TC-072, TC-073, TC-074
+- An override can be reset to `auto`, which re-runs the guess.
+- A document in `error` retries from the Dashboard without re-import (FR-079).
+**Verified by** TC-072, TC-073, TC-074, TC-149
 
 ### TASK-024 Retrieval
 **Traces** FR-065, ASM-006
@@ -278,7 +311,7 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 **Verified by** TC-075, TC-076, TC-077, TC-078
 
 ### TASK-025 Knowledge base watcher
-**Traces** FR-068
+**Traces** FR-068, FR-077, FR-078
 **Depends on** TASK-022
 **Acceptance criteria**
 - `chokidar` watches each profile's `kb/` folder with a 500 ms stability debounce.
@@ -287,7 +320,13 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
   settling.
 - A delete removes the document record, its chunks and its vectors.
 - Rapid successive writes to one file cause exactly one re-embed.
-**Verified by** TC-079
+- A file that appears in `kb/` outside `doc:import` is adopted: a record is
+  created, auto-tagged and embedded, and it appears in the Dashboard (FR-077).
+- A startup reconciliation pass runs before the watcher and resets any document
+  in `pending`, `converting` or `embedding` to `pending` (FR-078).
+- `chunks.json` and `vectors.bin` are written write-to-temp then rename. A row
+  count mismatch at load discards both and re-embeds (FR-078).
+**Verified by** TC-079, TC-140, TC-141
 
 ---
 
@@ -352,7 +391,7 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 ## Milestone 4 — Sessions, cost, UI
 
 ### TASK-040 Session manager and transcript
-**Traces** FR-088, FR-101, FR-105, ADR-003, ADR-013
+**Traces** FR-088, FR-101, FR-105, FR-106, FR-107, FR-108, ADR-003, ADR-013, ADR-018
 **Depends on** TASK-011, TASK-032
 **Acceptance criteria**
 - `session:start` refuses when a session is active, when no profile is active,
@@ -368,10 +407,20 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
   `endReason: 'crash-recovered'` and appears in Session History.
 - No audio byte is ever passed to the session writer. The writer's input type
   cannot express one.
-**Verified by** TC-104, TC-105, TC-106, TC-107
+- The Session Manager is the only component holding a session file handle. The
+  Cost Meter hands usage over in memory (FR-106).
+- Every entry carries a monotonic `seq` assigned at append time. A cancelled
+  generation is appended, carrying the bullets already flushed, before the
+  replacing generation's entry. The LLM layer awaits that append (FR-106).
+- Each entry is one `write()` of one complete line. Compaction discards an
+  unparseable final line and keeps the rest. When a `.json` and a `.ndjson`
+  both exist, the `.json` wins (FR-107).
+- A `session.lock` file enforces one session across restarts and a stale lock is
+  cleared by the recovery pass (FR-108).
+**Verified by** TC-104, TC-105, TC-106, TC-107, TC-134, TC-135
 
 ### TASK-041 Cost meter
-**Traces** FR-103, ASM-011
+**Traces** FR-103, FR-109, ASM-011
 **Depends on** TASK-040
 **Acceptance criteria**
 - Accumulates STT audio seconds per stream and LLM input and output tokens from
@@ -383,7 +432,11 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 - Each threshold warns exactly once per session. Crossing back and forth does
   not re-warn.
 - No code path stops a session because of cost or time.
-**Verified by** TC-108, TC-109
+- Warnings are edge-triggered upward only. An estimate that decreases after a
+  cancelled generation and crosses again does not warn twice (FR-109).
+- The Cost Meter never writes to disk. It hands usage to the Session Manager
+  (ADR-018).
+**Verified by** TC-108, TC-109, TC-145
 
 ### TASK-042 Dashboard UI
 **Traces** FR-023, FR-024, FR-025, FR-026, FR-027, FR-028, FR-029, FR-030, FR-031, FR-032, FR-080, FR-087, FR-088, NFR-010, NFR-014
@@ -409,9 +462,12 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 **Verified by** TC-120, TC-121, TC-122, TC-123, TC-124, TC-125
 
 ### TASK-043 Overlay UI
-**Traces** FR-006, FR-007, FR-076, FR-085, FR-090, FR-091, FR-092, FR-093, FR-094, FR-102, NFR-007, NFR-010
+**Traces** FR-006, FR-007, FR-008, FR-076, FR-085, FR-090, FR-091, FR-092, FR-093, FR-094, FR-102, NFR-007, NFR-010
 **Depends on** TASK-032, TASK-005
 **Acceptance criteria**
+- The renderer sends `overlay:ready` after mounting and rendering the consent
+  reminder. The main process buffers suggestion messages until it arrives and
+  drops nothing (FR-008).
 - Idle card shows the standing-by message before the first suggestion and
   whenever paused.
 - The consent reminder renders before the first suggestion of every session, is
@@ -430,14 +486,14 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 - Extended silence keeps the idle card visible and is never rendered as an
   error or a warning (FR-102).
 - No error state exists in the overlay component tree.
-**Verified by** TC-006, TC-110, TC-111, TC-112, TC-113, TC-114, TC-115, TC-116, TC-117
+**Verified by** TC-006, TC-110, TC-111, TC-112, TC-113, TC-114, TC-115, TC-116, TC-117, TC-138
 
 ---
 
 ## Milestone 5 — Hardening and release
 
 ### TASK-050 Global resilience
-**Traces** NFR-001, NFR-004, NFR-005, NFR-008, NFR-009
+**Traces** NFR-001, NFR-002, NFR-004, NFR-005, NFR-008, NFR-009
 **Depends on** all of Milestone 4
 **Acceptance criteria**
 - `process.on('uncaughtException')` and `process.on('unhandledRejection')` in
@@ -445,12 +501,15 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
   asserts the session stays active.
 - A 60-minute soak test with synthetic transcript events keeps main-process RSS
   under 600 MB with no upward trend over the last 30 minutes.
+- A filesystem write monitor runs a synthetic session with Whisper active and
+  asserts no write contains PCM. The app-owned temp directory is empty at
+  session end (NFR-002, ADR-019).
 - With the network disabled the app starts, manages profiles, imports documents
   and embeds. Session start warns that transcription is unavailable.
 - App-side overhead on the turn-end to first-line path is under 150 ms with
   scripted fakes (TC-133). The end-to-end `NFR-001` budget (p50 under 2.5 s,
   p95 under 4.0 s) is measured and recorded by MW-06 before release.
-**Verified by** TC-130, TC-131, TC-132, TC-133, MW-06
+**Verified by** TC-130, TC-131, TC-132, TC-133, TC-137, MW-06
 
 ### TASK-051 Release pipeline
 **Traces** NFR-011, NFR-013, NFR-015
@@ -463,5 +522,7 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 - The installer is reproducible from a clean checkout with one documented
   command.
 - The release checklist in `04-test-strategy.md` section 6 is executed and
-  recorded before a tag is cut.
-**Verified by** TC-001, MW-01 to MW-10
+  recorded before a tag is cut. Any single failure blocks the tag, MW-06 and
+  MW-11 latency numbers included. MW-12 confirms a documented limitation and
+  cannot fail the release.
+**Verified by** TC-001, MW-01 to MW-12

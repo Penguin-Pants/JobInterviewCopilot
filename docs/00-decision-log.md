@@ -112,6 +112,25 @@ streams, tracks stream health, and re-emits tagged chunks to the STT layer.
 (hidden renderer worker). The Audio Worker is never shown, has `show: false`,
 `skipTaskbar: true`, and is excluded from capture as a precaution.
 
+**Named fallback, decided now rather than mid-build.** `electron-audio-loopback`
+is the highest-risk dependency in the project and the whole product depends on
+it. If the `TASK-010` spike fails, the replacement is fixed in advance so the
+schedule does not fork:
+
+1. **First fallback.** `navigator.mediaDevices.getUserMedia` with
+   `audio: { mandatory: { chromeMediaSource: 'desktop' } }`, driven by a
+   `desktopCapturer` source id obtained in main and passed to the Audio Worker,
+   with `session.setDisplayMediaRequestHandler(..., { audio: 'loopback' })`.
+   This is the same Chromium loopback path the package wraps, without the
+   package.
+2. **Second fallback.** Ask the user to install a virtual audio cable and select
+   it as the interviewer input device. This degrades setup, not function.
+
+Both fallbacks sit behind the same one-function seam,
+`getLoopbackStream(): Promise<MediaStream>` in
+`src/renderer/audio-worker/loopback.ts`. No other file changes. `TASK-010`
+selects among the three and records which one, and no further ADR is needed.
+
 ### ADR-006 — Resample by forcing the AudioContext sample rate
 
 **Decision.** Each stream gets its own `AudioContext({ sampleRate: 16000 })`.
@@ -188,6 +207,194 @@ while one is active is rejected. The session is bound to exactly one company
 profile, captured at session start. Switching the active profile during a live
 session is disabled in the Dashboard.
 
+### ADR-014 — The knowledge base folder is authoritative, and RAG state is reconciled at startup
+
+**Context.** `profile.json` embeds `documents: DocumentRecord[]`, while the
+watcher operates on the `kb/` folder. The two can disagree: a user drops a file
+into `kb/` through Explorer, or the app is killed while a document is in
+`converting` or `embedding`. Neither case had an owner.
+
+**Decision.**
+- The `kb/` folder is the source of truth for which documents exist.
+  `profile.json` is a derived index, rebuilt from the folder when they disagree.
+- A file that appears in `kb/` without going through `doc:import` is adopted:
+  the watcher creates a `DocumentRecord` for it, auto-tags it and embeds it. It
+  appears in the Dashboard like any imported document. There are no orphan files.
+- A `DocumentRecord` whose entry disappears from `kb/` is removed, along with its
+  chunks and vectors.
+- On startup a reconciliation pass runs before the watcher starts. Any document
+  found in a non-terminal state (`pending`, `converting`, `embedding`) is reset
+  to `pending` and re-processed. A document cannot be stuck forever.
+- `chunks.json` and `vectors.bin` are written as a pair through a write-to-temp
+  then rename sequence. A mismatch between `chunkCount` and the vector row count
+  at load time discards both and re-embeds.
+
+**Reason.** Sessions already had a crash-recovery story. Documents did not, and a
+candidate restarting after a crash needs their notes to work immediately.
+
+### ADR-015 — Acrylic is Electron's native `backgroundMaterial`, and switching modes recreates the overlay
+
+**Context.** `overlayTranslucency: 'acrylic' | 'opacity'` was a user-facing
+setting with no named implementation anywhere. "A native Windows blur module" is
+a hedge, not a decision.
+
+**Decision.** Acrylic uses Electron's built-in
+`BrowserWindow({ backgroundMaterial: 'acrylic' })`. No third-party native module
+is added.
+
+**Consequences, and they are not small.**
+- `backgroundMaterial` and `transparent: true` are mutually exclusive in
+  Electron. The acrylic overlay is built with `transparent: false` and the
+  flat-opacity overlay with `transparent: true`. The two modes are therefore two
+  different window constructions.
+- Changing the translucency mode destroys and recreates the overlay window,
+  preserving position, monitor, click-through state and the current card stack.
+  Changing the opacity level alone applies live with no recreation. `FR-085`
+  ("applies without a restart") means without restarting the application. It does
+  not promise without recreating the window.
+- `backgroundMaterial: 'acrylic'` needs Windows 11. On Windows 10 the setting is
+  disabled in the Dashboard with an explanatory note, and the overlay uses flat
+  opacity.
+- CSS `backdrop-filter` is explicitly rejected as a substitute. It is not the
+  same effect and it behaves differently on a transparent, content-protected
+  window.
+
+### ADR-016 — Suggestions are gated on overlay readiness
+
+**Context.** `session:start` brings up the overlay, the audio pipeline and the
+STT connections in parallel. If the interviewer speaks immediately and the
+overlay renderer has not finished its first paint, a suggestion could be
+generated with nowhere to go, and the consent reminder could lose the race it is
+required to win.
+
+**Decision.** The overlay renderer sends `overlay:ready` once it has mounted and
+rendered the consent reminder. Until the main process has received it,
+`suggestion:begin`, `suggestion:line` and `suggestion:end` are buffered in the
+main process, not dropped. The buffer holds one generation. If a second
+generation starts while still buffered, the first is discarded, matching the
+cancel-and-restart rule in `FR-054`.
+
+**Reason.** "The consent reminder was shown" must be a fact the main process can
+assert, not a DOM ordering that happens to hold. Buffering makes it structural.
+
+### ADR-017 — Health state is keyed by credential, not by capability
+
+**Context.** One OpenAI key serves both Whisper STT and GPT LLM. Two independent
+health state machines watching the same credential would probe it twice, fail
+over at different moments and recover at different moments.
+
+**Decision.** `CMP-12` keys its state by credential (`deepgram`, `openai`,
+`anthropic`), not by capability (`stt`, `llm`). An `auth` failure on the OpenAI
+key marks that credential unhealthy for every capability using it, immediately
+and once. There is one probe timer per credential.
+
+**Consequence for the Dashboard.** The status badge is rendered per credential,
+not per capability, and names which capabilities it affects. A revoked OpenAI key
+produces one badge reading "OpenAI key rejected, affects STT backup and LLM
+primary", not two unrelated badges the user has to correlate.
+
+### ADR-018 — The Session Manager is the only writer of the session file
+
+**Context.** Two problems found in review. First, `CMP-09` recomputes spend into
+`Session.usage` while `CMP-08` appends transcript entries, and both appeared to
+write the same file. Second, a cancelled generation and the next generation could
+interleave, so the transcript order would not match what happened.
+
+**Decision.**
+- `CMP-08` is the only component that opens, writes or closes a session file.
+  `CMP-09` holds usage in memory and hands it to `CMP-08`. `CMP-09` has no file
+  handle.
+- Every `TranscriptEntry` carries a monotonic `seq` assigned by `CMP-08` at
+  append time. Order is the `seq` order, not the file order.
+- A cancelled generation is appended as a `status: 'cancelled'` entry carrying
+  the bullets already flushed, and that append happens before the entry for the
+  replacing generation is appended. `CMP-07` awaits the cancel append before it
+  starts the new stream. The cancel path is therefore serialized by construction,
+  not by timing.
+- Each entry is written as one `write()` of one complete line ending in `\n`.
+  A crash can lose a line, it cannot tear one.
+- Compaction tolerates a torn final line: an unparseable last line is discarded
+  and the rest is recovered. A crash between compaction and the `.ndjson` delete
+  leaves both files. The `.json` wins and the `.ndjson` is deleted.
+
+### ADR-019 — The audio-on-disk guarantee is scoped to code this project controls
+
+**Context.** `NFR-002` claimed "no code path may write audio bytes to disk", but
+the verification was an ESLint import ban over two files. PCM leaves those files
+and enters `@deepgram/sdk` and `openai`, and the Whisper adapter builds a
+multipart body that an HTTP client could spool to a temp file.
+
+**Decision.** The guarantee is stated honestly and verified dynamically.
+- This project's own code never writes audio bytes to disk. Enforced by the lint
+  ban, and by an integration test that monitors every `fs` write during a
+  synthetic session and asserts no write contains PCM.
+- Third-party spooling is handled rather than assumed away. The Whisper adapter
+  builds the request body in memory and sets an explicit in-memory body, never a
+  file stream or a path. The test above runs with Whisper active, so a spool to
+  a temp file would be caught.
+- The app sets `TMPDIR` and `TEMP` for its own child processes to a directory it
+  owns and asserts it is empty at session end.
+
+**Reason.** A guarantee this central must be provable, not asserted. Saying "our
+code" and proving it beats saying "no code path" and proving less.
+
+### ADR-020 — Whisper-primary has its own, worse, latency budget
+
+**Context.** `NFR-001` is measured with Deepgram. Whisper-primary is a supported
+configuration that buffers 4 seconds per request and has no interim results, so
+`NFR-001` cannot apply to it. A supported configuration with no stated latency
+target is a configuration nobody can fail a release on.
+
+**Decision.** `NFR-017` sets the Whisper-primary budget at p50 under 7.0 s and
+p95 under 10.0 s. The Dashboard degraded-mode badge states the latency cost in
+plain words, not only the accuracy cost.
+
+### ADR-021 — Loopback captures all system audio, and that is a documented limitation
+
+**Context.** WASAPI loopback captures everything the machine plays, not only the
+interviewer. Music, notifications and a second call all land on the
+`interviewer` stream and are transcribed as if the interviewer said them.
+
+**Decision.** This is inherent to loopback and is not engineered around in v1.
+- The app does not attempt per-application audio capture.
+- The consent reminder step also shows a one-line session-prep note advising the
+  user to close other audio sources.
+- The `interviewer` label in Session History reads "system audio", so a
+  transcript never claims a notification chime was the interviewer.
+- Per-process loopback capture (`ActivateAudioInterfaceAsync` with a process
+  loopback mode) is recorded as the v2 fix. Do not build it into v1.
+
+---
+
+## 3a. Open questions for the product owner
+
+These are not engineering choices. Each needs a decision before or during build.
+The current behavior is stated so the build is not blocked.
+
+### OQ-001 — Transcript encryption at rest
+
+Session transcripts contain verbatim interview content: names, employers,
+compensation talk, sometimes health or personal disclosures. Today they are
+plaintext JSON under `userData`, retained forever by default (`ASM-012`). API
+keys get `safeStorage`. The more sensitive user data does not.
+
+**Current behavior:** plaintext, indefinite retention.
+**Options:** encrypt transcripts with `safeStorage` as well, add a retention
+window, or accept plaintext and say so plainly in the Dashboard.
+
+### OQ-002 — Whether Whisper may be an STT primary at all
+
+Whisper-primary is a real-time coaching tool running at a 7 to 10 second budget
+(`ADR-020`). That may not be a product worth shipping.
+
+**Current behavior:** supported, badged, with its own budget.
+**Options:** keep it, demote it to backup-only, or drop Whisper entirely and
+require Deepgram.
+
+---
+
+## 4. Assumption register
+
 ---
 
 ## 4. Assumption register
@@ -208,7 +415,7 @@ specified but can be changed cheaply before build starts.
 | ASM-009 | Candidate context window is the last 2 candidate turns, capped at 400 characters | `FR-052` | Low |
 | ASM-010 | Overlay holds 3 suggestion cards, oldest fades out on the 4th | `FR-091` | Low |
 | ASM-011 | Cost estimates use a hard-coded price table shipped with the app, versioned and shown with an "estimate" label | `FR-103` | Medium, needs a table per provider |
-| ASM-012 | Session History retains transcripts indefinitely until the user deletes them. No auto-purge, no size cap | `FR-101` | Medium, adds retention UI |
+| ASM-012 | Session History retains transcripts indefinitely until the user deletes them. No auto-purge, no size cap, and the files are plaintext JSON. Transcripts are the most sensitive user data in the product and get less protection than the API keys. Escalated to **OQ-001** | `FR-101` | Medium, adds retention UI. High if encryption at rest is added |
 | ASM-013 | The app ships unsigned for v1. Code signing is a release-engineering follow-up | `NFR-013` | High, needs a certificate |
 | ASM-014 | English only. No localization layer in v1 | `NFR-014` | High |
 
@@ -229,3 +436,5 @@ Carried forward from product discovery. Do not add without a new decision.
 - No automatic session start from calendar or meeting detection.
 - No multi-user or team features.
 - No hard cost cutoff. The threshold produces a warning only. (`FR-103`)
+- No per-application audio capture. Loopback takes all system audio. (ADR-021)
+- No transcript encryption at rest, pending **OQ-001**.

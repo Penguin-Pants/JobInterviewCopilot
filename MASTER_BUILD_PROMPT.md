@@ -4,7 +4,9 @@
 > specification. The implementation baseline is `docs/`, starting with
 > `docs/00-decision-log.md`. Where this file and `docs/` disagree, `docs/` wins.
 > Three contradictions in the original brief were resolved on 2026-09-15 and the
-> text below has been corrected to match. See ADR-001 and ADR-003.
+> text below has been corrected to match (ADR-001, ADR-003). A fourth divergence,
+> found in review, is corrected in section 3: audio capture cannot run in the
+> main process (ADR-005).
 ## 0. Product Summary
 
 Interview CoPilot is a native Windows desktop app. It gives a job candidate real-time, glanceable prompts during a live video interview, pulled from the candidate's own resume, company and job research and other notes. The primary goal is accessibility support, for example ADHD or memory recall under stress, not scripted deception.
@@ -32,13 +34,15 @@ Interview CoPilot is a native Windows desktop app. It gives a job candidate real
 - Cost and time thresholds for the session usage warning.
 - Editable consent reminder text template.
 
-## 3. Windows Dual-Stream Audio Capture — `/src/main/audio.ts`
+## 3. Windows Dual-Stream Audio Capture — `/src/main/audio.ts` and a hidden renderer
 This diverges from the original draft: capture two independent streams, never mixed.
 
-- Interviewer stream: WASAPI loopback via `electron-audio-loopback`, system audio only.
+**Corrected (ADR-005).** Neither WASAPI loopback nor `getUserMedia` is reachable from the Electron main process. The capture itself runs in a hidden renderer, the Audio Worker. `/src/main/audio.ts` keeps its name and becomes the supervisor: it creates the worker, starts and stops streams, tracks health and re-emits tagged chunks.
+
+- Interviewer stream: WASAPI loopback via `electron-audio-loopback`, system audio only. This is all system audio, not the interviewer alone. Music and notifications land on this stream too, which is a documented v1 limitation (ADR-021).
 - Candidate stream: local microphone input.
 - Down-sample each stream independently to 16kHz, 16-bit, mono linear PCM.
-- Emit chunks every 1 to 2 seconds per stream, short chunks to support the fast-latency target from section 7. Tag every chunk with its source: `interviewer` or `candidate`.
+- Emit chunks every 1000 ms per stream, fixed (ADR-007), short chunks to support the fast-latency target from section 7. Tag every chunk with its source: `interviewer` or `candidate`.
 - Never write raw audio to disk. Buffers exist in memory only and are discarded once transcribed.
 
 ## 4. Multi-Provider Transcription Pipeline — `/src/main/ai/stt.ts`

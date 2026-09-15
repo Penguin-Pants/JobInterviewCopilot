@@ -51,6 +51,18 @@ interaction with other applications. No setting may disable it. (ADR-002)
 **FR-007** The consent reminder default text must state plainly that a local
 text transcript of the session is kept.
 
+**FR-008** Suggestion delivery must be gated on overlay readiness. The overlay
+renderer sends `overlay:ready` after it has mounted and rendered the consent
+reminder. Until then the main process must buffer `suggestion:begin`,
+`suggestion:line` and `suggestion:end` rather than drop them. The buffer holds
+one generation. A second generation while buffered discards the first, matching
+`FR-054`. (ADR-016)
+
+**FR-009** The Dashboard must provide a Reset Overlay action that returns the
+overlay to the default position on the primary monitor, sets interactive mode and
+re-registers both hotkeys. This is the escape hatch when a click-through overlay
+sits off-screen and the toggle hotkey is unavailable.
+
 ---
 
 ## 3. Configuration (`FR-02n`)
@@ -99,6 +111,18 @@ session time threshold in minutes.
 
 **FR-032** The consent reminder text template must be editable in the Dashboard.
 Resetting to the shipped default must be possible in one action.
+
+**FR-034** Secret redaction must have exactly one implementation, applied inside
+the logger and inside the error serializer. No other layer may redact, and no
+layer that produces log output may bypass it. A key that reaches a log line from
+a path that never crosses IPC, for example a health probe error, must still be
+masked. (NFR-003)
+
+**FR-035** `logs/main.log` must rotate at 5 MB, keeping 3 files. Older files are
+deleted.
+
+**FR-036** At most 3 `settings.corrupt-*.json` files are kept. The oldest is
+deleted when a fourth is created.
 
 **FR-033** Settings must be validated against a schema on load. An invalid or
 corrupt settings file must be replaced with defaults, and the corrupt file
@@ -216,6 +240,23 @@ query results within 5 seconds of the file system settling.
 must delete its documents, its chunks, its cached embeddings and its session
 history, after an explicit confirmation naming what will be deleted.
 
+**FR-077** The `kb/` folder is authoritative for which documents exist.
+`profile.json` is a derived index. A file that appears in `kb/` without going
+through `doc:import` must be adopted: a `DocumentRecord` is created, auto-tagged
+and embedded, and it appears in the Dashboard. A file removed from `kb/` must
+remove its record, chunks and vectors. There must be no orphan files and no
+records without files. (ADR-014)
+
+**FR-078** A reconciliation pass must run at startup, before the watcher starts.
+Any document in `pending`, `converting` or `embedding` is reset to `pending` and
+re-processed. `chunks.json` and `vectors.bin` must be written as a pair through
+write-to-temp then rename. A mismatch between `chunkCount` and the vector row
+count at load must discard both and re-embed. (ADR-014)
+
+**FR-079** A document in `error` must be retryable from the Dashboard without
+re-import. A user doc-type override must be resettable to `auto`, which
+re-runs the guess.
+
 ---
 
 ## 8. LLM suggestions (`FR-07n`)
@@ -279,6 +320,16 @@ Profiles, Session History, Hotkeys, Cost and Usage, Consent Reminder.
 control. A session must never start implicitly. Only one session may be active.
 (ADR-013)
 
+**FR-089** Acrylic translucency must use Electron's built-in
+`backgroundMaterial: 'acrylic'`. No third-party native blur module may be added.
+Because `backgroundMaterial` and `transparent: true` are mutually exclusive, the
+two translucency modes are two different window constructions, and changing the
+mode must destroy and recreate the overlay window, preserving position, monitor,
+click-through state and the current card stack. Changing the opacity level alone
+must apply live with no recreation. On Windows 10 the acrylic option must be
+disabled in the Dashboard with an explanatory note. CSS `backdrop-filter` must
+not be used as a substitute. (ADR-015)
+
 ---
 
 ## 10. Overlay UX (`FR-09n`)
@@ -329,6 +380,25 @@ handled as a provider failure per `FR-100`, not as a configuration error.
 transcript recoverable up to the last flushed entry. Transcript entries must be
 appended to disk within 2 seconds of being produced, not held until session end.
 
+**FR-106** The Session Manager must be the only writer of a session file. The
+Cost Meter holds usage in memory and hands it over. Every `TranscriptEntry`
+carries a monotonic `seq` assigned at append time. A cancelled generation must be
+appended, carrying the bullets already flushed, before the entry for the
+replacing generation is appended. (ADR-018)
+
+**FR-107** Each transcript entry must be written as one call of one complete line
+ending in a newline. Compaction must discard an unparseable final line and
+recover the rest. When both a `.json` and a `.ndjson` exist for one session, the
+`.json` wins and the `.ndjson` is deleted. (ADR-018)
+
+**FR-108** A session lock file must prevent a second session across process
+restarts. A stale lock from a crashed process must be detected and cleared during
+crash recovery, not left to block the next session.
+
+**FR-109** The cost and time warnings are edge-triggered upward only. Once a
+threshold has warned, it never re-arms for that session, including when the
+estimate decreases after a cancelled generation. (`FR-103`)
+
 ---
 
 ## 12. Non-functional requirements
@@ -337,9 +407,13 @@ appended to disk within 2 seconds of being produced, not held until session end.
 in the overlay, the p50 must be under 2.5 seconds and the p95 under 4.0 seconds,
 measured with Deepgram STT and a Haiku-class model on a 25 Mbit/s connection.
 
-**NFR-002** *(Audio privacy)* No code path may write audio bytes to disk. This
-is verified by a test that asserts no file write occurs in the audio pipeline and
-by a code review checklist item.
+**NFR-002** *(Audio privacy)* No code in this project may write audio bytes to
+disk. Enforced three ways: an ESLint ban on filesystem imports in the audio path,
+an integration test that monitors every filesystem write during a synthetic
+session and asserts none contains PCM, and an assertion that the app's own
+temporary directory is empty at session end. The Whisper adapter must build its
+request body in memory and must never pass a file stream or a path, so a
+third-party spool to a temp file is caught by the same test. (ADR-019)
 
 **NFR-003** *(Secret handling)* No API key may appear in a log line, a crash
 report, an IPC payload to a renderer, or the settings JSON. Secrets must be
@@ -375,13 +449,26 @@ overlay reveal.
 
 **NFR-012** *(Capture exclusion fidelity)* True capture exclusion requires
 Windows 10 build 19041 (version 2004) or later. On older builds the app must
-detect the build number at startup and warn once that the overlay will appear as
-a black rectangle in screen shares rather than being invisible.
+detect the build number at startup and warn **once per session**, alongside the
+consent reminder, that the overlay will appear as a black rectangle in screen
+shares rather than being invisible. A once-per-install warning is not enough: a
+user who dismisses it on first launch must not be surprised months later.
 
 **NFR-013** *(Signing)* v1 ships unsigned. The installer must be reproducible
 from a clean checkout with one documented command. (ASM-013)
 
 **NFR-014** *(Language)* English only. (ASM-014)
+
+**NFR-016** *(Vendored components)* Code copied into the repository rather than
+installed, Magic UI in particular, is invisible to the npm license check. Every
+vendored component must be listed in `VENDORED.md` with its source URL, the
+commit or version copied, and its license. CI must fail when a file under
+`src/renderer/**/vendor/` is not covered by an entry.
+
+**NFR-017** *(Whisper-primary latency)* With Whisper as the STT primary, turn end
+to first bullet must be p50 under 7.0 s and p95 under 10.0 s. `NFR-001` does not
+apply to this configuration. The Dashboard degraded-mode badge must state the
+latency cost, not only the accuracy cost. (ADR-020)
 
 **NFR-015** *(Licensing)* Every runtime dependency must carry an MIT, Apache-2.0,
 BSD or ISC license. A license check must run in CI and must fail the build on a
