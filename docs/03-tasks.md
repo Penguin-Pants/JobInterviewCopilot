@@ -36,13 +36,25 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 98 unit and integration tests, and `npm run build` all pass. Line coverage is
 93.6 percent against an 80 percent floor.
 
-Two acceptance criteria could not be verified in the development container and
-are verified in CI instead, not waived:
+Two acceptance criteria could not be verified in the development container.
+Both are now **verified green on the Windows CI runner**, so neither is
+outstanding:
 
-| Criterion | Why not here | Where it runs |
+| Criterion | Why not here | Verified |
 |---|---|---|
-| `npm run package` produces a Windows x64 installer | Wine is not installed in the Linux container, so electron-builder cannot emit NSIS | The `package` job on `windows-latest` |
-| The five E2E cases (TC-005, TC-007, TC-008, TC-009, TC-148) | They assert window flags, capture protection and single-instance focus, none of which mean anything off Windows. The suite skips rather than passing vacuously | The `e2e` job on `windows-latest` |
+| `npm run package` produces a Windows x64 installer | Wine is not installed in the Linux container, so electron-builder cannot emit NSIS | `package` job on `windows-latest`, green |
+| The five E2E cases (TC-005, TC-007, TC-008, TC-009, TC-148) | They assert window flags, capture protection and single-instance focus, none of which mean anything off Windows. The suite skips rather than passing vacuously | `e2e` job on `windows-latest`, all five green |
+
+Three questions left open during implementation were answered by those runs:
+- The content security policy does not break the packaged app. The renderer
+  loads and the Dashboard renders under `file://` in Electron with the meta
+  policy in place, so `'self' file:` is correct.
+- The policy is genuinely enforced. An inline script is blocked and the
+  violation is reported, verified both on the runner and locally by serving the
+  built renderer over HTTP and driving Chromium.
+- Reset Overlay works. It needed the window shown before its bounds were set:
+  Windows can re-apply the placement of a never-shown window when it is finally
+  shown, silently undoing the move.
 
 Deferred out of Milestone 0 by design, each failing loudly rather than silently:
 - Invoke channels for profiles, documents, sessions and `consent:dismiss` are
