@@ -1,4 +1,13 @@
 # Interview CoPilot — Master Build Prompt
+
+> **Status.** This file is the product brief. It is no longer the build
+> specification. The implementation baseline is `docs/`, starting with
+> `docs/00-decision-log.md`. Where this file and `docs/` disagree, `docs/` wins.
+> Three contradictions in the original brief were resolved on 2026-09-15 and the
+> text below has been corrected to match (ADR-001, ADR-003). A fourth divergence,
+> found in review, is corrected in section 3: audio capture cannot run in the
+> main process (ADR-005). Sections 2 and 4 are corrected for the provider
+> registry (ADR-022), which supersedes the two-way STT choice in the original.
 ## 0. Product Summary
 
 Interview CoPilot is a native Windows desktop app. It gives a job candidate real-time, glanceable prompts during a live video interview, pulled from the candidate's own resume, company and job research and other notes. The primary goal is accessibility support, for example ADHD or memory recall under stress, not scripted deception.
@@ -6,7 +15,7 @@ Interview CoPilot is a native Windows desktop app. It gives a job candidate real
 **Hard guardrails. Do not build around these:**
 - The overlay window should be excluded from screen-share or recording capture because it could interfere with the interviewee presenting a presentation, business case etc. Consent has already been given.
 - The app must show a consent reminder before each live session. The interviewer's awareness of the tool is the user's responsibility. The app supports that responsibility, it does not hide from it.
-- Audio is never written to disk. Only text transcripts are persisted, and only because the user chose to keep them.
+- Audio is never written to disk. Only text transcripts are persisted. The user controls retention and can delete any transcript at any time (ADR-003).
 
 ## 1. Tech Stack
 - Electron, TypeScript, React, Tailwind CSS.
@@ -17,8 +26,7 @@ Interview CoPilot is a native Windows desktop app. It gives a job candidate real
 - Use `electron-store` for all non-secret settings.
 - Use Electron `safeStorage` (Windows DPAPI backing) for API keys specifically. Never write raw keys into the electron-store JSON file.
 - Independent provider config, each with a primary and an optional backup:
-  - STT: Deepgram WebSocket or OpenAI Whisper REST. Pick primary and optional backup.
-  - LLM: Anthropic Claude SDK or OpenAI GPT SDK. Pick primary and optional backup.
+  - **Corrected (ADR-022).** STT and LLM are data-driven provider registries. The user picks a provider **and a model** for primary and optional backup. STT ships Deepgram (`nova-3`, `nova-2`), OpenAI (`gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, and `whisper-1` as a labeled non-streaming option) and ElevenLabs (`scribe-v2-realtime`). LLM ships Anthropic and OpenAI. Adding a provider costs one registry entry plus one adapter.
 - Validate each key on entry with a lightweight live test call before saving. Show an inline pass or fail result.
 - Company profiles: each profile stores a name, its own knowledge base documents and its own session history.
 - Theme settings: light, dark or follow-system; accent color; overlay translucency mode (acrylic blur or flat opacity) and opacity level.
@@ -26,18 +34,20 @@ Interview CoPilot is a native Windows desktop app. It gives a job candidate real
 - Cost and time thresholds for the session usage warning.
 - Editable consent reminder text template.
 
-## 3. Windows Dual-Stream Audio Capture — `/src/main/audio.ts`
+## 3. Windows Dual-Stream Audio Capture — `/src/main/audio.ts` and a hidden renderer
 This diverges from the original draft: capture two independent streams, never mixed.
 
-- Interviewer stream: WASAPI loopback via `electron-audio-loopback`, system audio only.
+**Corrected (ADR-005).** Neither WASAPI loopback nor `getUserMedia` is reachable from the Electron main process. The capture itself runs in a hidden renderer, the Audio Worker. `/src/main/audio.ts` keeps its name and becomes the supervisor: it creates the worker, starts and stops streams, tracks health and re-emits tagged chunks.
+
+- Interviewer stream: WASAPI loopback via `electron-audio-loopback`, system audio only. This is all system audio, not the interviewer alone. Music and notifications land on this stream too, which is a documented v1 limitation (ADR-021).
 - Candidate stream: local microphone input.
 - Down-sample each stream independently to 16kHz, 16-bit, mono linear PCM.
-- Emit chunks every 1 to 2 seconds per stream, short chunks to support the fast-latency target from section 7. Tag every chunk with its source: `interviewer` or `candidate`.
+- Emit chunks every 1000 ms per stream, fixed (ADR-007), short chunks to support the fast-latency target from section 7. Tag every chunk with its source: `interviewer` or `candidate`.
 - Never write raw audio to disk. Buffers exist in memory only and are discarded once transcribed.
 
 ## 4. Multi-Provider Transcription Pipeline — `/src/main/ai/stt.ts`
 - One unified STT interface. Instantiate it once per stream (interviewer, candidate), so each stream keeps its own connection and its own partial and final transcript state.
-- Route to Deepgram WebSocket or OpenAI Whisper REST per the active provider config.
+- Route to the adapter named by the active `ProviderChoice` in the registry (ADR-022). Capability flags come from the selected model's registry entry, never from a provider name.
 - On a call failure or timeout: if a backup provider is configured, retry against it automatically and keep going. If no backup is configured, retry the primary in the background and surface a small, quiet status badge in the Dashboard, never an overlay error card.
 - Emit a normalized event for both streams: `{ source: 'interviewer' | 'candidate', text: string, isFinal: boolean, timestamp }`.
 
@@ -81,7 +91,7 @@ Standard window, resizable, follows the light, dark or system theme setting. Sec
 
 ### Teleprompter overlay window
 - `transparent: true`, `frame: false`, `alwaysOnTop: true`, `skipTaskbar: true`.
-- Do not exclude it from screen capture. This is a deliberate omission, see section 0.
+- Excluded from screen capture via `setContentProtection(true)`, applied before the window is first shown and never disabled (ADR-001). The overlay stays visible on the physical display. This protects a shared presentation from being covered, it is not a way to hide the tool from the interviewer. That responsibility sits with the consent reminder.
 - Fixed size, not resizable. The user drags it anywhere, including across monitors. Remember the last position and monitor in `electron-store`.
 - Default to click-through: `win.setIgnoreMouseEvents(true, { forward: true })`.
 - Global hotkey, default `Ctrl+Shift+I`, toggles between click-through mode and movable, interactive mode.
@@ -104,7 +114,6 @@ Standard window, resizable, follows the light, dark or system theme setting. Sec
 
 ## 11. Explicit Non-Goals
 Carried forward from product discovery. Do not add these later without a new, explicit decision:
-- No screen-capture or recording exclusion for the overlay window.
 - No hidden or silently-skippable consent step.
 - No persistent audio recording, of either stream, under any setting.
 
@@ -116,3 +125,6 @@ Flag any of these for a change before this goes to build:
 - Cancel-and-restart behavior when a new question arrives mid-stream.
 - `skipTaskbar: true` on the overlay window. A normal utility-window convention, unrelated to the capture-exclusion guardrail.
 - Doc-type-weighted retrieval deferred to v2. V1 ships as plain similarity search.
+
+The full assumption register, with the cost to change each item, is in
+`docs/00-decision-log.md` section 4.

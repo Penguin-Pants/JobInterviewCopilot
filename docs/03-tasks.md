@@ -1,0 +1,595 @@
+# Interview CoPilot — Implementation Tasks
+
+Version 1.0. Each task is independently reviewable and has binary acceptance
+criteria. `Traces` lists the requirements the task satisfies. `Verified by`
+lists the test cases in `04-test-strategy.md`.
+
+## Global Definition of Done
+
+A task is done only when **all** of these hold. No exceptions, no partial done.
+
+1. Code compiles with `tsc --noEmit`, zero errors, zero `@ts-ignore` added.
+2. `eslint` and `prettier` pass with zero warnings.
+3. Every acceptance criterion in the task is demonstrably met.
+4. Every test case listed under `Verified by` exists, runs in CI and passes.
+5. Unit line coverage for the files the task touches is at least 80 percent.
+   Provider adapters and renderer components are exempt from the number but must
+   still have at least one integration or E2E test.
+6. No new runtime dependency was added without an entry in the dependency table
+   in `02-architecture.md` and a passing license check.
+7. No API key, no audio buffer and no file path outside `userData` appears in
+   any log line produced by the task's code.
+8. Public functions and every exported type carry a TSDoc comment stating the
+   requirement ID they implement.
+9. Any deviation from `01-requirements.md` or `02-architecture.md` is either
+   reverted or landed together with an update to those documents and to
+   `00-decision-log.md` in the same pull request.
+10. The pull request description lists the task ID, the traced requirement IDs
+    and the test case IDs.
+
+---
+
+## Milestone 0 — Foundations
+
+### TASK-001 Project scaffold
+**Traces** FR-001, FR-086, NFR-006, NFR-015, NFR-016
+**Depends on** nothing
+**Acceptance criteria**
+- `npm ci && npm run build && npm run package` produces a Windows x64 installer
+  from a clean checkout.
+- `electron-vite` builds three renderer entry points: dashboard, overlay, audio
+  worker.
+- All `BrowserWindow` instances use `contextIsolation: true`,
+  `nodeIntegration: false`, `sandbox: true`.
+- A CSP without `unsafe-eval` is applied to all renderers. `will-navigate` and
+  `setWindowOpenHandler` both deny.
+- `npm run lint`, `npm run typecheck`, `npm run test`, `npm run licenses` all
+  exist and pass.
+- `VENDORED.md` exists. `npm run licenses` fails when a file under
+  `src/renderer/**/vendor/` has no entry naming its source, version and license
+  (NFR-016).
+- A lint rule forbids deep imports into `src/main/rag/*` from outside
+  `src/main/rag.ts`.
+**Verified by** TC-001, TC-007, TC-008, TC-009, TC-146
+
+### TASK-002 Shared types and IPC contract
+**Traces** FR-086, CMP-10
+**Depends on** TASK-001
+**Acceptance criteria**
+- `src/shared/types.ts` contains every interface from section 2 of
+  `02-architecture.md`, verbatim in shape.
+- `src/shared/ipc.ts` declares every channel ID from section 4 with a `zod`
+  schema for each payload and each response.
+- The IPC router rejects a payload that fails its schema, logs it and returns a
+  typed error. It never forwards it.
+- A compile-time test asserts the renderer bridge and the main handlers share
+  the same types (a type-level test with `expectTypeOf`).
+**Verified by** TC-002, TC-003
+
+### TASK-003 Settings store
+**Traces** FR-020, FR-023, FR-024, FR-025, FR-029, FR-030, FR-031, FR-032, FR-033, FR-035, FR-036
+**Depends on** TASK-002
+**Acceptance criteria**
+- Every field and default from `Settings` in `02-architecture.md` section 2.1 is
+  implemented, with the exact defaults listed there.
+- Loading a corrupt or schema-invalid file replaces it with defaults and renames
+  the original to `settings.corrupt-<epochMillis>.json`. The original is never
+  deleted. The name must be filesystem-safe on Windows: an ISO 8601 timestamp
+  contains colons and the rename would fail at exactly the moment the app is
+  recovering from corruption (FR-033).
+- `schemaVersion` mismatch runs a migration chain. Version 1 is the baseline, so
+  the chain is empty but the mechanism exists and is unit tested with a fake
+  version 0.
+- Out-of-range values are clamped, not rejected: `overlayOpacity` to 0.30-1.00,
+  `overlayFontSizePx` to 16-32, `turnEndGapMs` to 500-1500.
+- `main.log` rotates at 5 MB keeping 3 files. At most 3
+  `settings.corrupt-*.json` files are kept, oldest deleted first.
+**Verified by** TC-030, TC-031, TC-032, TC-033, TC-147
+
+### TASK-004 Secret vault
+**Traces** FR-021, FR-022, FR-026, FR-034, NFR-003
+**Depends on** TASK-002
+**Acceptance criteria**
+- Keys are encrypted with `safeStorage.encryptString` and written to
+  `secrets.bin`, never to `settings.json`.
+- When `safeStorage.isEncryptionAvailable()` is false, `secrets:set` returns an
+  error, nothing is written and no plaintext fallback path exists in the code.
+- `secrets:status` (CH-104) returns booleans only. Grep across the codebase
+  finds no channel whose response type can carry a key string.
+- A redaction helper masks any value matching a known key shape in log output
+  and in serialized `Error` objects. It is applied at the logger and the error
+  serializer, and nowhere else. The IPC router does not redact. A test proves a
+  key leaked from a health-probe error, which never crosses IPC, is still masked
+  (FR-034).
+- `secrets:set` validates the key live before saving. A failed validation saves
+  nothing and returns the provider's reason.
+**Verified by** TC-020, TC-021, TC-022, TC-023, TC-024, TC-025, TC-139
+
+### TASK-005 Window orchestrator and content protection
+**Traces** FR-002, FR-005, FR-009, FR-080, FR-081, FR-082, FR-083, FR-089, NFR-012
+**Depends on** TASK-003
+**Acceptance criteria**
+- Dashboard window: resizable, standard frame, follows `theme.mode`.
+- Overlay window: `transparent`, `frameless`, `alwaysOnTop`, `skipTaskbar`,
+  `resizable: false`, and `setContentProtection(true)` called before `show()`.
+- A static analysis test asserts `setContentProtection(false)` appears nowhere
+  in `src/`.
+- Overlay defaults to `setIgnoreMouseEvents(true, { forward: true })`.
+- Overlay position and `displayId` persist. On relaunch with the stored display
+  absent, the overlay is placed at the default position on the primary display.
+- On Windows build below 19041 the app logs and shows a one-time Dashboard
+  notice that the overlay renders as a black rectangle in captures.
+- A single-instance lock is held. A second launch focuses the existing
+  Dashboard.
+- Acrylic uses Electron `backgroundMaterial: 'acrylic'` with
+  `transparent: false`. Flat opacity uses `transparent: true`. Changing the mode
+  destroys and recreates the overlay, preserving position, monitor,
+  click-through state and the card stack. Changing opacity alone applies live.
+  On Windows 10 acrylic is disabled with a note (FR-089).
+- A Reset Overlay action returns the overlay to the primary monitor default
+  position, sets interactive mode and re-registers both hotkeys (FR-009).
+- The pre-19041 capture warning shows once per session alongside the consent
+  reminder, not once per install (NFR-012).
+**Verified by** TC-004, TC-005, TC-009, TC-036, TC-142, TC-148
+
+### TASK-006 Hotkey manager
+**Traces** FR-030, FR-053, FR-084
+**Depends on** TASK-005
+**Acceptance criteria**
+- Both accelerators register at startup from settings.
+- A rebind that `globalShortcut.register` rejects returns an error, keeps the
+  previous binding active and surfaces an inline Dashboard message.
+- Rebinding takes effect without a restart. The old accelerator is unregistered.
+- All shortcuts are unregistered on `will-quit`.
+**Verified by** TC-034, TC-035
+
+---
+
+## Milestone 1 — Audio and transcription
+
+### TASK-010 Audio Worker spike
+**Traces** FR-040, ADR-005
+**Depends on** TASK-001
+**Acceptance criteria**
+- A throwaway branch proves `electron-audio-loopback` returns a working system
+  audio `MediaStream` in a hidden renderer on both Windows 10 and Windows 11.
+- The result is written into `docs/00-decision-log.md` as a confirmation note,
+  or as a new ADR selecting the replacement approach if it fails.
+- If the package fails, the fallback is already designed in ADR-005 and is
+  selected here rather than invented. No new ADR is required, only a note
+  recording which of the three paths was chosen.
+- This task gates TASK-011. Do not start TASK-011 before it closes.
+**Verified by** MW-02
+
+### TASK-011 Dual-stream capture
+**Traces** FR-040, FR-041, FR-042, FR-043, FR-044, FR-045, FR-046, NFR-002
+**Depends on** TASK-010, TASK-005
+**Acceptance criteria**
+- The hidden Audio Worker window acquires the loopback stream and the mic
+  stream independently. The two are never connected to the same node graph.
+- Each stream uses its own `AudioContext({ sampleRate: 16000 })` and an
+  `AudioWorkletProcessor` that emits Int16 LE mono PCM.
+- Each chunk is exactly 32000 bytes (1000 ms at 16 kHz, 16-bit, mono) except
+  the final partial chunk on stop.
+- Chunks carry `source`, `timestamp` and a per-source monotonic `sequence`.
+- The `ArrayBuffer` is transferred on `CH-303`, so `byteLength` in the worker is
+  0 after send.
+- An ESLint rule forbids importing `fs`, `fs/promises` or `original-fs` across
+  the whole reachable audio path, not just its start: `src/renderer/audio-worker/**`,
+  `src/main/audio.ts`, `src/main/ai/stt.ts` and `src/main/ai/stt/**`. Transferring
+  the buffer neuters the worker's reference, it does not stop a downstream
+  adapter from persisting the bytes it receives (NFR-002).
+- Loopback failure still starts the mic, sets the interviewer stream state to
+  `error` and blocks `session:start` with a named reason.
+- Unexpected stream end retries 3 times before surfacing an error badge.
+- `session:stop` destroys both contexts, stops all tracks and closes the worker
+  window. No `AudioContext` remains after stop.
+**Verified by** TC-040, TC-041, TC-042, TC-043, TC-044, TC-045, TC-136
+
+### TASK-012 STT registry and the streaming adapters
+**Traces** FR-023, FR-037, FR-038, FR-047, FR-048, FR-100, NFR-001
+**Depends on** TASK-011, TASK-004
+**Acceptance criteria**
+- `src/shared/registry/stt.ts` and `src/shared/registry/llm.ts` exist with the
+  v1 contents in `02-architecture.md` section 2.1a.
+- `SttProvider` and `SttSession` match section 3.1 exactly, taking a
+  `ProviderChoice`, not a provider id alone.
+- Capability flags are read from the selected model's registry entry. A grep
+  finds no branch on a provider id string outside the adapter files and the
+  registry itself.
+- Three streaming adapters ship and all three accept the same 16 kHz, 16-bit,
+  mono PCM with no per-provider resampling:
+  - Deepgram: `encoding=linear16&sample_rate=16000&channels=1&interim_results=true`
+    and `endpointing` set from `settings.trigger.turnEndGapMs`, never hard-coded,
+    so a native signal cannot preempt the user's chosen gap (FR-050).
+  - OpenAI realtime: a transcription session on the realtime WebSocket with the
+    chosen model and server VAD. Deltas to `isFinal: false`, completed items to
+    `isFinal: true`, VAD stop to `endpoint`.
+  - ElevenLabs: Scribe v2 Realtime WebSocket, input format `pcm_16000`. Partials
+    to `isFinal: false`, committed segments to `isFinal: true` and `endpoint`.
+- One session per stream. Two concurrent connections during a live session, each
+  with its own interim and final state.
+- Every emitted event is a normalized `TranscriptEvent` including `providerId`.
+- A dropped socket reconnects and resumes without ending the session.
+- The ElevenLabs key is a fourth credential in the vault, validated on entry and
+  health-keyed like the others.
+- Adding a fake provider to the registry makes it selectable and usable end to
+  end with no edit outside the registry and its adapter (FR-037).
+- Every registry model has a `providerId:modelId` row in `pricing.json`.
+**Verified by** TC-050, TC-051, TC-052, TC-053, TC-054, TC-056, TC-151, TC-152, TC-153, TC-155, TC-156, TC-159
+
+### TASK-013 Non-streaming STT class and the Whisper adapter
+**Traces** FR-047, FR-049, NFR-017, ADR-022
+**Depends on** TASK-012
+**Acceptance criteria**
+- `whisper-1` buffers 4000 ms of PCM, wraps it in a valid WAV container built in
+  memory and posts one request per buffer.
+- Emits `isFinal: true` only. Never an interim, never an endpoint.
+- `streaming`, `supportsInterim` and `supportsEndpointing` are all `false` in the
+  registry entry, and the trigger reads those flags rather than checking any
+  provider id.
+- A model whose entry says `streaming: false` is held to `NFR-017`, not
+  `NFR-001`. Which budget applies is computed from the entry.
+- The Dashboard badge text comes from the registry entry's `badge` field and
+  names both the accuracy penalty and the latency penalty. No renderer file
+  mentions Whisper by name.
+- The WAV header is written by hand in `src/main/ai/stt/wav.ts`. The body is
+  built in memory. No file stream and no path is ever passed to the HTTP client
+  (ADR-019).
+**Verified by** TC-055, TC-057, TC-150
+
+### TASK-014 Provider health and failover
+**Traces** FR-100, FR-104, ADR-009, ADR-010, ADR-017
+**Depends on** TASK-012
+**Acceptance criteria**
+- One shared implementation serves both the STT and the LLM capability, keyed by
+  credential (`deepgram`, `openai`, `anthropic`), not by capability. One probe
+  timer per credential (ADR-017).
+- A rejected OpenAI key produces one Dashboard badge naming every affected
+  capability, not one badge per capability.
+- An STT switch-back lands on a turn boundary with no audio in flight. It never
+  closes the socket mid-utterance.
+- Errors classify to `auth`, `rate-limit`, `network`, `timeout`, `server`,
+  `client`. `auth` and `client` are `retryable: false`.
+- Retry backoff is 250, 500, 1000 ms with up to 20 percent jitter, 3 attempts.
+- An `auth` error skips the retry loop entirely and fails over immediately.
+- After failover the adapter stays on the backup for the rest of the session.
+- A probe runs against the primary every 60 s. Two consecutive passes return to
+  the primary at the next clean boundary, not mid-stream.
+- With no backup configured the no-backup path splits on `retryable` (ADR-024):
+  a retryable failure enters `DEGRADED` and retries with backoff capped at 10 s;
+  a non-retryable failure (`auth`, `client`) enters `CONFIG_REQUIRED`, terminal
+  for that credential for the session, sending no further requests. A revoked key
+  must not fire a doomed request every ten seconds for a whole interview.
+  `CONFIG_REQUIRED` clears when the user saves a new key for that credential.
+  The overlay is never touched in either state.
+- `CH-202 state:providers` reflects every transition.
+**Verified by** TC-100, TC-101, TC-102, TC-103, TC-143, TC-144, TC-162
+
+---
+
+## Milestone 2 — Knowledge base
+
+### TASK-020 Document import and conversion
+**Traces** FR-060, FR-061, FR-069
+**Depends on** TASK-003
+**Acceptance criteria**
+- `.md` is ingested as-is. `.pdf` goes through `pdf-parse`, `.docx` through
+  `mammoth`, each written to `derived/<docId>.md`.
+- A converted document with no detected heading is wrapped in a single
+  `# Document` section.
+- A `.pdf` import sets `extractionQuality: 'best-effort'` and the Dashboard row
+  shows that label with an explanation on hover.
+- A conversion failure sets `state: 'error'` with the message. It never throws
+  out of the import call and never blocks other documents in the same batch.
+- Every document belongs to exactly one profile. There is no shared document
+  store.
+- Deleting a profile removes the whole profile directory from disk: `kb/`,
+  derived Markdown, chunk files, vectors and session transcripts. A test asserts
+  the directory does not exist afterwards and that no transcript or document
+  content survives anywhere under `userData` (FR-069).
+- A delete interrupted partway must not leave content on disk with the profile
+  record gone. The record is removed last.
+**Verified by** TC-060, TC-061, TC-062, TC-063, TC-160
+
+### TASK-021 Chunking
+**Traces** FR-062, FR-063, ASM-001
+**Depends on** TASK-020
+**Acceptance criteria**
+- Splits on `#`, `##`, `###`. `####` and deeper stay inside the parent chunk as
+  body text.
+- The token cap is read from the embedding model's `max_seq_length` (256 for
+  MiniLM), not hard-coded. A test asserts no produced chunk exceeds it, so a
+  model swap cannot silently reintroduce truncation (FR-062, ADR-023).
+- `headerPath` is the ordered ancestor chain, for example
+  `['Experience', 'Acme Corp']`.
+- A section over the cap soft-splits on blank lines. A single paragraph over the
+  cap is hard-split at the token boundary rather than dropped.
+- Every chunk carries `{ sourceFile, headerPath, docType, profileId }` and a
+  `tokenCount`.
+- Chunking is pure and deterministic: the same input bytes always produce the
+  same chunk array. A `chunkerVersion` constant is exported and included in the
+  cache key.
+**Verified by** TC-064, TC-065, TC-066, TC-067
+
+### TASK-022 Local embeddings and cache
+**Traces** FR-066, FR-067, ADR-011, ADR-012
+**Depends on** TASK-021
+**Acceptance criteria**
+- Uses `@xenova/transformers` with `Xenova/all-MiniLM-L6-v2`, 384 dimensions.
+- First run shows determinate download progress on `CH-214`. Ingestion is
+  blocked until it completes. Session start is not blocked.
+- With no network and no cached model, the document manager shows an explicit
+  "embedding model not downloaded" state with a retry action. It does not hang
+  and does not present the failure as a generic error. The `NFR-008` offline
+  guarantee applies to an installation whose model is already cached (ADR-026).
+- Vectors are L2-normalized before write, stored as a flat `Float32Array` in
+  `<docId>.vectors.bin`.
+- The cache key is `sha256(fileBytes):chunkerVersion:embeddingModelId`. An
+  unchanged file is not re-embedded on relaunch.
+- Changing `chunkerVersion` invalidates the cache with no manual purge.
+**Verified by** TC-068, TC-069, TC-070, TC-071, TC-161
+
+### TASK-023 Auto-tagging and user override
+**Traces** FR-064, FR-079
+**Depends on** TASK-020
+**Acceptance criteria**
+- Guesses `resume`, `company-notes` or `job-description` from filename and
+  content, with a documented, deterministic rule set. It is not an LLM call.
+- A user override sets `docTypeSource: 'user'`. Re-import or a file change never
+  overwrites a user override.
+- An override updates chunk metadata in place without re-embedding.
+- An override can be reset to `auto`, which re-runs the guess.
+- A document in `error` retries from the Dashboard without re-import (FR-079).
+**Verified by** TC-072, TC-073, TC-074, TC-149
+
+### TASK-024 Retrieval
+**Traces** FR-065, ASM-006
+**Depends on** TASK-022
+**Acceptance criteria**
+- `query(profileId, text, k=3)` returns the top 3 chunks by dot product over
+  normalized vectors, scoped to that profile only.
+- No doc-type weighting exists in the code. A test asserts that two chunks with
+  equal similarity and different doc types tie.
+- A profile with no ready documents returns an empty array without throwing.
+- A profile with 5000 chunks returns in under 50 ms.
+**Verified by** TC-075, TC-076, TC-077, TC-078
+
+### TASK-025 Knowledge base watcher
+**Traces** FR-068, FR-077, FR-078
+**Depends on** TASK-022
+**Acceptance criteria**
+- `chokidar` watches each profile's `kb/` folder with a 500 ms stability debounce.
+- An add, change or unlink re-processes only that file.
+- For a document at or below the supported ceiling of 2 MB and 200 chunks, a
+  change is reflected in `query` results within 5 s of the file system settling.
+  Above the ceiling the document still processes, the 5-second target does not
+  apply, and the Dashboard shows progress. The ceiling is shown in the Dashboard
+  (FR-068).
+- A delete removes the document record, its chunks and its vectors.
+- Rapid successive writes to one file cause exactly one re-embed.
+- A file that appears in `kb/` outside `doc:import` is adopted: a record is
+  created, auto-tagged and embedded, and it appears in the Dashboard (FR-077).
+- A startup reconciliation pass runs before the watcher and resets any document
+  in `pending`, `converting` or `embedding` to `pending` (FR-078).
+- `chunks.json` and `vectors.bin` are written write-to-temp then rename. A row
+  count mismatch at load discards both and re-embeds (FR-078).
+**Verified by** TC-079, TC-140, TC-141, TC-163
+
+---
+
+## Milestone 3 — Trigger and suggestions
+
+### TASK-030 Trigger state machine
+**Traces** FR-003, FR-050, FR-051, FR-052, FR-053, FR-054, FR-055, ASM-004, ASM-007, ASM-008, ASM-009
+**Depends on** TASK-012, TASK-006
+**Acceptance criteria**
+- Implements exactly the states and transitions in `02-architecture.md`
+  section 5.3.
+- The turn-end timer uses `settings.trigger.turnEndGapMs` and is reset by any
+  new interviewer interim or final event.
+- A provider `endpoint` event fires the turn immediately, bypassing the timer.
+- The guard rejects a turn under `minTurnWords` or `minTurnChars` and returns to
+  `LISTENING` without firing.
+- Candidate finals only append to the context ring. A test drives 100 candidate
+  finals and asserts zero `generate-suggestion` events.
+- The context ring keeps the last 2 candidate turns, truncated to 400 characters
+  total, oldest content dropped first.
+- A new turn end during `GENERATING` aborts the in-flight `AbortController`
+  before starting the new generation.
+- `PAUSED` aborts any in-flight generation and pushes the overlay idle state.
+  Audio capture and STT connections stay open while paused.
+- The state machine is a pure module with injected timers, testable with fake
+  timers and no Electron import.
+**Verified by** TC-080, TC-081, TC-082, TC-083, TC-084, TC-085, TC-086, TC-087, TC-088
+
+### TASK-031 Prompt assembly
+**Traces** FR-004, FR-072, FR-073
+**Depends on** TASK-024, TASK-030
+**Acceptance criteria**
+- The system prompt is byte-identical to `02-architecture.md` section 6.
+- The user message uses the template in section 6, with chunks numbered and
+  labeled by `docType` and `headerPath`.
+- Empty candidate context renders as `(nothing yet)`.
+- Zero retrieved chunks renders the notes section as absent, not as an empty
+  heading.
+- `max_tokens: 200`, `temperature: 0.3` for both providers.
+**Verified by** TC-090, TC-091, TC-092
+
+### TASK-032 LLM adapters and line buffering
+**Traces** FR-070, FR-071, FR-074, FR-075, FR-076
+**Depends on** TASK-031, TASK-014
+**Acceptance criteria**
+- Anthropic and OpenAI adapters both satisfy `LlmProvider` and both yield raw
+  deltas plus one terminal usage record.
+- Line buffering is implemented once, above the adapters, so both providers
+  produce identical `CH-208` timing.
+- Structure is enforced at the buffer, not trusted to the prompt (FR-004,
+  ADR-025): a forced flush wraps at a word boundary and never mid-word; a line
+  over 120 characters after wrapping is truncated at a word boundary with an
+  ellipsis; a card renders at most 5 lines and line 6 onward is never sent; a
+  generation that emitted no newline is recorded as `nonconforming`. The overlay
+  still shows what was salvaged and never an error (FR-076).
+- A `SuggestionLine` is emitted per newline, plus a final flush of the
+  remainder, plus a forced flush at 240 pending characters with no newline.
+- A test feeds character-by-character deltas and asserts the number of
+  `CH-208` messages equals the number of lines, not the number of characters.
+- `AbortSignal` cancellation aborts the underlying HTTP request. A test asserts
+  the request is aborted, not merely unsubscribed.
+- No code path sends an error to the overlay. A static test asserts the overlay
+  preload exposes no error channel.
+**Verified by** TC-093, TC-094, TC-095, TC-096, TC-157
+
+---
+
+## Milestone 4 — Sessions, cost, UI
+
+### TASK-040 Session manager and transcript
+**Traces** FR-088, FR-101, FR-105, FR-106, FR-107, FR-108, ADR-003, ADR-013, ADR-018
+**Depends on** TASK-011, TASK-032
+**Acceptance criteria**
+- `session:start` refuses when a session is active, when no profile is active,
+  or when the STT primary key or the LLM primary key is missing. Each refusal
+  returns a distinct, named reason.
+- The session binds `profileId` at start. Profile switching is disabled in the
+  Dashboard for the duration.
+- Interviewer turns, candidate turns and suggestions are appended to
+  `<sessionId>.ndjson` within 2 s of being produced.
+- A clean stop compacts the `.ndjson` into `<sessionId>.json` and deletes the
+  `.ndjson`.
+- An `.ndjson` present at startup is compacted with
+  `endReason: 'crash-recovered'` and appears in Session History.
+- No audio byte is ever passed to the session writer. The writer's input type
+  cannot express one.
+- The Session Manager is the only component holding a session file handle. The
+  Cost Meter hands usage over in memory (FR-106).
+- Every entry carries a monotonic `seq` assigned at append time. A cancelled
+  generation is appended, carrying the bullets already flushed, before the
+  replacing generation's entry. The LLM layer awaits that append (FR-106).
+- Each entry is one `write()` of one complete line. Compaction discards an
+  unparseable final line and keeps the rest. When a `.json` and a `.ndjson`
+  both exist, the `.json` wins (FR-107).
+- A `session.lock` file enforces one session across restarts and a stale lock is
+  cleared by the recovery pass (FR-108).
+**Verified by** TC-104, TC-105, TC-106, TC-107, TC-134, TC-135
+
+### TASK-041 Cost meter
+**Traces** FR-103, FR-109, ASM-011
+**Depends on** TASK-040
+**Acceptance criteria**
+- Accumulates STT audio seconds per stream and LLM input and output tokens from
+  provider usage fields, never from a local estimate when the provider reports
+  actual usage.
+- `estimatedUsd` is computed from `pricing.json` and the Dashboard shows the
+  price table version next to it.
+- `CH-204 state:usage` updates at least once per second during a session.
+- Each threshold warns exactly once per session. Crossing back and forth does
+  not re-warn.
+- No code path stops a session because of cost or time.
+- Warnings are edge-triggered upward only. An estimate that decreases after a
+  cancelled generation and crosses again does not warn twice (FR-109).
+- The Cost Meter never writes to disk. It hands usage to the Session Manager
+  (ADR-018).
+**Verified by** TC-108, TC-109, TC-145
+
+### TASK-042 Dashboard UI
+**Traces** FR-023, FR-024, FR-025, FR-026, FR-027, FR-028, FR-029, FR-030, FR-031, FR-032, FR-038, FR-080, FR-087, FR-088, FR-110, NFR-010, NFR-014
+**Depends on** TASK-003, TASK-004, TASK-014, TASK-025, TASK-041
+**Acceptance criteria**
+- All six sections exist: Provider Setup, Company Profiles, Session History,
+  Hotkeys, Cost and Usage, Consent Reminder.
+- Provider Setup offers a provider picker and a model picker for STT primary,
+  STT backup, LLM primary and LLM backup, all populated from the registries.
+- Each model row shows whether it streams and its price. Selecting a
+  non-streaming model shows the `NFR-017` latency consequence before saving
+  (FR-038).
+- A backup from the same provider as the primary is rejected, because the
+  credential and the service are the same (FR-025).
+- Provider Setup states plainly that one OpenAI key serves OpenAI STT models and
+  OpenAI LLM models alike.
+- Session History states plainly that transcripts are unencrypted local files
+  kept until deleted (FR-110).
+- Key entry shows an inline pass or fail within 10 s and does not save a failing
+  key.
+- Company Profiles supports create, switch, delete and drag-and-drop import,
+  with a doc-type override control per document row. Exactly one profile is
+  active at a time and switching is disabled during a live session (FR-027,
+  FR-028, ADR-013).
+- Profile delete requires a confirmation that names the counts of documents and
+  sessions to be deleted. Deleting the active profile activates another profile,
+  or creates a default profile when none remains (FR-028).
+- Exactly one profile is active at a time, and the active profile is shown
+  unambiguously in the Dashboard header (FR-027).
+- Session History groups by profile and supports view and delete.
+- Cost and Usage shows the live timer and spend estimate during a session.
+- Consent Reminder is editable with a one-action reset to default. The shipped
+  default states that an unencrypted local text transcript is kept for the
+  session (FR-007, FR-110).
+- Every interactive element is reachable and operable by keyboard.
+**Verified by** TC-120, TC-121, TC-122, TC-123, TC-124, TC-125, TC-154, TC-158
+
+### TASK-043 Overlay UI
+**Traces** FR-006, FR-007, FR-008, FR-076, FR-085, FR-090, FR-091, FR-092, FR-093, FR-094, FR-102, NFR-007, NFR-010
+**Depends on** TASK-032, TASK-005
+**Acceptance criteria**
+- The renderer sends `overlay:ready` after mounting and rendering the consent
+  reminder. The main process buffers suggestion messages until it arrives and
+  drops nothing (FR-008).
+- Idle card shows the standing-by message before the first suggestion and
+  whenever paused.
+- The consent reminder renders before the first suggestion of every session, is
+  dismissible and does not block input to other applications.
+- Active state holds at most 3 cards. A 4th entering fades the oldest out
+  through `AnimatePresence`.
+- Each completed bullet reveals with fade plus upward slide over 200 to 300 ms.
+  No per-word reveal exists in the code.
+- Font size defaults to 22 px, is adjustable 16 to 32 px from the Dashboard and
+  from an in-overlay control, and persists.
+- Text meets a 4.5 to 1 contrast ratio against the card background in both
+  themes at every supported opacity level.
+- `prefers-reduced-motion` disables the slide component and keeps the fade.
+- Theme, translucency mode and opacity apply live without a restart.
+- Interactive mode versus click-through mode is visually distinguishable.
+- Extended silence keeps the idle card visible and is never rendered as an
+  error or a warning (FR-102).
+- No error state exists in the overlay component tree.
+**Verified by** TC-006, TC-110, TC-111, TC-112, TC-113, TC-114, TC-115, TC-116, TC-117, TC-138
+
+---
+
+## Milestone 5 — Hardening and release
+
+### TASK-050 Global resilience
+**Traces** NFR-001, NFR-002, NFR-004, NFR-005, NFR-008, NFR-009
+**Depends on** all of Milestone 4
+**Acceptance criteria**
+- `process.on('uncaughtException')` and `process.on('unhandledRejection')` in
+  main log and continue. A test injects a rejection during a session and
+  asserts the session stays active.
+- A 60-minute soak test with synthetic transcript events keeps main-process RSS
+  under 600 MB with no upward trend over the last 30 minutes.
+- A filesystem write monitor runs a synthetic session with Whisper active and
+  asserts no write contains PCM. The app-owned temp directory is empty at
+  session end (NFR-002, ADR-019).
+- With the network disabled the app starts, manages profiles, imports documents
+  and embeds. Session start warns that transcription is unavailable.
+- App-side overhead on the turn-end to first-line path is under 150 ms with
+  scripted fakes (TC-133). The end-to-end `NFR-001` budget (p50 under 2.5 s,
+  p95 under 4.0 s) is measured and recorded by MW-06 before release.
+**Verified by** TC-130, TC-131, TC-132, TC-133, TC-137, MW-06
+
+### TASK-051 Release pipeline
+**Traces** NFR-011, NFR-013, NFR-015
+**Depends on** TASK-050
+**Acceptance criteria**
+- CI runs typecheck, lint, unit, integration, license check on every pull
+  request, and the Playwright Electron E2E suite on a Windows runner.
+- `npm run package` produces an x64 NSIS installer that installs and launches on
+  a clean Windows 11 virtual machine.
+- The installer is reproducible from a clean checkout with one documented
+  command.
+- The release checklist in `04-test-strategy.md` section 6 is executed and
+  recorded before a tag is cut. Any single failure blocks the tag, MW-06 and
+  MW-11 latency numbers included. MW-12 confirms a documented limitation and
+  cannot fail the release.
+**Verified by** TC-001, MW-01 to MW-13
