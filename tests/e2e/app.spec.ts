@@ -91,17 +91,44 @@ test('TC-007 renderers are isolated, sandboxed and have no Node', async () => {
   }
 });
 
-/** TC-008: navigation and popups are denied, and the CSP has no unsafe-eval. */
-test('TC-008 navigation is locked down and eval is blocked', async () => {
-  const evalBlocked = await dashboard.evaluate(() => {
-    try {
-      (0, eval)('1 + 1');
-      return false;
-    } catch {
-      return true;
-    }
-  });
-  expect(evalBlocked).toBe(true);
+/** TC-008: navigation and popups are denied, and the CSP is actually enforced. */
+test('TC-008 navigation is locked down and the CSP is enforced', async () => {
+  // Enforcement is observed through the DOM, not by calling eval inside
+  // page.evaluate. Playwright evaluates over the DevTools protocol, which is
+  // not subject to the page's CSP, so eval succeeding there says nothing about
+  // the policy. Injecting a script element is a page-level operation the
+  // policy does govern, whoever initiated it.
+  const inline = await dashboard.evaluate(
+    () =>
+      new Promise<{ ran: boolean; violated: string | null }>((resolve) => {
+        let violated: string | null = null;
+        document.addEventListener(
+          'securitypolicyviolation',
+          (e) => {
+            violated = e.violatedDirective;
+          },
+          { once: true },
+        );
+
+        const script = document.createElement('script');
+        script.textContent = 'window.__cspInlineRan = true;';
+        document.head.appendChild(script);
+
+        setTimeout(
+          () =>
+            resolve({
+              ran: (window as unknown as { __cspInlineRan?: boolean }).__cspInlineRan === true,
+              violated,
+            }),
+          500,
+        );
+      }),
+  );
+
+  expect(inline.ran, 'an inline script executed, so script-src is not enforced').toBe(false);
+  // Chromium reports the most specific directive, which for a script element is
+  // script-src-elem rather than the script-src that produced it.
+  expect(inline.violated, 'no CSP violation was reported').toMatch(/^script-src(-elem)?$/);
 
   const openedExternally = await dashboard.evaluate(() => {
     const w = window.open('https://example.com', '_blank');

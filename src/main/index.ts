@@ -17,7 +17,7 @@ import {
   createDashboardWindow,
   createOverlayWindow,
   hasTrueCaptureExclusion,
-  OVERLAY_SIZE,
+  overlayBoundsFor,
   resolveOverlayPosition,
   saveOverlayPosition,
   supportsAcrylic,
@@ -269,7 +269,7 @@ function registerIpcHandlers(): void {
     const pos = resolveOverlayPosition(asIfFresh, displays, primary.id);
 
     if (overlayWindow && !overlayWindow.isDestroyed()) {
-      overlayWindow.setBounds({ ...pos, width: OVERLAY_SIZE.width, height: OVERLAY_SIZE.height });
+      overlayWindow.setBounds(overlayBoundsFor(pos));
       overlayWindow.setAlwaysOnTop(true, 'screen-saver');
       overlayWindow.showInactive();
     }

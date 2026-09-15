@@ -66,6 +66,26 @@ Found by the first CI run and fixed on the same branch:
   checked for the same problem and is fine, because it exports `z` as a named
   export that survives the namespace.
 
+Found by the second CI run and fixed on the same branch:
+- **Reset Overlay silently did nothing.** `resolveOverlayPosition` returns
+  `{ x, y, displayId }`, and that was spread straight into `setBounds`, which
+  takes a Rectangle. The extra string key made the call fail, so the window
+  stayed put. Extracted as `overlayBoundsFor` and pinned by a unit test.
+- **The Dashboard reported a failed IPC call as success.** An `IpcError`
+  resolves like any other response, so the reset button showed "Overlay reset"
+  even though the reset had thrown. It now checks `isIpcError` and shows a
+  failure. Errors belong in the Dashboard; `FR-076` bars them only from the
+  overlay.
+- **TC-008 was not testing anything.** It called `eval` inside
+  `page.evaluate`, which Playwright runs over the DevTools protocol, outside the
+  page's CSP. It now injects a script element, a page-level operation the policy
+  does govern, and asserts it neither runs nor passes without a violation. The
+  policy itself is verified enforced: an inline script is blocked and Chromium
+  reports `script-src-elem`.
+- The CSP question left open at the end of Milestone 0 is settled. The renderer
+  loads and the Dashboard renders under `file://` in Electron with the meta
+  policy in place, so `'self' file:` is correct and the app is not broken by it.
+
 Follow-up work found during implementation:
 - **OQ-003** (blocks TASK-011): Electron cannot transfer an `ArrayBuffer` across
   IPC, so `CH-303`'s transfer mechanism and `TC-041` need replacing.

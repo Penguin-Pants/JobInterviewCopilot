@@ -3,6 +3,7 @@ import { execSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import {
   hasTrueCaptureExclusion,
+  overlayBoundsFor,
   MIN_BUILD_FOR_ACRYLIC,
   MIN_BUILD_FOR_CAPTURE_EXCLUSION,
   overlayWindowOptions,
@@ -161,5 +162,29 @@ describe('NFR-012 Windows build detection', () => {
     expect(hasTrueCaptureExclusion(MIN_BUILD_FOR_CAPTURE_EXCLUSION - 1)).toBe(false);
     expect(supportsAcrylic(MIN_BUILD_FOR_ACRYLIC)).toBe(true);
     expect(supportsAcrylic(MIN_BUILD_FOR_ACRYLIC - 1)).toBe(false);
+  });
+});
+
+/**
+ * FR-009 regression: Reset Overlay silently did nothing on Windows.
+ *
+ * The resolver returns `{ x, y, displayId }`. Spreading that into
+ * `setBounds` passed a string `displayId` into an Electron Rectangle, so the
+ * call failed and the window stayed exactly where it was. The E2E suite caught
+ * it as "overlay is still at -30000"; this pins it locally.
+ */
+describe('FR-009 overlay reset bounds', () => {
+  it('produces a Rectangle and nothing else', () => {
+    const pos = resolveOverlayPosition(defaultSettings(), DISPLAYS, 1);
+    const bounds = overlayBoundsFor(pos);
+
+    expect(Object.keys(bounds).sort()).toEqual(['height', 'width', 'x', 'y']);
+    expect(bounds).not.toHaveProperty('displayId');
+    expect(bounds.width).toBe(OVERLAY_SIZE.width);
+    expect(bounds.height).toBe(OVERLAY_SIZE.height);
+  });
+
+  it('carries the resolved position through unchanged', () => {
+    expect(overlayBoundsFor({ x: 12, y: 34 })).toMatchObject({ x: 12, y: 34 });
   });
 });

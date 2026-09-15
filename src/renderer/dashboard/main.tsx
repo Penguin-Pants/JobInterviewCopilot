@@ -1,5 +1,6 @@
 import { StrictMode, useEffect, useState, type JSX } from 'react';
 import { createRoot } from 'react-dom/client';
+import { isIpcError } from '../../shared/ipc.js';
 import type { Settings } from '../../shared/types.js';
 
 /**
@@ -12,7 +13,7 @@ import type { Settings } from '../../shared/types.js';
 function Dashboard(): JSX.Element {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [resetState, setResetState] = useState<'idle' | 'done'>('idle');
+  const [resetState, setResetState] = useState<'idle' | 'done' | 'failed'>('idle');
 
   useEffect(() => {
     void window.copilot.invoke('config:get').then(setSettings);
@@ -35,12 +36,22 @@ function Dashboard(): JSX.Element {
           type="button"
           data-testid="reset-overlay"
           onClick={() => {
-            void window.copilot.invoke('overlay:reset').then(() => setResetState('done'));
+            // An IPC rejection resolves like any other response, so it has to be
+            // checked. Reporting it as success is how a failed reset looked fine.
+            void window.copilot
+              .invoke('overlay:reset')
+              .then((result) => setResetState(isIpcError(result) ? 'failed' : 'done'))
+              .catch(() => setResetState('failed'));
           }}
         >
           Reset Overlay
         </button>
         {resetState === 'done' ? <span data-testid="reset-overlay-done">Overlay reset</span> : null}
+        {resetState === 'failed' ? (
+          <span role="alert" data-testid="reset-overlay-failed">
+            Could not reset the overlay. See the log for details.
+          </span>
+        ) : null}
       </section>
 
       <section>

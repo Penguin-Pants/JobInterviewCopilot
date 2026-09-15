@@ -246,6 +246,23 @@ export async function createAudioWorkerWindow(): Promise<BrowserWindow> {
 
 /* v8 ignore stop */
 
+/**
+ * The overlay's bounds for a resolved position (FR-009, FR-082).
+ *
+ * Exists so the position resolver's result, which carries a `displayId`, can
+ * never be spread straight into `setBounds`. Electron expects a Rectangle and
+ * rejects the call when an extra key rides along, which silently leaves the
+ * window where it was. Extracted and unit tested after exactly that bug.
+ */
+export function overlayBoundsFor(pos: { x: number; y: number }): {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+} {
+  return { x: pos.x, y: pos.y, width: OVERLAY_SIZE.width, height: OVERLAY_SIZE.height };
+}
+
 /** Whether a translucency change requires recreating the overlay (ADR-015). */
 export function translucencyChangeNeedsRecreate(
   before: OverlayTranslucency,
