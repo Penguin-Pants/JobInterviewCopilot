@@ -1,4 +1,10 @@
 # Interview CoPilot — Master Build Prompt
+
+> **Status.** This file is the product brief. It is no longer the build
+> specification. The implementation baseline is `docs/`, starting with
+> `docs/00-decision-log.md`. Where this file and `docs/` disagree, `docs/` wins.
+> Three contradictions in the original brief were resolved on 2026-09-15 and the
+> text below has been corrected to match. See ADR-001 and ADR-003.
 ## 0. Product Summary
 
 Interview CoPilot is a native Windows desktop app. It gives a job candidate real-time, glanceable prompts during a live video interview, pulled from the candidate's own resume, company and job research and other notes. The primary goal is accessibility support, for example ADHD or memory recall under stress, not scripted deception.
@@ -6,7 +12,7 @@ Interview CoPilot is a native Windows desktop app. It gives a job candidate real
 **Hard guardrails. Do not build around these:**
 - The overlay window should be excluded from screen-share or recording capture because it could interfere with the interviewee presenting a presentation, business case etc. Consent has already been given.
 - The app must show a consent reminder before each live session. The interviewer's awareness of the tool is the user's responsibility. The app supports that responsibility, it does not hide from it.
-- Audio is never written to disk. Only text transcripts are persisted, and only because the user chose to keep them.
+- Audio is never written to disk. Only text transcripts are persisted. The user controls retention and can delete any transcript at any time (ADR-003).
 
 ## 1. Tech Stack
 - Electron, TypeScript, React, Tailwind CSS.
@@ -81,7 +87,7 @@ Standard window, resizable, follows the light, dark or system theme setting. Sec
 
 ### Teleprompter overlay window
 - `transparent: true`, `frame: false`, `alwaysOnTop: true`, `skipTaskbar: true`.
-- Do not exclude it from screen capture. This is a deliberate omission, see section 0.
+- Excluded from screen capture via `setContentProtection(true)`, applied before the window is first shown and never disabled (ADR-001). The overlay stays visible on the physical display. This protects a shared presentation from being covered, it is not a way to hide the tool from the interviewer. That responsibility sits with the consent reminder.
 - Fixed size, not resizable. The user drags it anywhere, including across monitors. Remember the last position and monitor in `electron-store`.
 - Default to click-through: `win.setIgnoreMouseEvents(true, { forward: true })`.
 - Global hotkey, default `Ctrl+Shift+I`, toggles between click-through mode and movable, interactive mode.
@@ -104,7 +110,6 @@ Standard window, resizable, follows the light, dark or system theme setting. Sec
 
 ## 11. Explicit Non-Goals
 Carried forward from product discovery. Do not add these later without a new, explicit decision:
-- No screen-capture or recording exclusion for the overlay window.
 - No hidden or silently-skippable consent step.
 - No persistent audio recording, of either stream, under any setting.
 
@@ -116,3 +121,6 @@ Flag any of these for a change before this goes to build:
 - Cancel-and-restart behavior when a new question arrives mid-stream.
 - `skipTaskbar: true` on the overlay window. A normal utility-window convention, unrelated to the capture-exclusion guardrail.
 - Doc-type-weighted retrieval deferred to v2. V1 ships as plain similarity search.
+
+The full assumption register, with the cost to change each item, is in
+`docs/00-decision-log.md` section 4.
