@@ -556,10 +556,16 @@ send, "enforcing `FR-043` by construction". Electron cannot do that. Both
 IPC is structured-cloned, which means copied.
 
 `FR-043` and `NFR-002` still hold: a copy in memory is never written to disk.
-What is gone is the "by construction" part. The guarantee now rests on the
-ESLint ban across the whole reachable audio path and on the runtime
-filesystem-write monitor (`TC-137`), which is what actually proves it. The
-design question of how to bound the copies is open as `OQ-003` for `TASK-011`.
+What is gone is the "by construction" part. The guarantee rests on the ESLint ban
+across the whole reachable audio path and on the runtime filesystem-write monitor
+(`TC-137`).
+
+**Resolved by ADR-027.** The copy is accepted: 31 KiB and 0.08 ms per chunk, or
+0.008 percent of the chunk budget. The property that is enforced instead is
+bounded retention, because unbounded accumulation, not copying, is what would put
+220 MiB of interview audio in memory over one session. `CH-303` therefore sends
+by copy, every reference is released once its chunk is handed on, and deliberate
+buffering is bounded by a declared constant.
 
 ---
 

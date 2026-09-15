@@ -66,6 +66,31 @@ jobs:
           name: playwright-report
           path: playwright-report/
 
+  loopback-spike:
+    name: TASK-010 loopback spike (Windows)
+    runs-on: windows-latest
+    # Never blocks the build. It answers a design question and records the
+    # answer; a headless runner with no audio endpoint is a legitimate result,
+    # not a failure of this PR.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Acquire a system-audio loopback stream in a sandboxed renderer
+        run: npx electron spike/loopback/main.cjs --json
+      - name: Record the result
+        if: always()
+        run: npx electron spike/loopback/main.cjs --json > loopback-spike.json 2>&1 || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: loopback-spike-windows
+          path: loopback-spike.json
+
   package:
     name: Windows installer
     runs-on: windows-latest

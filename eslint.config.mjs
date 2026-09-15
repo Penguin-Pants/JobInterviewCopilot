@@ -37,7 +37,14 @@ export default [
   js.configs.recommended,
   {
     // Node scripts run outside the app bundle and use Node globals directly.
-    files: ['scripts/**/*.mjs', 'scripts/**/*.cjs', '*.config.ts', '*.config.mjs'],
+    files: [
+      'scripts/**/*.mjs',
+      'scripts/**/*.cjs',
+      'spike/**/*.cjs',
+      'spike/**/*.js',
+      '*.config.ts',
+      '*.config.mjs',
+    ],
     languageOptions: {
       globals: {
         process: 'readonly',
@@ -47,6 +54,14 @@ export default [
         module: 'readonly',
         Buffer: 'readonly',
         setTimeout: 'readonly',
+        setInterval: 'readonly',
+        clearInterval: 'readonly',
+        window: 'readonly',
+        navigator: 'readonly',
+        document: 'readonly',
+        AudioContext: 'readonly',
+        Float32Array: 'readonly',
+        Date: 'readonly',
       },
     },
   },

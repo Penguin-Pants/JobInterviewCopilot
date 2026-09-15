@@ -495,45 +495,145 @@ cached case and `TC-161` runs the fresh-install case.
 **Rejected.** Packaging the model in the installer. It would add about 90 MB to
 every download to serve the first run of an offline machine.
 
+### ADR-027 — Accept the PCM copy, and bound retention instead
+
+**Resolves OQ-003.** Decided 2026-09-15 at the start of Milestone 1.
+
+**The constraint.** Electron cannot transfer an `ArrayBuffer` across IPC. Both
+`ipcRenderer.postMessage` and `MessagePortMain.postMessage` accept only
+`MessagePort` values in a transfer list, so every buffer is structured-cloned.
+The mechanism exists in JavaScript (a real transfer does neuter the sender, and
+`structuredClone(buf, { transfer: [buf] })` proves it) but Electron does not
+expose it for buffers. `SharedArrayBuffer` does not help either, because the main
+process and the worker are separate OS processes.
+
+**The measurements.** One second of 16 kHz, 16-bit mono PCM is 32,000 bytes.
+
+| Quantity | Value |
+|---|---|
+| Chunk | 31.3 KiB per stream per second |
+| Both streams | 62.5 KiB per second |
+| Structured clone cost | 0.082 ms per chunk |
+| Share of the 1000 ms chunk budget | 0.008 percent |
+| Accumulated over a 60-minute session **if nothing is released** | 220 MiB |
+
+**The decision.** Take candidate 1 from OQ-003: accept the copy.
+
+The extra copy costs 31 KiB and 0.08 ms. Candidate 2, keeping PCM in the worker
+and streaming to the provider from there, would trade that for putting network
+access inside a renderer, which contradicts `CMP-14`'s rule and weakens the
+security boundary to save nothing that matters: the bytes live in memory either
+way, just in a different process. Candidate 3 avoids a process hop, not a copy.
+Paying a real security cost to avoid an imaginary privacy cost is the wrong
+trade.
+
+**The correction that matters.** The last row of that table is the real finding.
+The number of copies is not what threatens `FR-043` and `NFR-002`. **Retention
+is.** A pipeline that copies a chunk four times and releases all four is safe; a
+pipeline that copies once and holds the reference in a growing array leaks a
+quarter of a gigabyte of interview audio into memory over one session, which is
+exactly the kind of thing a "no audio on disk" guarantee is meant to prevent
+being casual about.
+
+So the invariant is not "do not copy". It is:
+
+> Every PCM reference is released once its chunk has been handed on, and any
+> deliberate buffering is bounded by a declared constant.
+
+Deliberate buffering exists and is legitimate: the non-streaming Whisper adapter
+buffers 4000 ms, which is 4 chunks, by design (ADR-022). That is bounded and
+declared. An unbounded accumulation is not.
+
+**Consequences.**
+- `TC-041` is rewritten from "the worker-side `byteLength` is 0 after send",
+  which is unachievable, to a retention assertion: after a chunk is handed on,
+  neither the worker nor the supervisor holds a reference, and across a long run
+  the count of live chunks never exceeds the declared bound.
+- `FR-043` gains the bounded-retention wording explicitly, so the requirement
+  states the property that is actually enforceable.
+- `NFR-002` is unchanged. Nothing here writes to disk, and the lint ban plus the
+  runtime filesystem-write monitor (`TC-137`) remain what prove it.
+- The audio path must expose its live-chunk count so the assertion can be made
+  from outside, rather than inferred.
+
+### ADR-028 — Acquire loopback with the platform API, not a third-party package
+
+**TASK-010 spike result.** Linux evidence recorded 2026-09-15; Windows
+confirmation pending the `loopback-spike` CI job, which is what `TASK-011`
+actually gates on.
+
+**What the spike asked.** `electron-audio-loopback` was the project's
+highest-risk dependency: one maintainer, 19.5 kB, last published a year ago, and
+the entire product depends on interviewer capture. `TASK-010` exists to prove it
+works before the audio pipeline is built on it.
+
+**What reading it showed.** It is a wrapper of roughly sixty lines. Its main
+half calls `session.setDisplayMediaRequestHandler` and answers with
+`audio: 'loopback'`. Its renderer half calls `ipcRenderer.invoke` twice, purely
+to switch that handler on and off around one `getDisplayMedia` call.
+
+That renderer half cannot run in our audio worker. `FR-086` requires every
+renderer to have `sandbox: true` and `contextIsolation: true`, and such a
+renderer has no `ipcRenderer`. Using the package as published would mean
+weakening the sandbox on the one window that handles raw audio.
+
+**What the spike measured.** A hidden renderer with `sandbox: true`,
+`contextIsolation: true` and `nodeIntegration: false`, calling only
+`navigator.mediaDevices.getDisplayMedia`, with main owning the handler for the
+session:
+
+| Observation | Result |
+|---|---|
+| Stream acquired in a sandboxed renderer | yes |
+| Audio tracks | 1, labelled `System audio`, `deviceId: loopback` |
+| Native track format | 48 kHz, mono, 16-bit |
+| `AudioContext({ sampleRate: 16000 })` | reported 16000, confirming ADR-006 |
+| Non-silent samples within 3 s | yes |
+
+**Decision.** Acquire loopback through the platform API directly. Main owns
+`setDisplayMediaRequestHandler` for the life of a session and answers with
+`audio: 'loopback'`; the audio worker calls `getDisplayMedia` and immediately
+stops the video track. `electron-audio-loopback` is not used.
+
+This removes the highest-risk dependency, keeps the audio worker fully
+sandboxed, and leaves roughly ten lines of code we own in place of a wrapper we
+cannot configure. ADR-005's "first fallback" turns out to be the same mechanism
+the package implements, so nothing is being invented here.
+
+**Two details the spike turned up that the design would otherwise have missed.**
+
+1. `setDisplayMediaRequestHandler` needs `{ useSystemPicker: false }`, and its
+   callback must be called on every path. Returning without calling it leaves
+   `getDisplayMedia` pending forever, which would present as an audio pipeline
+   that never starts and never errors.
+2. The loopback track arrives with `autoGainControl`, `echoCancellation` and
+   `noiseSuppression` all **true**. Those are microphone processing defaults and
+   they are wrong for a loopback stream: they will pump levels and suppress
+   parts of the interviewer's speech before it ever reaches the transcriber.
+   `TASK-011` must request them off explicitly. This is a transcription-quality
+   bug that would have been extremely hard to diagnose from bad suggestions.
+
+**Status and fallback.** The evidence above is from Linux, where the spike also
+ran headless. Windows is the target platform (`NFR-011`) and the
+`loopback-spike` job on `windows-latest` confirms it there. If Windows
+contradicts this, the fallback is the package itself, used with a non-sandboxed
+audio worker and a recorded deviation from `FR-086`. The dependency stays
+declared until Windows has answered.
+
 ---
 
 ## 3a. Open questions
 
 OQ-001 and OQ-002 were put to the product owner on 2026-09-15 and answered.
-OQ-003 was found during implementation and is open.
+OQ-003 was found while implementing Milestone 0 and is resolved by ADR-027.
+No open questions remain.
 
-### OQ-003 — Audio buffers cannot be transferred across Electron IPC — OPEN, blocks TASK-011
+### OQ-003 — Audio buffers cannot be transferred across Electron IPC — RESOLVED by ADR-027
 
-**Found while implementing Milestone 0, 2026-09-15.**
-
-The architecture said `CH-303` transfers the PCM `ArrayBuffer`, so the sending
-side's reference is neutered and `FR-043` is satisfied "by construction: there is
-no second copy to leak". That is not achievable. Electron's own typings show both
-`ipcRenderer.postMessage(channel, message, transfer?: MessagePort[])` and
-`MessagePortMain.postMessage(message, transfer?: MessagePortMain[])` accept only
-`MessagePort` values in a transfer list. Every buffer crossing Electron IPC is
-structured-cloned, which means copied.
-
-**What this does not break.** `FR-043` and `NFR-002` still hold. A copy living in
-memory is still never written to disk. `TC-041`, which asserts the worker-side
-`byteLength` is 0 after send, is the one test that becomes unachievable as
-written.
-
-**What is open, for TASK-011 to decide.** How to bound the number of live copies
-of a one-second PCM chunk, and what replaces `TC-041`. Candidates, none chosen:
-1. Accept the copy. One second of 16 kHz mono PCM is 32 KB, so the exposure is
-   small and short-lived. Replace `TC-041` with an assertion that the worker
-   drops its reference immediately after send.
-2. Keep the PCM in the worker and stream to the provider from there, sending
-   only transcripts to main. This changes `CMP-03a`'s role and puts network
-   access in a renderer, which cuts against `CMP-14`'s "never fetch from any
-   network" rule and would need its own decision.
-3. A `MessageChannelMain` port pair between the worker and main. This does not
-   avoid the copy; it only avoids the main-process hop.
-
-Milestone 0 does not depend on the answer. `src/preload/audioWorker.ts` sends by
-copy today and carries a comment pointing here, rather than encoding a mechanism
-that does not exist.
+Found while implementing Milestone 0 and answered at the start of Milestone 1.
+The reasoning and the measurements are in `ADR-027`. In short: the copy is real,
+it is also irrelevant, and the property worth testing is retention rather than
+copy count.
 
 ### OQ-001 — Transcript encryption at rest — RESOLVED: plaintext, stated plainly
 

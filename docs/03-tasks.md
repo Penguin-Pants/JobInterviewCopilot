@@ -134,8 +134,9 @@ valid, two of them security):
   was unreachable through the UI (FR-082, FR-084).
 
 Follow-up work found during implementation:
-- **OQ-003** (blocks TASK-011): Electron cannot transfer an `ArrayBuffer` across
-  IPC, so `CH-303`'s transfer mechanism and `TC-041` need replacing.
+- **OQ-003 resolved by ADR-027** at the start of Milestone 1: accept the copy,
+  bound retention instead. `TC-041` is rewritten from a byteLength assertion to
+  a retention assertion, and `FR-043` now states the enforceable property.
 - **TASK-011** must add the `media` permission to the permission request
   handler, which Milestone 0 sets to deny everything.
 - `Logger.rotateIfNeeded` calls `statSync` on every line. Harmless at Milestone 0
@@ -276,8 +277,13 @@ Follow-up work found during implementation:
 - The result is written into `docs/00-decision-log.md` as a confirmation note,
   or as a new ADR selecting the replacement approach if it fails.
 - If the package fails, the fallback is already designed in ADR-005 and is
-  selected here rather than invented. No new ADR is required, only a note
-  recording which of the three paths was chosen.
+  selected here rather than invented.
+- **Result: ADR-028.** The package is not needed. A sandboxed,
+  context-isolated renderer acquires the loopback stream through
+  `getDisplayMedia` alone, with main owning
+  `setDisplayMediaRequestHandler({ useSystemPicker: false })`. Verified on
+  Linux by `spike/loopback/`; Windows confirmation runs in the
+  `loopback-spike` CI job.
 - This task gates TASK-011. Do not start TASK-011 before it closes.
 **Verified by** MW-02
 
@@ -292,10 +298,12 @@ Follow-up work found during implementation:
 - Each chunk is exactly 32000 bytes (1000 ms at 16 kHz, 16-bit, mono) except
   the final partial chunk on stop.
 - Chunks carry `source`, `timestamp` and a per-source monotonic `sequence`.
-- The chunk is handed to main on `CH-303` and the worker keeps no reference to
-  it afterwards. **Electron cannot transfer an `ArrayBuffer` across IPC, so the
-  original "byteLength is 0 after send" criterion is not achievable; see OQ-003,
-  which this task must answer before the criterion is final.**
+- PCM retention is bounded (ADR-027). After a chunk is handed on, neither the
+  worker nor the supervisor retains a reference. Any deliberate buffering is
+  bounded by an exported constant, and the audio path exposes its live-chunk
+  count so the bound can be asserted from outside rather than inferred. The
+  chunk is copied rather than transferred, because Electron cannot transfer an
+  `ArrayBuffer`; the copy costs 31 KiB and 0.08 ms and is not the risk.
 - An ESLint rule forbids importing `fs`, `fs/promises` or `original-fs` across
   the whole reachable audio path, not just its start: `src/renderer/audio-worker/**`,
   `src/main/audio.ts`, `src/main/ai/stt.ts` and `src/main/ai/stt/**`. Transferring

@@ -172,8 +172,14 @@ little-endian, mono linear PCM. (ADR-006)
 **FR-042** Each stream must emit chunks of 1000 ms. Every chunk must carry a
 source tag of `interviewer` or `candidate`. (ADR-007)
 
-**FR-043** Raw audio must never be written to disk. Buffers exist in memory only
-and must be released once the chunk is handed to the STT layer.
+**FR-043** Raw audio must never be written to disk. Buffers exist in memory only.
+Every PCM reference must be released once its chunk has been handed on, and any
+deliberate buffering must be bounded by a declared constant. The non-streaming
+Whisper adapter's 4000 ms buffer (4 chunks) is such a declared bound (ADR-022).
+Electron cannot transfer an `ArrayBuffer` across IPC, so a chunk is copied rather
+than moved; the copy is not the risk and is not forbidden. Unbounded retention is
+the risk, because at 62.5 KiB per second a session that never releases
+accumulates about 220 MiB of interview audio in memory. (ADR-027)
 
 **FR-044** If the loopback stream cannot start (no capture device, permission
 denied), the app must start the candidate stream anyway, must show a Dashboard
