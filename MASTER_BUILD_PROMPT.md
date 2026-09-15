@@ -1,14 +1,10 @@
 # Interview CoPilot — Master Build Prompt
-
-## How To Use This Document
-Feed this file to Claude Code as the build spec for the Interview CoPilot Electron app. It replaces the original draft prompt. Every section reflects a decision locked in during product discovery.
-
 ## 0. Product Summary
 
-Interview CoPilot is a native Windows desktop app. It gives a job candidate real-time, glanceable prompts during a live video interview, pulled from the candidate's own resume and notes. The primary goal is accessibility support, for example ADHD or memory recall under stress, not scripted deception.
+Interview CoPilot is a native Windows desktop app. It gives a job candidate real-time, glanceable prompts during a live video interview, pulled from the candidate's own resume, company and job research and other notes. The primary goal is accessibility support, for example ADHD or memory recall under stress, not scripted deception.
 
 **Hard guardrails. Do not build around these:**
-- The overlay window must never be excluded from screen-share or recording capture. No `SetWindowDisplayAffinity` and no `WDA_EXCLUDEFROMCAPTURE` or equivalent.
+- The overlay window should be excluded from screen-share or recording capture because it could interfere with the interviewee presenting a presentation, business case etc. Consent has already been given.
 - The app must show a consent reminder before each live session. The interviewer's awareness of the tool is the user's responsibility. The app supports that responsibility, it does not hide from it.
 - Audio is never written to disk. Only text transcripts are persisted, and only because the user chose to keep them.
 
