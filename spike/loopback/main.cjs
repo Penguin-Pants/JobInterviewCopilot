@@ -23,6 +23,8 @@ const path = require('path');
 const os = require('os');
 
 const wantsJson = process.argv.includes('--json');
+const outIndex = process.argv.indexOf('--out');
+const outPath = outIndex >= 0 ? process.argv[outIndex + 1] : null;
 const TIMEOUT_MS = 25000;
 
 const result = {
@@ -46,6 +48,12 @@ const result = {
 };
 
 function finish(code) {
+  if (outPath) {
+    // Written to a file rather than parsed out of stdout: Chromium is noisy on
+    // every platform and a spike result that depends on log scraping is a
+    // spike result nobody can trust.
+    require('fs').writeFileSync(outPath, `${JSON.stringify(result, null, 2)}\n`);
+  }
   if (wantsJson) {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   } else {

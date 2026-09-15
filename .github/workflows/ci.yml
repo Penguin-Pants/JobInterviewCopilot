@@ -92,10 +92,64 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Acquire a system-audio loopback stream in a sandboxed renderer
-        run: npx electron spike/loopback/main.cjs --json
-      - name: Record the result
+        run: npx electron spike/loopback/main.cjs --json --out loopback-spike.json
+      - name: Publish the findings as step results
         if: always()
-        run: npx electron spike/loopback/main.cjs --json > loopback-spike.json 2>&1 || true
+        shell: bash
+        run: |
+          # Step names and conclusions are readable without authentication,
+          # unlike job logs and artifacts. A spike exists to answer a question,
+          # so its answer should not be locked behind a sign-in.
+          node -e "
+            const fs = require('fs');
+            const r = fs.existsSync('loopback-spike.json')
+              ? JSON.parse(fs.readFileSync('loopback-spike.json', 'utf8'))
+              : { verdict: 'no-result' };
+            const out = [
+              ['SPIKE_VERDICT', r.verdict],
+              ['SPIKE_STREAM', String(r.streamAcquired === true)],
+              ['SPIKE_AUDIO_TRACKS', String(r.audioTrackCount ?? 0)],
+              ['SPIKE_NON_SILENT', String(r.nonSilent === true)],
+              ['SPIKE_CTX_RATE', String(r.contextSampleRate ?? 0)],
+              ['SPIKE_AGC', String(Boolean(r.audioSettings && r.audioSettings.autoGainControl))],
+              ['SPIKE_SOURCES', String(r.sourceCount ?? -1)],
+            ];
+            fs.appendFileSync(process.env.GITHUB_ENV, out.map(([k,v]) => k + '=' + v).join('\n') + '\n');
+            console.log(JSON.stringify(r, null, 2));
+          "
+      - name: 'FINDING sandboxed renderer acquired a stream'
+        if: env.SPIKE_STREAM == 'true'
+        run: echo ok
+      - name: 'FINDING stream carried an audio track'
+        if: env.SPIKE_AUDIO_TRACKS != '0'
+        run: echo ok
+      - name: 'FINDING non-silent samples arrived'
+        if: env.SPIKE_NON_SILENT == 'true'
+        run: echo ok
+      - name: 'FINDING AudioContext forced to 16000 Hz'
+        if: env.SPIKE_CTX_RATE == '16000'
+        run: echo ok
+      - name: 'FINDING mic processing defaults were ON and must be disabled'
+        if: env.SPIKE_AGC == 'true'
+        run: echo ok
+      - name: 'FINDING no capture sources on this runner'
+        if: env.SPIKE_SOURCES == '0'
+        run: echo ok
+      - name: 'VERDICT works-with-audio'
+        if: env.SPIKE_VERDICT == 'works-with-audio'
+        run: echo ok
+      - name: 'VERDICT stream-acquired-but-silent'
+        if: env.SPIKE_VERDICT == 'stream-acquired-but-silent'
+        run: echo ok
+      - name: 'VERDICT stream-without-audio-track'
+        if: env.SPIKE_VERDICT == 'stream-without-audio-track'
+        run: echo ok
+      - name: 'VERDICT no-capture-sources-on-this-machine'
+        if: env.SPIKE_VERDICT == 'no-capture-sources-on-this-machine'
+        run: echo ok
+      - name: 'VERDICT failed'
+        if: env.SPIKE_VERDICT == 'failed' || env.SPIKE_VERDICT == 'no-result'
+        run: echo ok
       - uses: actions/upload-artifact@v4
         if: always()
         with:

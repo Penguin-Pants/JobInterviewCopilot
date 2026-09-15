@@ -613,12 +613,29 @@ the package implements, so nothing is being invented here.
    `TASK-011` must request them off explicitly. This is a transcription-quality
    bug that would have been extremely hard to diagnose from bad suggestions.
 
-**Status and fallback.** The evidence above is from Linux, where the spike also
-ran headless. Windows is the target platform (`NFR-011`) and the
-`loopback-spike` job on `windows-latest` confirms it there. If Windows
-contradicts this, the fallback is the package itself, used with a non-sandboxed
-audio worker and a recorded deviation from `FR-086`. The dependency stays
-declared until Windows has answered.
+**A third cost the spike exposed, after the fact.** Declaring the package as a
+production dependency broke the Windows installer build. It lists `electron` as
+a peer dependency, npm auto-installs peers, and so `electron` became reachable
+in the production dependency tree. electron-builder hard-errors on `electron`
+outside `devDependencies`, and the only symptom was `npm run package` failing on
+the Windows runner with nothing in the diff that looked like it concerned
+packaging.
+
+That is a real cost of the package independent of its maintenance risk, and it
+is now a test: `npm ls electron --omit=dev` must report an empty production
+tree. The test was verified by reinstalling the package and watching it fail,
+naming the offender.
+
+**Status.** The package is removed. The spike's own harness never imported it,
+so its result is unaffected. Windows confirmation runs in the `loopback-spike`
+job, whose findings are published as step names and conclusions rather than
+buried in logs: job logs and artifacts need authentication, and a spike whose
+answer cannot be read is not an answer.
+
+**Fallback if Windows contradicts the Linux result.** Reinstate the package,
+accept a non-sandboxed audio worker, record the deviation from `FR-086`, and
+move `electron` handling so the production tree stays clean. That is three
+costs, which is the measure of how much the direct path is worth.
 
 ---
 

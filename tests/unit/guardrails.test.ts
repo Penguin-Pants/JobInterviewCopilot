@@ -278,3 +278,52 @@ describe('a second launch restores a closed Dashboard', () => {
     expect(source).toMatch(/if \(!dashboardWindow \|\| dashboardWindow\.isDestroyed\(\)\)/);
   });
 });
+
+/**
+ * Regression: electron must never be reachable as a production dependency.
+ *
+ * `electron-audio-loopback` declares electron as a peer dependency. npm
+ * auto-installs peers, so adding that package silently made electron a
+ * production dependency, and electron-builder hard-errors on electron outside
+ * devDependencies. The only symptom was the Windows installer job failing at
+ * `npm run package`, with nothing in the diff obviously about packaging.
+ *
+ * This is cheap to assert and expensive to rediscover.
+ */
+describe('electron stays out of production dependencies', () => {
+  it('is declared only as a devDependency', () => {
+    const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+    expect(pkg.devDependencies?.electron, 'electron must be a devDependency').toBeDefined();
+    expect(pkg.dependencies?.electron, 'electron must not be a dependency').toBeUndefined();
+  });
+
+  it('no production dependency pulls electron in as a peer', () => {
+    // `npm ls electron --omit=dev` prints the production tree only. A package
+    // whose peer dependency is electron shows up here even though nothing
+    // declared electron directly.
+    //
+    // npm exits non-zero when the package is absent, which is the state we
+    // want, so the throw carries the answer and has to be read rather than
+    // propagated.
+    let output: string;
+    try {
+      output = execSync('npm ls electron --omit=dev --json', {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (err) {
+      output = (err as { stdout?: string }).stdout ?? '{}';
+    }
+
+    const tree = JSON.parse(output) as { dependencies?: Record<string, unknown> };
+    const production = Object.keys(tree.dependencies ?? {});
+
+    expect(
+      production,
+      `these production dependencies pull electron into the packaged app: ${production.join(', ')}`,
+    ).toEqual([]);
+  });
+});

@@ -718,7 +718,7 @@ is preferable to a network call during an interview.
 |---|---|---|---|
 | `electron` | Shell. Pin to a stable line with `setContentProtection` on Windows | FR-001, FR-005 | Low |
 | `electron-store` | Non-secret settings | FR-020 | Low |
-| `electron-audio-loopback` | WASAPI loopback capture | FR-040 | **High**, small package, Windows-specific, single maintainer |
+| *(none)* | Loopback capture uses the platform API: main owns `setDisplayMediaRequestHandler({ useSystemPicker: false })` and answers `audio: 'loopback'`, the audio worker calls `getDisplayMedia`. `electron-audio-loopback` was evaluated and removed (ADR-028): its renderer half needs `ipcRenderer` inside the renderer, which `FR-086` forbids, and declaring it made `electron` a production dependency, which breaks electron-builder | FR-040, ADR-028 | Low, about ten lines we own |
 | `@deepgram/sdk` | Deepgram streaming STT | FR-047 | Low |
 | `openai` | OpenAI realtime transcription, Whisper REST, GPT | FR-047, FR-070 | Low |
 | `@elevenlabs/elevenlabs-js` | Scribe v2 Realtime STT. A raw `ws` client is the fallback if the SDK does not expose the realtime STT socket cleanly | FR-047, ADR-022 | Medium, newest integration of the three |
