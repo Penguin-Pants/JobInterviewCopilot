@@ -39,6 +39,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      # Catches a main-process startup crash in about a second. Without it the
+      # only symptom is the E2E suite timing out per test with "no window
+      # appeared", which costs minutes and names nothing.
+      - run: npm run smoke:main
 
   e2e:
     name: Electron E2E (Windows)
@@ -50,7 +54,11 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # Force the Electron binary to be present before the tests. Otherwise the
+      # first launch downloads it mid-run and races the 30s window timeout.
+      - run: npx electron --version
       - run: npm run build
+      - run: npm run smoke:main
       - run: npm run test:e2e
       - uses: actions/upload-artifact@v4
         if: failure()

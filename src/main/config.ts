@@ -1,6 +1,16 @@
 import { existsSync, readdirSync, readFileSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import ElectronStore from 'electron-store';
+import ElectronStoreImport from 'electron-store';
+
+/**
+ * electron-store's generic requires an index signature, which `Settings`
+ * deliberately does not have: an index signature would let any key be written
+ * and defeat the schema. The store is therefore typed loosely and the two
+ * boundary reads and writes are cast, with `settingsSchema` validating both
+ * directions so the cast can never smuggle in a bad shape.
+ */
+type StoreShape = Record<string, unknown>;
+type ElectronStoreInstance = InstanceType<typeof ElectronStoreImport<StoreShape>>;
 import { defaultSettings, SETTINGS_LIMITS } from '../shared/defaults.js';
 import { settingsSchema } from '../shared/ipc.js';
 import type { Settings } from '../shared/types.js';
@@ -15,6 +25,21 @@ import type { Settings } from '../shared/types.js';
  * Secrets never appear here. They live in secrets.bin behind safeStorage
  * (FR-021) and no code path in this file reads or writes them.
  */
+
+/**
+ * Interop guard for electron-store, which is ESM-only (FR-020).
+ *
+ * The main process ships as a CommonJS bundle, so this import compiles to
+ * `require('electron-store')`. Under Node's require(ESM) interop that yields the
+ * module namespace object, `{ __esModule, default }`, not the class. Calling
+ * `new` on it throws "is not a constructor" at startup, which kills the app
+ * before any window opens and shows up only as a window-never-appeared timeout.
+ *
+ * Bundlers and test runners resolve the default export for you, so this is
+ * invisible until the packaged CommonJS build actually runs. TC-037 pins it.
+ */
+const ElectronStore = ((ElectronStoreImport as unknown as { default?: unknown }).default ??
+  ElectronStoreImport) as typeof ElectronStoreImport;
 
 const MAX_CORRUPT_FILES = 3;
 
@@ -198,7 +223,7 @@ export interface ConfigStoreOptions {
 
 /** The settings store (FR-020). */
 export class ConfigStore {
-  private readonly store: ElectronStore<Settings>;
+  private readonly store: ElectronStoreInstance;
 
   constructor(options: ConfigStoreOptions) {
     mkdirSync(options.dir, { recursive: true });
@@ -209,21 +234,21 @@ export class ConfigStore {
     // The Settings object is the whole file, not a value nested under a key.
     // settings.json must be exactly the shape quarantineIfCorrupt validates,
     // otherwise a valid file looks corrupt on the next launch.
-    this.store = new ElectronStore<Settings>({
+    this.store = new ElectronStore<StoreShape>({
       cwd: options.dir,
       name: 'settings',
-      defaults: defaultSettings(),
+      defaults: defaultSettings() as unknown as StoreShape,
     });
 
     // Migrate and clamp whatever survived, then write it back once.
-    const parsed = settingsSchema.safeParse(migrate(this.store.store as unknown as UnknownRecord));
+    const parsed = settingsSchema.safeParse(migrate(this.store.store as UnknownRecord));
     const settled = parsed.success ? clampSettings(parsed.data as Settings) : defaultSettings();
-    this.store.store = settled;
+    this.store.store = settled as unknown as StoreShape;
   }
 
   /** The whole settings object. Never contains a secret (FR-021). */
   get(): Settings {
-    return structuredClone(this.store.store) as Settings;
+    return structuredClone(this.store.store) as unknown as Settings;
   }
 
   /** Merge a partial update, validate it, clamp it and persist it. */
@@ -231,7 +256,7 @@ export class ConfigStore {
     const merged = deepMerge(this.get(), patch) as Settings;
     assertBackupDiffersFromPrimary(merged);
     const validated = settingsSchema.parse(clampSettings(merged)) as Settings;
-    this.store.store = validated;
+    this.store.store = validated as unknown as StoreShape;
     return structuredClone(validated);
   }
 

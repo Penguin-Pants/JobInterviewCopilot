@@ -22,7 +22,8 @@
     "test:coverage": "vitest run --coverage",
     "test:e2e": "playwright test",
     "licenses": "node scripts/check-licenses.mjs",
-    "trace": "python3 scripts/traceability.py"
+    "trace": "python3 scripts/traceability.py",
+    "smoke:main": "node scripts/smoke-main.cjs"
   },
   "dependencies": {
     "electron-store": "^11.0.2",

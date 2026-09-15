@@ -54,6 +54,18 @@ Deferred out of Milestone 0 by design, each failing loudly rather than silently:
 - The `togglePause` hotkey is registered and rebindable, but its handler only
   logs until the trigger exists in TASK-030.
 
+Found by the first CI run and fixed on the same branch:
+- The main process ships as CommonJS and `electron-store` is ESM-only, so
+  `require('electron-store')` yielded the module namespace object rather than
+  the class. `new` on it threw inside `bootstrap`, where the app's own
+  `unhandledRejection` handler swallowed it, leaving a live process with no
+  windows. All five E2E cases reported only a 30-second "no window appeared"
+  timeout. Fixed with an interop guard, pinned by `TC-037`, and turned into a
+  fast failure by `npm run smoke:main`, which loads the built bundle against a
+  stubbed Electron and asserts bootstrap wrote its settings file. `zod` was
+  checked for the same problem and is fine, because it exports `z` as a named
+  export that survives the namespace.
+
 Follow-up work found during implementation:
 - **OQ-003** (blocks TASK-011): Electron cannot transfer an `ArrayBuffer` across
   IPC, so `CH-303`'s transfer mechanism and `TC-041` need replacing.

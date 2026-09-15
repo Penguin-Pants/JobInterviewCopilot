@@ -53,3 +53,39 @@ describe('TC-031 settings store recovery through electron-store', () => {
     expect(new ConfigStore({ dir }).get().theme.mode).toBe('dark');
   });
 });
+
+/**
+ * TC-037: electron-store must be usable from the CommonJS bundle.
+ *
+ * Regression test for a startup crash that only appeared in the packaged app.
+ * electron-store is ESM-only, the main process ships as CommonJS, and Node's
+ * require(ESM) interop hands back the module namespace object rather than the
+ * class. `new` on that throws at startup, so the app died before opening a
+ * window and the E2E suite saw only "no window appeared" timeouts.
+ *
+ * Vitest and the bundler both resolve the default export transparently, so a
+ * plain import cannot catch this. The require path has to be asserted directly.
+ */
+describe('TC-037 electron-store CommonJS interop', () => {
+  it('require() yields a namespace object, not the constructor', async () => {
+    const { createRequire } = await import('node:module');
+    const require = createRequire(import.meta.url);
+    const required = require('electron-store') as unknown;
+
+    // If this ever becomes a function upstream, the guard is harmless.
+    // If it stays an object, the guard is the only thing keeping the app alive.
+    if (typeof required === 'object' && required !== null) {
+      expect(() => new (required as new () => unknown)()).toThrow(/not a constructor/);
+      expect(typeof (required as { default?: unknown }).default).toBe('function');
+    } else {
+      expect(typeof required).toBe('function');
+    }
+  });
+
+  it('ConfigStore constructs and persists, which is what the guard protects', () => {
+    const dir = tmp();
+    const store = new ConfigStore({ dir });
+    store.set({ theme: { ...store.get().theme, overlayFontSizePx: 28 } });
+    expect(new ConfigStore({ dir }).get().theme.overlayFontSizePx).toBe(28);
+  });
+});
