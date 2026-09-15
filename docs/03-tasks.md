@@ -86,6 +86,41 @@ Found by the second CI run and fixed on the same branch:
   loads and the Dashboard renders under `file://` in Electron with the meta
   policy in place, so `'self' file:` is correct and the app is not broken by it.
 
+Found by automated review and fixed on the same branch (nine findings, all
+valid, two of them security):
+- **The overlay preload forwarded every invoke channel.** Push had a per-window
+  allowlist, invoke had none, so a compromised overlay renderer could write
+  settings, rebind hotkeys or replace credentials. Both directions are now
+  allowlisted and the overlay's list is three channels.
+- **The bridge type promised only the success shape.** The router resolves with
+  an `IpcError` rather than rejecting, so TypeScript could not force callers to
+  check. `invoke` now returns `InvokeResponse<C> | IpcError`, which immediately
+  caught an unchecked caller at compile time.
+- **The consent gate could not work.** The overlay reported `overlay:ready` on
+  mount while the consent text was still null, because main only sent the text
+  in reply to that message. Main now pushes it on `did-finish-load` and the
+  renderer reports ready only after the card has painted (ADR-016).
+- **Theme changes never reached the running overlay.** `config:set` persisted
+  the patch and stopped; `translucencyChangeNeedsRecreate` was exported and
+  tested but never called. `config:set` now pushes the theme and recreates the
+  window on a mode change, preserving position and click-through (FR-085).
+- **A startup hotkey conflict was forgotten.** `register` stored the handler but
+  not the accelerator, so `reregisterAll` had nothing to retry, defeating Reset
+  Overlay's recovery path for the exact case it exists for (FR-009).
+- **A closed Dashboard could not be reopened.** The overlay keeps the process
+  alive, so a second launch lost the lock and returned early, leaving no way
+  back short of killing the process.
+- **Provider separation was only enforced on write.** A schema-valid file naming
+  the same provider for primary and backup loaded cleanly, so the app could run
+  with a backup sharing the failing service and credential. Now cleared on load
+  with a logged reason, rather than refusing to start (FR-025).
+- **The vault accepted a decrypted array.** Assigning a named property to an
+  array is dropped by `JSON.stringify`, so `set()` returned success while
+  storing nothing and `status()` stayed false. A silent credential loss.
+- **The overlay was not draggable.** A frameless window needs an explicit drag
+  region; accepting mouse events is not enough. The `moved` persistence handler
+  was unreachable through the UI (FR-082, FR-084).
+
 Follow-up work found during implementation:
 - **OQ-003** (blocks TASK-011): Electron cannot transfer an `ArrayBuffer` across
   IPC, so `CH-303`'s transfer mechanism and `TC-041` need replacing.

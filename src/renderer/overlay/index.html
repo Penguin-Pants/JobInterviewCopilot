@@ -16,6 +16,24 @@
         overflow: hidden;
         font-family: system-ui, sans-serif;
       }
+
+      /*
+       * A frameless window is not movable just because it accepts mouse events.
+       * Windows needs an explicit drag region, so the card carries one and the
+       * controls inside it opt back out; without this the interaction toggle
+       * lets the user click the overlay but never move it (FR-082, FR-084).
+       */
+      [data-drag-region] {
+        -webkit-app-region: drag;
+        cursor: move;
+      }
+
+      button,
+      a,
+      input,
+      [data-no-drag] {
+        -webkit-app-region: no-drag;
+      }
     </style>
   </head>
   <body>

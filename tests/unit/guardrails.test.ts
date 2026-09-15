@@ -168,3 +168,113 @@ describe('TC-008 content security policy', () => {
     }
   });
 });
+
+/**
+ * FR-086 regression: the overlay preload forwarded every invoke channel.
+ *
+ * Push had a per-window allowlist but invoke did not, so a compromised overlay
+ * renderer could write settings, rebind hotkeys or replace credentials. Both
+ * directions are now allowlisted, and the overlay's list is deliberately tiny.
+ */
+describe('FR-086 preload invoke allowlists', () => {
+  it('the overlay may invoke only the three channels its UI needs', () => {
+    const source = readFileSync('src/preload/overlay.ts', 'utf8');
+    const block = /ALLOWED_INVOKE[^=]*=\s*\[([^\]]*)\]/s.exec(source)?.[1] ?? '';
+    const channels = [...block.matchAll(/'([^']+)'/g)].map((m) => m[1]).sort();
+
+    expect(channels).toEqual(['consent:dismiss', 'overlay:ready', 'overlay:savePosition']);
+    for (const forbidden of ['secrets:set', 'config:set', 'hotkey:rebind', 'session:start']) {
+      expect(block, `overlay must not reach ${forbidden}`).not.toContain(forbidden);
+    }
+  });
+
+  it('both preloads gate invoke, not just push', () => {
+    for (const file of ['src/preload/overlay.ts', 'src/preload/dashboard.ts']) {
+      const source = readFileSync(file, 'utf8');
+      expect(source, `${file} has no invoke allowlist`).toContain('allowedInvoke');
+      expect(source).toMatch(/if \(!allowedInvoke\.has\(channel\)\)/);
+    }
+  });
+
+  it('no preload exposes a bare ipcRenderer.invoke forwarder', () => {
+    for (const file of ['src/preload/overlay.ts', 'src/preload/dashboard.ts']) {
+      const source = readFileSync(file, 'utf8');
+      expect(source).not.toMatch(/invoke:\s*\(channel,\s*payload\)\s*=>\s*ipcRenderer\.invoke/);
+    }
+  });
+});
+
+/**
+ * ADR-016 regression: the overlay reported readiness on mount, while the
+ * consent text was still null, because the text only arrived in reply to that
+ * very message. The gate opened before the reminder existed.
+ */
+describe('ADR-016 consent renders before readiness is reported', () => {
+  it('the renderer waits for the consent text before reporting ready', () => {
+    const source = readFileSync('src/renderer/overlay/Overlay.tsx', 'utf8');
+    expect(source).toMatch(/if \(consent === null[^)]*\) return;/);
+    expect(source).toContain("invoke('overlay:ready')");
+  });
+
+  it('main pushes the consent text on load rather than in reply to ready', () => {
+    const source = readFileSync('src/main/index.ts', 'utf8');
+    const onLoad = source.slice(source.indexOf('did-finish-load'), source.indexOf("on('moved'"));
+    expect(onLoad).toContain("'overlay:consent'");
+
+    const readyHandler = source.slice(source.indexOf("router.handle('overlay:ready'"));
+    expect(readyHandler.slice(0, 400)).not.toContain("'overlay:consent'");
+  });
+});
+
+/**
+ * FR-082 / FR-084 regression: a frameless window is not movable just because it
+ * accepts mouse events. Without a drag region the interaction toggle made the
+ * overlay clickable but immovable, and the `moved` persistence handler could
+ * never be reached through the UI.
+ */
+describe('FR-082 overlay is actually draggable in interactive mode', () => {
+  it('declares a drag region and opts controls back out', () => {
+    const html = readFileSync('src/renderer/overlay/index.html', 'utf8');
+    expect(html).toContain('-webkit-app-region: drag');
+    expect(html).toContain('-webkit-app-region: no-drag');
+  });
+
+  it('applies the drag region only in interactive mode', () => {
+    const source = readFileSync('src/renderer/overlay/Overlay.tsx', 'utf8');
+    expect(source).toMatch(/interactive \? \{ 'data-drag-region'/);
+  });
+});
+
+/**
+ * FR-085 / ADR-015 regression: config:set persisted a theme change but never
+ * applied it, and the recreation helper was exported and tested yet never
+ * called, so the running overlay kept its old appearance until restart.
+ */
+describe('FR-085 theme changes reach the running overlay', () => {
+  it('config:set applies the change rather than only persisting it', () => {
+    const source = readFileSync('src/main/index.ts', 'utf8');
+    const handler = source.slice(source.indexOf("router.handle('config:set'"));
+    expect(handler.slice(0, 300)).toContain('applyThemeChange');
+  });
+
+  it('a translucency mode change recreates the overlay', () => {
+    const source = readFileSync('src/main/index.ts', 'utf8');
+    expect(source).toContain('translucencyChangeNeedsRecreate(');
+    const apply = source.slice(source.indexOf('async function applyThemeChange'));
+    expect(apply.slice(0, 900)).toContain('createOverlayWindow(after)');
+  });
+});
+
+/**
+ * Regression: closing the Dashboard left the overlay holding the process open,
+ * so a second launch lost the single-instance lock and returned early. The user
+ * had no Dashboard and no way to open one short of killing the process.
+ */
+describe('a second launch restores a closed Dashboard', () => {
+  it('second-instance recreates rather than returning early', () => {
+    const source = readFileSync('src/main/index.ts', 'utf8');
+    const handler = source.slice(source.indexOf("app.on('second-instance'"));
+    expect(handler.slice(0, 500)).toContain('focusOrRecreateDashboard');
+    expect(source).toMatch(/if \(!dashboardWindow \|\| dashboardWindow\.isDestroyed\(\)\)/);
+  });
+});

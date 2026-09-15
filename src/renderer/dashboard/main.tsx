@@ -16,7 +16,9 @@ function Dashboard(): JSX.Element {
   const [resetState, setResetState] = useState<'idle' | 'done' | 'failed'>('idle');
 
   useEffect(() => {
-    void window.copilot.invoke('config:get').then(setSettings);
+    void window.copilot.invoke('config:get').then((result) => {
+      if (!isIpcError(result)) setSettings(result);
+    });
     return window.copilot.on('notice:captureFidelity', (p) => setNotice(p.message));
   }, []);
 

@@ -6,6 +6,7 @@ import {
   assertBackupDiffersFromPrimary,
   clampSettings,
   ConfigStore,
+  dropInvalidBackups,
   migrate,
   pruneCorruptFiles,
   quarantineCorruptFile,
@@ -209,5 +210,46 @@ describe('ConfigStore round trip', () => {
 
     expect(seen).toHaveLength(1);
     expect(store.get().theme.overlayFontSizePx).toBe(22);
+  });
+});
+
+/**
+ * FR-025 regression: the separation invariant was only enforced by set(), so a
+ * schema-valid file naming the same provider for primary and backup loaded
+ * cleanly. The app would then run with a "backup" sharing the failing service
+ * and credential, until some later write happened to throw.
+ */
+describe('FR-025 provider separation is enforced on load', () => {
+  it('clears a backup that matches its primary', () => {
+    const s = defaultSettings();
+    s.providers.stt.backup = { providerId: 'deepgram', modelId: 'nova-2' };
+    s.providers.llm.backup = { providerId: 'openai', modelId: 'gpt-4o-mini' };
+
+    const dropped = dropInvalidBackups(s);
+
+    expect(dropped.providers.stt.backup).toBeNull();
+    // A genuinely different provider is left alone.
+    expect(dropped.providers.llm.backup).toEqual({ providerId: 'openai', modelId: 'gpt-4o-mini' });
+  });
+
+  it('reports which capability was cleared', () => {
+    const s = defaultSettings();
+    s.providers.llm.backup = { providerId: 'anthropic', modelId: 'other' };
+
+    const seen: string[] = [];
+    dropInvalidBackups(s, (capability) => seen.push(capability));
+
+    expect(seen).toEqual(['llm']);
+  });
+
+  it('a file written by hand with a duplicate backup still starts, cleaned', () => {
+    const dir = tmp();
+    const bad = defaultSettings();
+    bad.providers.stt.backup = { providerId: 'deepgram', modelId: 'nova-2' };
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify(bad), 'utf8');
+
+    const store = new ConfigStore({ dir });
+
+    expect(store.get().providers.stt.backup).toBeNull();
   });
 });

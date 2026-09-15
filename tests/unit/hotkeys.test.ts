@@ -140,3 +140,44 @@ describe('lifecycle', () => {
     expect(manager.current('togglePause')).toBeUndefined();
   });
 });
+
+/**
+ * FR-009 / FR-030 regression: a binding that lost a conflict at startup was
+ * forgotten, so Reset Overlay's reregisterAll had nothing to retry. That
+ * defeated the recovery path for exactly the case Reset Overlay exists for.
+ */
+describe('FR-009 startup conflicts are retried, not forgotten', () => {
+  it('remembers the desired accelerator even when registration fails', () => {
+    shortcuts.takenByOthers.add('Control+Shift+I');
+
+    const result = manager.register('toggleInteraction', 'Control+Shift+I', () => {});
+
+    expect(result.ok).toBe(false);
+    expect(manager.current('toggleInteraction')).toBeUndefined();
+    expect(manager.desiredFor('toggleInteraction')).toBe('Control+Shift+I');
+  });
+
+  it('reregisterAll takes the accelerator once the conflict clears', () => {
+    const handler = vi.fn();
+    shortcuts.takenByOthers.add('Control+Shift+I');
+    manager.register('toggleInteraction', 'Control+Shift+I', handler);
+
+    // The other application releases the key.
+    shortcuts.takenByOthers.delete('Control+Shift+I');
+    manager.reregisterAll();
+
+    expect(shortcuts.isRegistered('Control+Shift+I')).toBe(true);
+    expect(manager.current('toggleInteraction')).toBe('Control+Shift+I');
+
+    shortcuts.fire('Control+Shift+I');
+    expect(handler).toHaveBeenCalledOnce();
+  });
+
+  it('leaves a still-conflicting accelerator unregistered without throwing', () => {
+    shortcuts.takenByOthers.add('Control+Shift+P');
+    manager.register('togglePause', 'Control+Shift+P', () => {});
+
+    expect(() => manager.reregisterAll()).not.toThrow();
+    expect(manager.current('togglePause')).toBeUndefined();
+  });
+});

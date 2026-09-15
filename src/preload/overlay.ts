@@ -1,16 +1,28 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { CopilotBridge } from '../shared/bridge.js';
-import type { PushChannel, PushPayload } from '../shared/ipc.js';
+import type { InvokeChannel, PushChannel, PushPayload } from '../shared/ipc.js';
 
 /**
  * Overlay preload (CMP-14).
  *
- * Self-contained by necessity, see the note in dashboard.ts.
+ * Self-contained by necessity: a preload has to be one file, so the bridge
+ * implementation is written here rather than imported from a shared runtime
+ * module. The shape is pinned by CopilotBridge.
  *
- * The allowlist deliberately carries no error channel. The overlay has two
- * states, idle and suggestions, and no error state, so there is no way for a
- * provider failure to reach it (FR-076, TC-096).
+ * Both directions are allowlisted. An unrestricted invoke forwarder would give
+ * a compromised overlay renderer the whole main-process surface, including
+ * writing settings, rebinding hotkeys and replacing credentials. The overlay
+ * needs three channels, so it gets three (FR-086).
+ *
+ * The push allowlist deliberately carries no error channel. The overlay has two
+ * states, idle and suggestions, and no error state (FR-076, TC-096).
  */
+
+const ALLOWED_INVOKE: readonly InvokeChannel[] = [
+  'overlay:ready',
+  'overlay:savePosition',
+  'consent:dismiss',
+];
 
 const ALLOWED_PUSH: readonly PushChannel[] = [
   'suggestion:begin',
@@ -22,12 +34,18 @@ const ALLOWED_PUSH: readonly PushChannel[] = [
   'state:session',
 ];
 
-const allowed = new Set<string>(ALLOWED_PUSH);
+const allowedInvoke = new Set<string>(ALLOWED_INVOKE);
+const allowedPush = new Set<string>(ALLOWED_PUSH);
 
 const bridge: CopilotBridge = {
-  invoke: (channel, payload) => ipcRenderer.invoke(channel, payload),
+  invoke: (channel, payload) => {
+    if (!allowedInvoke.has(channel)) {
+      return Promise.reject(new Error(`Channel ${channel} is not exposed to the overlay.`));
+    }
+    return ipcRenderer.invoke(channel, payload);
+  },
   on: (channel, listener) => {
-    if (!allowed.has(channel)) {
+    if (!allowedPush.has(channel)) {
       throw new Error(`Channel ${channel} is not exposed to the overlay.`);
     }
     const wrapped = (_event: unknown, payload: unknown): void =>

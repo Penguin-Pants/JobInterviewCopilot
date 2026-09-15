@@ -24,7 +24,17 @@ export interface RebindResult {
 }
 
 export class HotkeyManager {
+  /** Accelerators currently held by this app. */
   private readonly bindings = new Map<HotkeyAction, string>();
+  /**
+   * Accelerators the user wants, whether or not registration succeeded.
+   *
+   * Kept separately because a startup conflict used to be forgotten entirely:
+   * the handler was stored but the accelerator was not, so `reregisterAll` had
+   * nothing to retry and Reset Overlay could not recover the very case it
+   * exists for (FR-009, FR-030).
+   */
+  private readonly desired = new Map<HotkeyAction, string>();
   private readonly handlers = new Map<HotkeyAction, () => void>();
 
   constructor(private readonly shortcuts: GlobalShortcutLike) {}
@@ -38,6 +48,7 @@ export class HotkeyManager {
    */
   register(action: HotkeyAction, accelerator: string, handler: () => void): RebindResult {
     this.handlers.set(action, handler);
+    this.desired.set(action, accelerator);
 
     let registered: boolean;
     try {
@@ -68,6 +79,7 @@ export class HotkeyManager {
     if (!handler) return { ok: false, error: `No handler registered for ${action}.` };
 
     const previous = this.bindings.get(action);
+    this.desired.set(action, accelerator);
     if (previous === accelerator) return { ok: true };
 
     // Free the old accelerator only for the duration of the attempt when the
@@ -101,14 +113,27 @@ export class HotkeyManager {
     return this.bindings.get(action);
   }
 
-  /** Re-register every known binding. Used by Reset Overlay (FR-009). */
+  /** The accelerator the user asked for, even if it could not be registered. */
+  desiredFor(action: HotkeyAction): string | undefined {
+    return this.desired.get(action);
+  }
+
+  /**
+   * Retry every accelerator the user asked for, including ones that lost a
+   * conflict at startup. This is Reset Overlay's recovery path (FR-009), so it
+   * has to work for a binding this app never managed to take.
+   */
   reregisterAll(): void {
-    for (const [action, accelerator] of [...this.bindings.entries()]) {
+    for (const [action, accelerator] of [...this.desired.entries()]) {
       const handler = this.handlers.get(action);
       if (!handler) continue;
       try {
-        if (!this.shortcuts.isRegistered(accelerator)) {
-          this.shortcuts.register(accelerator, handler);
+        if (this.shortcuts.isRegistered(accelerator)) {
+          this.bindings.set(action, accelerator);
+          continue;
+        }
+        if (this.shortcuts.register(accelerator, handler)) {
+          this.bindings.set(action, accelerator);
         }
       } catch (err) {
         getLogger().warn('hotkey re-registration failed', { action, accelerator, err });

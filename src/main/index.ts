@@ -24,7 +24,7 @@ import {
   translucencyChangeNeedsRecreate,
   windowsBuildNumber,
 } from './windows.js';
-import type { CredentialId, ValidationResult } from '../shared/types.js';
+import type { CredentialId, Settings, ValidationResult } from '../shared/types.js';
 
 /**
  * Application bootstrap (CMP-01).
@@ -52,10 +52,11 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on('second-instance', () => {
-    if (!dashboardWindow) return;
-    if (dashboardWindow.isMinimized()) dashboardWindow.restore();
-    dashboardWindow.show();
-    dashboardWindow.focus();
+    // The overlay keeps the process alive after the Dashboard is closed, so a
+    // second launch is the user's way back to it. Returning early here left
+    // them with no Dashboard and no way to open one short of killing the
+    // background process.
+    void focusOrRecreateDashboard();
   });
   void bootstrap();
 }
@@ -105,6 +106,20 @@ async function bootstrap(): Promise<void> {
     router.dispose();
     getLogger().close();
   });
+}
+
+/** Bring the Dashboard forward, creating it again when it has been closed. */
+async function focusOrRecreateDashboard(): Promise<void> {
+  if (!dashboardWindow || dashboardWindow.isDestroyed()) {
+    dashboardWindow = await createDashboardWindow(config.get());
+    dashboardWindow.on('closed', () => {
+      dashboardWindow = null;
+    });
+    return;
+  }
+  if (dashboardWindow.isMinimized()) dashboardWindow.restore();
+  dashboardWindow.show();
+  dashboardWindow.focus();
 }
 
 /** Re-create the windows after they have all been closed, without re-bootstrapping. */
@@ -169,6 +184,17 @@ function applyContentSecurityPolicy(): void {
 
 function wireOverlayWindow(): void {
   if (!overlayWindow) return;
+
+  // Push the theme and the consent text as soon as the renderer has loaded.
+  // The renderer reports readiness only after the consent card has painted, so
+  // the text has to arrive first; replying to overlay:ready with it would
+  // deadlock the gate it is supposed to close (ADR-016).
+  overlayWindow.webContents.on('did-finish-load', () => {
+    const settings = config.get();
+    push(overlayWindow?.webContents, 'overlay:theme', settings.theme);
+    push(overlayWindow?.webContents, 'overlay:consent', { text: settings.consentReminderText });
+  });
+
   overlayWindow.on('moved', () => {
     if (overlayWindow) saveOverlayPosition(overlayWindow, config);
   });
@@ -191,6 +217,39 @@ function registerHotkeys(): void {
     getLogger().info('pause hotkey fired before the trigger exists (TASK-030)');
   });
   if (!pause.ok) getLogger().warn('pause hotkey unavailable', pause);
+}
+
+/**
+ * Apply a theme change to the running overlay (FR-085, ADR-015).
+ *
+ * Opacity, accent and font size are pushed and applied live. A translucency
+ * mode change cannot be: acrylic needs `backgroundMaterial` with
+ * `transparent: false`, flat opacity needs `transparent: true`, and Electron
+ * fixes both at construction. So the window is rebuilt, keeping its position,
+ * monitor and click-through state. "Without a restart" means without restarting
+ * the application, not without recreating the window.
+ */
+async function applyThemeChange(before: Settings, after: Settings): Promise<void> {
+  if (!overlayWindow || overlayWindow.isDestroyed()) return;
+
+  if (
+    translucencyChangeNeedsRecreate(
+      before.theme.overlayTranslucency,
+      after.theme.overlayTranslucency,
+    )
+  ) {
+    const [x, y] = overlayWindow.getPosition();
+    const wasVisible = overlayWindow.isVisible();
+    overlayWindow.destroy();
+    overlayWindow = await createOverlayWindow(after);
+    wireOverlayWindow();
+    if (x !== undefined && y !== undefined) overlayWindow.setPosition(x, y);
+    overlayWindow.setIgnoreMouseEvents(!overlayInteractive, { forward: true });
+    if (wasVisible) overlayWindow.showInactive();
+    return;
+  }
+
+  push(overlayWindow.webContents, 'overlay:theme', after.theme);
 }
 
 function setOverlayInteractive(interactive: boolean): void {
@@ -232,7 +291,12 @@ async function validateKey(credentialId: CredentialId, _key: string): Promise<Va
 
 function registerIpcHandlers(): void {
   router.handle('config:get', () => config.get());
-  router.handle('config:set', (patch) => config.set(patch));
+  router.handle('config:set', async (patch) => {
+    const before = config.get();
+    const after = config.set(patch);
+    await applyThemeChange(before, after);
+    return after;
+  });
 
   router.handle('secrets:status', () => secrets.status());
   router.handle('secrets:set', async ({ provider, key }) =>
@@ -279,10 +343,17 @@ function registerIpcHandlers(): void {
     return { ok: true as const };
   });
 
+  /**
+   * The overlay has mounted and rendered its consent card (FR-008, ADR-016).
+   *
+   * This is the signal the suggestion buffer will gate on. The buffer itself
+   * belongs to TASK-032, which is where the messages being buffered first
+   * exist, so nothing is held here yet. Keeping unused state now would be
+   * speculative; the ordering guarantee it depends on is what Milestone 0 has
+   * to get right, and that is on the renderer side.
+   */
   router.handle('overlay:ready', () => {
-    const settings = config.get();
-    push(overlayWindow?.webContents, 'overlay:theme', settings.theme);
-    push(overlayWindow?.webContents, 'overlay:consent', { text: settings.consentReminderText });
+    getLogger().info('overlay reported ready, consent card rendered');
     return { ok: true as const };
   });
 }

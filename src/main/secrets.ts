@@ -79,7 +79,12 @@ export class SecretVaultStore {
     try {
       const plain = this.safeStorage.decryptString(readFileSync(this.file));
       const parsed: unknown = JSON.parse(plain);
-      return typeof parsed === 'object' && parsed !== null ? (parsed as SecretVault) : {};
+      // Arrays pass a naive typeof-object check, and assigning a named property
+      // to one is silently dropped by JSON.stringify: set() would report
+      // success while storing nothing and status() would stay false. Only a
+      // plain record is a vault.
+      const isPlainRecord = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed);
+      return isPlainRecord ? (parsed as SecretVault) : {};
     } catch {
       // An unreadable vault is treated as empty. The user re-enters their keys.
       // The file is left alone rather than deleted, so nothing is destroyed.

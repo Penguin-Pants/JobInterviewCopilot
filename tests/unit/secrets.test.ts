@@ -161,3 +161,44 @@ describe('TC-024 validate before save', () => {
     expect(vault.status()).toMatchObject({ openai: false, deepgram: true });
   });
 });
+
+/**
+ * Regression: a damaged secrets.bin that decrypts to valid JSON such as `[]`
+ * passed a naive typeof-object check. Assigning a named property to an array is
+ * dropped by JSON.stringify, so set() reported success while storing nothing
+ * and status() stayed false. A silent credential loss is worse than an error.
+ */
+describe('vault rejects non-record payloads', () => {
+  it('treats a decrypted array as an empty vault and still stores the key', async () => {
+    const dir = tmp();
+    const safeStorage: SafeStorageLike = {
+      isEncryptionAvailable: () => true,
+      encryptString: (plain) => Buffer.from(`enc:${plain}`, 'utf8'),
+      decryptString: (buf) => buf.toString('utf8').replace(/^enc:/, ''),
+    };
+    const vault = new SecretVaultStore({ dir, safeStorage });
+
+    // A vault whose contents decrypt to an array.
+    writeFileSync(vault.file, 'enc:[]', 'utf8');
+
+    const result = await vault.set('openai', SAMPLE_KEY, alwaysValid);
+
+    expect(result.ok).toBe(true);
+    expect(vault.status().openai, 'the key must actually be stored').toBe(true);
+    expect(vault.peek('openai')).toBe(SAMPLE_KEY);
+  });
+
+  it('treats a decrypted scalar as an empty vault', async () => {
+    const dir = tmp();
+    const safeStorage: SafeStorageLike = {
+      isEncryptionAvailable: () => true,
+      encryptString: (plain) => Buffer.from(`enc:${plain}`, 'utf8'),
+      decryptString: (buf) => buf.toString('utf8').replace(/^enc:/, ''),
+    };
+    const vault = new SecretVaultStore({ dir, safeStorage });
+    writeFileSync(vault.file, 'enc:"nonsense"', 'utf8');
+
+    expect(await vault.set('deepgram', 'abc', alwaysValid)).toEqual({ ok: true });
+    expect(vault.status().deepgram).toBe(true);
+  });
+});

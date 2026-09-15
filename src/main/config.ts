@@ -163,6 +163,25 @@ export function assertBackupDiffersFromPrimary(settings: Settings): void {
   }
 }
 
+/**
+ * Clear any backup that names the same provider as its primary (FR-025).
+ * Used on load, where throwing would leave the user unable to start the app.
+ */
+export function dropInvalidBackups(
+  settings: Settings,
+  onDropped?: (capability: 'stt' | 'llm') => void,
+): Settings {
+  const next = structuredClone(settings);
+  for (const capability of ['stt', 'llm'] as const) {
+    const { primary, backup } = next.providers[capability];
+    if (backup && backup.providerId === primary.providerId) {
+      next.providers[capability].backup = null;
+      onDropped?.(capability);
+    }
+  }
+  return next;
+}
+
 function isPlainObject(v: unknown): v is UnknownRecord {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
@@ -242,8 +261,24 @@ export class ConfigStore {
 
     // Migrate and clamp whatever survived, then write it back once.
     const parsed = settingsSchema.safeParse(migrate(this.store.store as UnknownRecord));
-    const settled = parsed.success ? clampSettings(parsed.data as Settings) : defaultSettings();
+    let settled = parsed.success ? clampSettings(parsed.data as Settings) : defaultSettings();
+
+    // The separation invariant has to hold on load too. A hand-edited or
+    // badly migrated file can be schema-valid while naming the same provider
+    // for primary and backup, which would start the app with a "backup" that
+    // shares the failing service and credential (FR-025). Drop the offending
+    // backup rather than refusing to start.
+    settled = dropInvalidBackups(settled, (capability) =>
+      options.onCorrupt?.(
+        this.pathFor(options.dir),
+        `${capability} backup matched its primary provider and was cleared (FR-025)`,
+      ),
+    );
     this.store.store = settled as unknown as StoreShape;
+  }
+
+  private pathFor(dir: string): string {
+    return join(dir, 'settings.json');
   }
 
   /** The whole settings object. Never contains a secret (FR-021). */
