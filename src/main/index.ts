@@ -333,14 +333,34 @@ function registerIpcHandlers(): void {
     const pos = resolveOverlayPosition(asIfFresh, displays, primary.id);
 
     if (overlayWindow && !overlayWindow.isDestroyed()) {
-      overlayWindow.setBounds(overlayBoundsFor(pos));
+      // Show before moving. A window that has never been shown can have its
+      // placement re-applied by Windows when it is finally shown, which
+      // silently undoes bounds set while it was hidden. That left the overlay
+      // exactly where it was and made Reset Overlay look like a no-op.
+      if (!overlayWindow.isVisible()) overlayWindow.showInactive();
+
+      const bounds = overlayBoundsFor(pos);
+      overlayWindow.setBounds(bounds);
+      // setBounds and setPosition take different paths on Windows; the second
+      // is the direct move and costs nothing when the first already worked.
+      overlayWindow.setPosition(bounds.x, bounds.y);
       overlayWindow.setAlwaysOnTop(true, 'screen-saver');
-      overlayWindow.showInactive();
     }
+
     setOverlayInteractive(true);
     hotkeys.reregisterAll();
     config.set({ overlayWindow: { x: pos.x, y: pos.y, displayId: pos.displayId } });
-    return { ok: true as const };
+
+    const [appliedX, appliedY] =
+      overlayWindow?.isDestroyed() === false ? overlayWindow.getPosition() : [pos.x, pos.y];
+    getLogger().info('overlay reset', { requested: pos, applied: { x: appliedX, y: appliedY } });
+
+    return {
+      ok: true as const,
+      x: appliedX ?? pos.x,
+      y: appliedY ?? pos.y,
+      displayId: pos.displayId,
+    };
   });
 
   /**

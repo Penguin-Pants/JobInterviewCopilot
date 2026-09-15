@@ -254,7 +254,19 @@ export const invokeChannels = {
    * with FR-009 when the escape hatch was specified, and recorded in the
    * architecture document in the same change (DoD 9).
    */
-  'overlay:reset': { id: 'CH-121', payload: z.void(), response: ok },
+  'overlay:reset': {
+    id: 'CH-121',
+    payload: z.void(),
+    // Reports the position it applied, not just success. A bare ok cannot
+    // distinguish "main computed the wrong place" from "Windows ignored the
+    // move", and that distinction is the whole debugging cost of FR-009.
+    response: z.object({
+      ok: z.literal(true),
+      x: z.number(),
+      y: z.number(),
+      displayId: z.string(),
+    }),
+  },
   /** Overlay reports it has mounted and rendered the consent card (FR-008, ADR-016). */
   'overlay:ready': { id: 'CH-122', payload: z.void(), response: ok },
 } as const;

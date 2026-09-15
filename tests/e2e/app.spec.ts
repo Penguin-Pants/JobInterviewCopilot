@@ -170,6 +170,14 @@ test('TC-148 Reset Overlay returns the overlay to the primary display', async ()
     return { x, y, primary: screen.getPrimaryDisplay().bounds };
   });
 
-  expect(position.x).toBeGreaterThanOrEqual(position.primary.x);
+  // Asserted against the primary display's own origin rather than against zero,
+  // because a secondary monitor can sit at a negative origin and zero would be
+  // wrong there rather than merely strict.
+  expect(
+    position.x,
+    `overlay x ${position.x} is left of the primary display at ${position.primary.x}`,
+  ).toBeGreaterThanOrEqual(position.primary.x);
   expect(position.y).toBeGreaterThanOrEqual(position.primary.y);
+  expect(position.x).toBeLessThan(position.primary.x + position.primary.width);
+  expect(position.y).toBeLessThan(position.primary.y + position.primary.height);
 });
