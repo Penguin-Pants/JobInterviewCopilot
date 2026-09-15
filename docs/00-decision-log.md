@@ -152,6 +152,9 @@ reliably when chunks are 2000 ms long.
 
 ### ADR-008 — Deepgram is the default STT primary, streaming is required
 
+**SUPERSEDED by ADR-022 on 2026-09-15.** The reasoning below still holds for
+Whisper REST. The conclusion that the choice is Deepgram or Whisper does not.
+
 **Context.** OpenAI Whisper REST is not a streaming transcriber. Feeding it 1
 second chunks produces poor accuracy because each request loses cross-chunk
 context, and it cannot emit interim results.
@@ -340,6 +343,9 @@ code" and proving it beats saying "no code path" and proving less.
 
 ### ADR-020 — Whisper-primary has its own, worse, latency budget
 
+**SUPERSEDED by ADR-022 on 2026-09-15.** The budget survives, generalized from
+"Whisper" to "any non-streaming STT model".
+
 **Context.** `NFR-001` is measured with Deepgram. Whisper-primary is a supported
 configuration that buffers 4 seconds per request and has no interim results, so
 `NFR-001` cannot apply to it. A supported configuration with no stated latency
@@ -364,32 +370,81 @@ interviewer. Music, notifications and a second call all land on the
 - Per-process loopback capture (`ActivateAudioInterfaceAsync` with a process
   loopback mode) is recorded as the v2 fix. Do not build it into v1.
 
+### ADR-022 — STT is a provider registry with per-model selection, not a two-way choice
+
+**Supersedes** ADR-008 and ADR-020. Decided by the product owner on 2026-09-15.
+
+**Context.** The brief offered Deepgram or Whisper REST. That framing is out of
+date. OpenAI shipped `gpt-4o-transcribe` and `gpt-4o-mini-transcribe` with a
+realtime transcription WebSocket in March 2025, and ElevenLabs ships Scribe v2
+Realtime with roughly 150 ms latency over a WebSocket accepting `pcm_16000`,
+which is exactly the format `FR-041` already produces. Hard-coding two providers
+into a union type would need a code change in the config layer, the UI, the
+health layer and the cost table every time a provider is added.
+
+**Decision.** STT and LLM both become data-driven registries.
+
+- A provider is a registry entry: id, display name, credential id, and a list of
+  models. Each model declares `streaming`, `supportsInterim`,
+  `supportsEndpointing`, its audio format needs and its price.
+- The user picks a **provider and a model**, for primary and for optional backup,
+  independently for STT and LLM.
+- Adding a provider means one registry entry plus one adapter. The trigger, the
+  session manager, the cost meter and the Dashboard need no change. This is
+  testable: a fake provider added to the registry must appear in the UI and work
+  end to end with no other edit.
+
+**v1 STT registry.**
+
+| Provider | Models shipped | Streaming | Interim | Endpointing |
+|---|---|---|---|---|
+| `deepgram` | `nova-3`, `nova-2` | yes | yes | yes, native |
+| `openai` | `gpt-4o-transcribe`, `gpt-4o-mini-transcribe` | yes, realtime WebSocket | yes | yes, server VAD |
+| `elevenlabs` | `scribe-v2-realtime` | yes | yes, partial then committed | committed segments |
+| `openai` | `whisper-1` | **no**, REST, 4 s buffering | no | no |
+
+`deepgram` with `nova-3` stays the shipped default. `whisper-1` is kept as a
+clearly labeled non-streaming option, no longer OpenAI's default and no longer
+the only OpenAI choice.
+
+**Consequences.**
+- `SttProviderId` is no longer a closed union of two. It is a registry key.
+- ElevenLabs is a third credential in the vault.
+- The latency budget is a property of the selected model, not of a provider
+  name. A streaming model is held to `NFR-001`. A non-streaming model is held to
+  `NFR-017`, and the Dashboard says so before the user picks it.
+- The v1 LLM registry adds no new providers. It gets the same shape so that
+  adding one later costs a registry entry, not a refactor.
+
+**Sources checked 2026-09-15:** OpenAI realtime transcription models and
+WebSocket transcription sessions, ElevenLabs Scribe v2 Realtime WebSocket with
+`pcm_16000` input.
+
 ---
 
-## 3a. Open questions for the product owner
+## 3a. Open questions, resolved
 
-These are not engineering choices. Each needs a decision before or during build.
-The current behavior is stated so the build is not blocked.
+Both were put to the product owner on 2026-09-15 and answered.
 
-### OQ-001 — Transcript encryption at rest
+### OQ-001 — Transcript encryption at rest — RESOLVED: plaintext, stated plainly
 
 Session transcripts contain verbatim interview content: names, employers,
-compensation talk, sometimes health or personal disclosures. Today they are
-plaintext JSON under `userData`, retained forever by default (`ASM-012`). API
-keys get `safeStorage`. The more sensitive user data does not.
+compensation talk, sometimes personal disclosures. They stay plaintext JSON under
+`userData`, retained until the user deletes them.
 
-**Current behavior:** plaintext, indefinite retention.
-**Options:** encrypt transcripts with `safeStorage` as well, add a retention
-window, or accept plaintext and say so plainly in the Dashboard.
+**Decision.** No encryption at rest in v1, and no retention window. In exchange
+the app must not be quiet about it. The Dashboard Session History section and the
+default consent reminder text both state that transcripts are unencrypted local
+files kept until deleted. This is `FR-110`.
 
-### OQ-002 — Whether Whisper may be an STT primary at all
+**Reason.** Simplicity, and the data never leaves the machine. The user chose a
+stated tradeoff over a hidden one.
 
-Whisper-primary is a real-time coaching tool running at a 7 to 10 second budget
-(`ADR-020`). That may not be a product worth shipping.
+### OQ-002 — Whisper as STT primary — RESOLVED: replaced by a provider registry
 
-**Current behavior:** supported, badged, with its own budget.
-**Options:** keep it, demote it to backup-only, or drop Whisper entirely and
-require Deepgram.
+**Decision.** The question is obsolete. The user is not choosing between Deepgram
+and Whisper. The user chooses a provider and a model from a registry that ships
+with Deepgram, OpenAI and ElevenLabs. See `ADR-022`.
 
 ---
 

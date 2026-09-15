@@ -181,35 +181,55 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
   window. No `AudioContext` remains after stop.
 **Verified by** TC-040, TC-041, TC-042, TC-043, TC-044, TC-045, TC-136
 
-### TASK-012 STT interface and Deepgram adapter
-**Traces** FR-047, FR-048, FR-100
+### TASK-012 STT registry and the streaming adapters
+**Traces** FR-023, FR-037, FR-038, FR-047, FR-048, FR-100, NFR-001
 **Depends on** TASK-011, TASK-004
 **Acceptance criteria**
-- `SttProvider` and `SttSession` match `02-architecture.md` section 3.1 exactly.
-- One session per stream. Two concurrent WebSocket connections during a live
-  session, each with its own interim and final state.
-- Deepgram connects with `encoding=linear16&sample_rate=16000&channels=1&interim_results=true&endpointing=800`.
+- `src/shared/registry/stt.ts` and `src/shared/registry/llm.ts` exist with the
+  v1 contents in `02-architecture.md` section 2.1a.
+- `SttProvider` and `SttSession` match section 3.1 exactly, taking a
+  `ProviderChoice`, not a provider id alone.
+- Capability flags are read from the selected model's registry entry. A grep
+  finds no branch on a provider id string outside the adapter files and the
+  registry itself.
+- Three streaming adapters ship and all three accept the same 16 kHz, 16-bit,
+  mono PCM with no per-provider resampling:
+  - Deepgram: `encoding=linear16&sample_rate=16000&channels=1&interim_results=true&endpointing=800`.
+  - OpenAI realtime: a transcription session on the realtime WebSocket with the
+    chosen model and server VAD. Deltas to `isFinal: false`, completed items to
+    `isFinal: true`, VAD stop to `endpoint`.
+  - ElevenLabs: Scribe v2 Realtime WebSocket, input format `pcm_16000`. Partials
+    to `isFinal: false`, committed segments to `isFinal: true` and `endpoint`.
+- One session per stream. Two concurrent connections during a live session, each
+  with its own interim and final state.
 - Every emitted event is a normalized `TranscriptEvent` including `providerId`.
-- The native endpoint message emits an `endpoint` event.
 - A dropped socket reconnects and resumes without ending the session.
-**Verified by** TC-050, TC-051, TC-052, TC-053, TC-054
+- The ElevenLabs key is a fourth credential in the vault, validated on entry and
+  health-keyed like the others.
+- Adding a fake provider to the registry makes it selectable and usable end to
+  end with no edit outside the registry and its adapter (FR-037).
+- Every registry model has a `providerId:modelId` row in `pricing.json`.
+**Verified by** TC-050, TC-051, TC-052, TC-053, TC-054, TC-056, TC-151, TC-152, TC-153, TC-155, TC-156
 
-### TASK-013 Whisper adapter, degraded mode
-**Traces** FR-047, FR-049, NFR-017, ADR-008
+### TASK-013 Non-streaming STT class and the Whisper adapter
+**Traces** FR-047, FR-049, NFR-017, ADR-022
 **Depends on** TASK-012
 **Acceptance criteria**
-- Buffers 4000 ms of PCM, wraps it in a valid WAV container and posts one
-  request per buffer.
-- Emits `isFinal: true` only. Never emits an interim event.
-- `supportsInterim` and `supportsEndpointing` are both `false`, and the trigger
-  reads those flags rather than checking the provider ID.
-- When Whisper is the active STT provider the Dashboard shows an informational
-  badge naming the accuracy penalty and the latency penalty, quoting the
-  `NFR-017` budget rather than `NFR-001`.
+- `whisper-1` buffers 4000 ms of PCM, wraps it in a valid WAV container built in
+  memory and posts one request per buffer.
+- Emits `isFinal: true` only. Never an interim, never an endpoint.
+- `streaming`, `supportsInterim` and `supportsEndpointing` are all `false` in the
+  registry entry, and the trigger reads those flags rather than checking any
+  provider id.
+- A model whose entry says `streaming: false` is held to `NFR-017`, not
+  `NFR-001`. Which budget applies is computed from the entry.
+- The Dashboard badge text comes from the registry entry's `badge` field and
+  names both the accuracy penalty and the latency penalty. No renderer file
+  mentions Whisper by name.
 - The WAV header is written by hand in `src/main/ai/stt/wav.ts`. The body is
   built in memory. No file stream and no path is ever passed to the HTTP client
   (ADR-019).
-**Verified by** TC-055, TC-056, TC-057, TC-150
+**Verified by** TC-055, TC-057, TC-150
 
 ### TASK-014 Provider health and failover
 **Traces** FR-100, FR-104, ADR-009, ADR-010, ADR-017
@@ -439,13 +459,22 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 **Verified by** TC-108, TC-109, TC-145
 
 ### TASK-042 Dashboard UI
-**Traces** FR-023, FR-024, FR-025, FR-026, FR-027, FR-028, FR-029, FR-030, FR-031, FR-032, FR-080, FR-087, FR-088, NFR-010, NFR-014
+**Traces** FR-023, FR-024, FR-025, FR-026, FR-027, FR-028, FR-029, FR-030, FR-031, FR-032, FR-038, FR-080, FR-087, FR-088, FR-110, NFR-010, NFR-014
 **Depends on** TASK-003, TASK-004, TASK-014, TASK-025, TASK-041
 **Acceptance criteria**
 - All six sections exist: Provider Setup, Company Profiles, Session History,
   Hotkeys, Cost and Usage, Consent Reminder.
-- Provider Setup prevents selecting the same provider as primary and backup, and
-  states plainly that one OpenAI key serves both Whisper and GPT.
+- Provider Setup offers a provider picker and a model picker for STT primary,
+  STT backup, LLM primary and LLM backup, all populated from the registries.
+- Each model row shows whether it streams and its price. Selecting a
+  non-streaming model shows the `NFR-017` latency consequence before saving
+  (FR-038).
+- A backup from the same provider as the primary is rejected, because the
+  credential and the service are the same (FR-025).
+- Provider Setup states plainly that one OpenAI key serves OpenAI STT models and
+  OpenAI LLM models alike.
+- Session History states plainly that transcripts are unencrypted local files
+  kept until deleted (FR-110).
 - Key entry shows an inline pass or fail within 10 s and does not save a failing
   key.
 - Company Profiles supports create, switch, delete and drag-and-drop import,
@@ -457,9 +486,11 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
   unambiguously in the Dashboard header (FR-027).
 - Session History groups by profile and supports view and delete.
 - Cost and Usage shows the live timer and spend estimate during a session.
-- Consent Reminder is editable with a one-action reset to default.
+- Consent Reminder is editable with a one-action reset to default. The shipped
+  default states that an unencrypted local text transcript is kept for the
+  session (FR-007, FR-110).
 - Every interactive element is reachable and operable by keyboard.
-**Verified by** TC-120, TC-121, TC-122, TC-123, TC-124, TC-125
+**Verified by** TC-120, TC-121, TC-122, TC-123, TC-124, TC-125, TC-154
 
 ### TASK-043 Overlay UI
 **Traces** FR-006, FR-007, FR-008, FR-076, FR-085, FR-090, FR-091, FR-092, FR-093, FR-094, FR-102, NFR-007, NFR-010
@@ -525,4 +556,4 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
   recorded before a tag is cut. Any single failure blocks the tag, MW-06 and
   MW-11 latency numbers included. MW-12 confirms a documented limitation and
   cannot fail the release.
-**Verified by** TC-001, MW-01 to MW-12
+**Verified by** TC-001, MW-01 to MW-13

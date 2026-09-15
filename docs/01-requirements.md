@@ -17,8 +17,8 @@ Contested points are resolved in `00-decision-log.md`. That document wins.
 |---|---|
 | Candidate | The only human user of the app. Runs it on their own Windows PC. |
 | Interviewer | Speaks in the video call. Not a user. Audio reaches the app through system loopback. |
-| STT provider | Deepgram or OpenAI Whisper. External service. |
-| LLM provider | Anthropic or OpenAI. External service. |
+| STT provider | Any provider in the STT registry: Deepgram, OpenAI or ElevenLabs in v1. External service. (ADR-022) |
+| LLM provider | Any provider in the LLM registry: Anthropic or OpenAI in v1. External service. (ADR-022) |
 
 The app is single-user, offline-capable for configuration and document
 management, and online-dependent for transcription and suggestions.
@@ -70,6 +70,11 @@ sits off-screen and the toggle hotkey is unavailable.
 **FR-020** Non-secret settings must persist through `electron-store` in a single
 JSON file under `app.getPath('userData')`.
 
+**FR-110** The app must state plainly, in the Dashboard Session History section
+and in the default consent reminder text, that session transcripts are
+unencrypted local files kept until the user deletes them. Transcripts are not
+encrypted at rest in v1 and there is no retention window. (OQ-001)
+
 **FR-021** API keys must be encrypted with Electron `safeStorage` and stored in
 a separate file from the `electron-store` JSON. A raw key must never appear in
 the settings JSON, in logs, or in any IPC payload sent to a renderer.
@@ -78,15 +83,31 @@ the settings JSON, in logs, or in any IPC payload sent to a renderer.
 refuse to save any key, must show an explanatory error in the Dashboard, and
 must not fall back to plaintext storage.
 
-**FR-023** The user must be able to select an STT primary provider and an
-optional STT backup provider, independently of the LLM selection. Valid values:
-`deepgram`, `whisper`.
+**FR-023** The user must be able to select an STT **provider and model** for the
+primary, and optionally for a backup, independently of the LLM selection. The
+available choices come from the STT registry, not from a hard-coded union.
+v1 ships `deepgram` (`nova-3`, `nova-2`), `openai`
+(`gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, `whisper-1`) and `elevenlabs`
+(`scribe-v2-realtime`). The default is `deepgram` with `nova-3`. (ADR-022)
 
-**FR-024** The user must be able to select an LLM primary provider and an
-optional LLM backup provider. Valid values: `anthropic`, `openai`.
+**FR-024** The user must be able to select an LLM **provider and model** for the
+primary, and optionally for a backup, from the LLM registry. v1 ships `anthropic`
+and `openai`. No new LLM providers are added in v1, but the registry shape is the
+same as STT so that adding one later costs a registry entry, not a refactor.
+(ADR-022)
 
-**FR-025** The backup provider must not equal the primary provider. The
-Dashboard must prevent the selection.
+**FR-025** The backup provider must not equal the primary provider. A different
+model from the same provider is not a backup, because the credential and the
+service are the same. The Dashboard must prevent the selection.
+
+**FR-037** Both registries must be data-driven. Adding a provider must require
+exactly one registry entry and one adapter. The trigger, the session manager, the
+cost meter and the Dashboard must need no change. This is verified by adding a
+fake provider to the registry in a test and driving it end to end.
+
+**FR-038** The model picker must show, for each model, whether it streams and its
+price. Selecting a non-streaming model must show the latency consequence
+(`NFR-017`) before the selection is saved.
 
 **FR-026** On key entry the app must run a live validation call against the
 provider before saving, and must show an inline pass or fail result within 10
@@ -167,10 +188,13 @@ own interim and final transcript state.
 **FR-048** Every transcript event must be normalized to
 `{ source, text, isFinal, timestamp, providerId }`.
 
-**FR-049** When OpenAI Whisper REST is the active STT provider, the adapter must
-buffer 4 seconds of audio per request, must emit only `isFinal: true` events,
-and the Dashboard must show an informational badge naming the accuracy and
-latency penalty. (ADR-008)
+**FR-049** A **non-streaming** STT model, `whisper-1` being the only one shipped
+in v1, must buffer 4 seconds of audio per request, must emit only
+`isFinal: true` events, and must cause the Dashboard to show an informational
+badge naming the accuracy penalty and the latency penalty. The badge text must
+come from the registry entry, not be hard-coded to Whisper. Turn detection falls
+back to the silence-gap timer for any model whose registry entry declares
+`supportsEndpointing: false`. (ADR-022)
 
 ---
 
@@ -403,9 +427,10 @@ estimate decreases after a cancelled generation. (`FR-103`)
 
 ## 12. Non-functional requirements
 
-**NFR-001** *(Latency)* From interviewer turn end to the first bullet appearing
-in the overlay, the p50 must be under 2.5 seconds and the p95 under 4.0 seconds,
-measured with Deepgram STT and a Haiku-class model on a 25 Mbit/s connection.
+**NFR-001** *(Latency, streaming STT)* From interviewer turn end to the first
+bullet appearing in the overlay, the p50 must be under 2.5 seconds and the p95
+under 4.0 seconds, with any **streaming** STT model and a Haiku-class LLM on a
+25 Mbit/s connection. Non-streaming models are held to `NFR-017` instead.
 
 **NFR-002** *(Audio privacy)* No code in this project may write audio bytes to
 disk. Enforced three ways: an ESLint ban on filesystem imports in the audio path,
@@ -465,10 +490,11 @@ vendored component must be listed in `VENDORED.md` with its source URL, the
 commit or version copied, and its license. CI must fail when a file under
 `src/renderer/**/vendor/` is not covered by an entry.
 
-**NFR-017** *(Whisper-primary latency)* With Whisper as the STT primary, turn end
-to first bullet must be p50 under 7.0 s and p95 under 10.0 s. `NFR-001` does not
-apply to this configuration. The Dashboard degraded-mode badge must state the
-latency cost, not only the accuracy cost. (ADR-020)
+**NFR-017** *(Non-streaming STT latency)* With a non-streaming STT model active,
+turn end to first bullet must be p50 under 7.0 s and p95 under 10.0 s. `NFR-001`
+applies only to streaming models. Which budget applies is read from the selected
+model's registry entry, not from a provider name. The Dashboard badge must state
+the latency cost, not only the accuracy cost. (ADR-022)
 
 **NFR-015** *(Licensing)* Every runtime dependency must carry an MIT, Apache-2.0,
 BSD or ISC license. A license check must run in CI and must fail the build on a

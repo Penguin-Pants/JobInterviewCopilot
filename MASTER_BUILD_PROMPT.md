@@ -6,7 +6,8 @@
 > Three contradictions in the original brief were resolved on 2026-09-15 and the
 > text below has been corrected to match (ADR-001, ADR-003). A fourth divergence,
 > found in review, is corrected in section 3: audio capture cannot run in the
-> main process (ADR-005).
+> main process (ADR-005). Sections 2 and 4 are corrected for the provider
+> registry (ADR-022), which supersedes the two-way STT choice in the original.
 ## 0. Product Summary
 
 Interview CoPilot is a native Windows desktop app. It gives a job candidate real-time, glanceable prompts during a live video interview, pulled from the candidate's own resume, company and job research and other notes. The primary goal is accessibility support, for example ADHD or memory recall under stress, not scripted deception.
@@ -25,8 +26,7 @@ Interview CoPilot is a native Windows desktop app. It gives a job candidate real
 - Use `electron-store` for all non-secret settings.
 - Use Electron `safeStorage` (Windows DPAPI backing) for API keys specifically. Never write raw keys into the electron-store JSON file.
 - Independent provider config, each with a primary and an optional backup:
-  - STT: Deepgram WebSocket or OpenAI Whisper REST. Pick primary and optional backup.
-  - LLM: Anthropic Claude SDK or OpenAI GPT SDK. Pick primary and optional backup.
+  - **Corrected (ADR-022).** STT and LLM are data-driven provider registries. The user picks a provider **and a model** for primary and optional backup. STT ships Deepgram (`nova-3`, `nova-2`), OpenAI (`gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, and `whisper-1` as a labeled non-streaming option) and ElevenLabs (`scribe-v2-realtime`). LLM ships Anthropic and OpenAI. Adding a provider costs one registry entry plus one adapter.
 - Validate each key on entry with a lightweight live test call before saving. Show an inline pass or fail result.
 - Company profiles: each profile stores a name, its own knowledge base documents and its own session history.
 - Theme settings: light, dark or follow-system; accent color; overlay translucency mode (acrylic blur or flat opacity) and opacity level.
@@ -47,7 +47,7 @@ This diverges from the original draft: capture two independent streams, never mi
 
 ## 4. Multi-Provider Transcription Pipeline — `/src/main/ai/stt.ts`
 - One unified STT interface. Instantiate it once per stream (interviewer, candidate), so each stream keeps its own connection and its own partial and final transcript state.
-- Route to Deepgram WebSocket or OpenAI Whisper REST per the active provider config.
+- Route to the adapter named by the active `ProviderChoice` in the registry (ADR-022). Capability flags come from the selected model's registry entry, never from a provider name.
 - On a call failure or timeout: if a backup provider is configured, retry against it automatically and keep going. If no backup is configured, retry the primary in the background and surface a small, quiet status badge in the Dashboard, never an overlay error card.
 - Emit a normalized event for both streams: `{ source: 'interviewer' | 'candidate', text: string, isFinal: boolean, timestamp }`.
 

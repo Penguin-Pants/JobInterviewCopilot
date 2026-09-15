@@ -91,14 +91,14 @@ not a flake. It is fixed or deleted, never retried.
 
 | ID | Level | Case | Pass condition |
 |---|---|---|---|
-| TC-050 | U | Normalized event | Both adapters emit `{ source, text, isFinal, timestamp, providerId }` and nothing else |
+| TC-050 | U | Normalized event | Every adapter emits `{ source, text, isFinal, timestamp, providerId }` and nothing else |
 | TC-051 | I | Per-stream isolation | Two sessions run concurrently. A final on one never mutates the other's interim state |
 | TC-052 | U | Deepgram parameters | The connection URL carries `encoding=linear16`, `sample_rate=16000`, `channels=1`, `interim_results=true`, `endpointing=800` |
 | TC-053 | I | Endpoint event | A Deepgram speech-final message emits an `endpoint` event |
 | TC-054 | I | Socket reconnect | A dropped socket reconnects and the session stays active |
-| TC-055 | U | Whisper buffering | Whisper posts one request per 4000 ms of audio with a valid WAV header, and emits only `isFinal: true` |
-| TC-056 | U | Capability flags consumed | The trigger reads `supportsEndpointing`, not the provider ID. A fake provider with `supportsEndpointing: true` gets endpoint handling regardless of its ID |
-| TC-057 | E | Whisper badge | With Whisper active, the Dashboard shows the degraded-mode informational badge |
+| TC-055 | U | Non-streaming buffering | `whisper-1` posts one request per 4000 ms of audio with a valid WAV header built in memory, and emits only `isFinal: true` |
+| TC-056 | U | Capability flags come from the registry | The trigger reads `supportsEndpointing` off the selected model's registry entry, never a provider id. A fake provider with `supportsEndpointing: true` gets endpoint handling regardless of its id |
+| TC-057 | E | Non-streaming badge | With `whisper-1` active, the Dashboard shows the badge text from the registry entry, naming both the accuracy and the latency penalty. The text is not hard-coded to Whisper anywhere in the renderer |
 
 ### 3.5 Knowledge base
 
@@ -221,7 +221,13 @@ All trigger tests run on fake timers with the pure state-machine module.
 | TC-147 | I | Retention caps | `main.log` rotates at 5 MB keeping 3 files. A fourth `settings.corrupt-*.json` deletes the oldest |
 | TC-148 | E | Reset Overlay | With the overlay click-through and positioned off-screen, Reset Overlay returns it to the primary monitor default position, sets interactive mode and re-registers both hotkeys |
 | TC-149 | I | Document recovery paths | A document in `error` retries from the Dashboard without re-import. A user doc-type override resets to `auto` and re-runs the guess |
-| TC-150 | I | Whisper-primary latency harness | With Whisper active and scripted fakes at fixed delays, the measured path is inside the `NFR-017` budget. Real numbers come from MW-11 |
+| TC-151 | I | Registry drives everything | Adding a fake provider with one model to the STT registry makes it selectable in the Dashboard and usable end to end, with no edit to the trigger, session manager, cost meter or any renderer file (`FR-037`) |
+| TC-152 | I | OpenAI realtime adapter | The transcription session is configured with the chosen model and server VAD. Deltas map to `isFinal: false`, completed items to `isFinal: true`, the VAD stop event to `endpoint` |
+| TC-153 | I | ElevenLabs adapter | The socket is opened with input format `pcm_16000`. Partial transcripts map to `isFinal: false`, committed segments to `isFinal: true` and to `endpoint` |
+| TC-154 | E | Model picker | Each model shows its streaming capability and price. Selecting a non-streaming model shows the `NFR-017` latency consequence before the choice is saved. A backup from the same provider as the primary is rejected |
+| TC-155 | I | Fourth credential | The ElevenLabs key encrypts into the vault, validates on entry, and health is keyed to it like every other credential |
+| TC-156 | U | Price table coverage | Every model in both registries has a matching `providerId:modelId` row in `pricing.json`. A registry entry with no price row fails the test |
+| TC-150 | I | Non-streaming latency harness | With a non-streaming model active and scripted fakes at fixed delays, the measured path is inside the `NFR-017` budget. Which budget applies is read from the registry entry. Real numbers come from MW-11 |
 
 ---
 
@@ -273,7 +279,8 @@ Record the result against the release tag. A failure blocks the release.
 | MW-08 | Both hotkeys while another application has focus | Interaction toggle and pause both work from any focused app |
 | MW-09 | Unplug the network mid-session | The Dashboard badge turns red, the overlay stays idle with no error card, and the session continues when the network returns |
 | MW-10 | Kill the process mid-session, relaunch | The transcript up to the last flushed entry appears in Session History as `crash-recovered`. No torn line breaks recovery, and the next session starts without a stale lock |
-| MW-11 | Whisper-primary rehearsal, 20 turns | Latency is inside `NFR-017` (p50 under 7.0 s, p95 under 10.0 s) and the degraded-mode badge states the latency cost |
+| MW-11 | Non-streaming rehearsal with `whisper-1`, 20 turns | Latency is inside `NFR-017` (p50 under 7.0 s, p95 under 10.0 s) and the badge states the latency cost |
+| MW-13 | Rehearsal on each streaming STT provider, 10 turns each: Deepgram `nova-3`, OpenAI `gpt-4o-transcribe`, ElevenLabs `scribe-v2-realtime` | All three transcribe real interviewer speech correctly and all three stay inside `NFR-001` |
 | MW-12 | Play music and fire a desktop notification during a session | Both are transcribed onto the interviewer stream, as `ADR-021` predicts. The session-prep note advising the user to close other audio sources is present. This check confirms the documented limitation, it does not fail on it |
 
 ---

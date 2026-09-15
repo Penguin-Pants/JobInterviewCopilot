@@ -93,11 +93,14 @@ interface Settings {
   schemaVersion: 1;
   activeProfileId: string;
   providers: {
-    stt:  { primary: SttProviderId; backup: SttProviderId | null };
-    llm:  { primary: LlmProviderId; backup: LlmProviderId | null };
-    models: {
-      anthropic: string;   // default 'claude-haiku-4-5-20251001'
-      openai: string;      // default 'gpt-4o-mini'
+    stt: {
+      primary: ProviderChoice;              // default { providerId:'deepgram', modelId:'nova-3' }
+      backup: ProviderChoice | null;
+    };
+    llm: {
+      primary: ProviderChoice;              // default { providerId:'anthropic',
+                                            //           modelId:'claude-haiku-4-5-20251001' }
+      backup: ProviderChoice | null;
     };
   };
   theme: {
@@ -131,9 +134,59 @@ interface Settings {
   firstRun: { modelDownloaded: boolean };
 }
 
-type SttProviderId = 'deepgram' | 'whisper';
-type LlmProviderId = 'anthropic' | 'openai';
+/** A provider and model pair. Both are registry keys, not a closed union. */
+interface ProviderChoice { providerId: string; modelId: string; }
+
+type CredentialId = 'deepgram' | 'openai' | 'anthropic' | 'elevenlabs';
 ```
+
+### 2.1a Provider registries (ADR-022)
+
+Two registries, `src/shared/registry/stt.ts` and `src/shared/registry/llm.ts`.
+They are data, and they are the only place a provider is named. Adding a provider
+is one entry plus one adapter (`FR-037`).
+
+```ts
+interface ProviderDescriptor {
+  id: string;                     // 'deepgram', 'openai', 'elevenlabs', 'anthropic'
+  displayName: string;
+  credentialId: CredentialId;     // which vault key it uses
+  models: ModelDescriptor[];
+}
+
+interface SttModelDescriptor {
+  id: string;                     // 'nova-3', 'gpt-4o-transcribe', 'scribe-v2-realtime', 'whisper-1'
+  displayName: string;
+  streaming: boolean;             // false => held to NFR-017, not NFR-001
+  supportsInterim: boolean;
+  supportsEndpointing: boolean;
+  audio: { encoding: 'linear16'; sampleRate: 16000; channels: 1 };
+  pricePerAudioMinuteUsd: number;
+  badge?: string;                 // shown in the Dashboard, e.g. the Whisper penalty text
+}
+
+interface LlmModelDescriptor {
+  id: string;
+  displayName: string;
+  inputPerMTokUsd: number;
+  outputPerMTokUsd: number;
+}
+```
+
+**v1 STT registry contents.**
+
+| Provider | Model | Streaming | Interim | Endpointing | Transport |
+|---|---|---|---|---|---|
+| `deepgram` | `nova-3` (default), `nova-2` | yes | yes | native | WebSocket |
+| `openai` | `gpt-4o-transcribe`, `gpt-4o-mini-transcribe` | yes | yes | server VAD | realtime transcription WebSocket |
+| `elevenlabs` | `scribe-v2-realtime` | yes | partial then committed | committed segments | WebSocket, `pcm_16000` |
+| `openai` | `whisper-1` | **no** | no | no | REST, 4 s buffers |
+
+Every streaming model above accepts 16 kHz, 16-bit, mono linear PCM, which is
+exactly what `FR-041` produces. No per-provider resampling is needed.
+
+**v1 LLM registry contents.** `anthropic` with `claude-haiku-4-5-20251001`
+(default), `openai` with `gpt-4o-mini`. No new providers in v1.
 
 ### 2.2 Secrets (`secrets.bin`)
 
@@ -144,11 +197,14 @@ interface SecretVault {
   deepgramApiKey?: string;
   openaiApiKey?: string;
   anthropicApiKey?: string;
+  elevenlabsApiKey?: string;
 }
 ```
 
-The OpenAI key serves both Whisper STT and GPT LLM. There is one OpenAI key, not
-two. The Dashboard must state this.
+Keys are keyed by `CredentialId`, and a provider names the credential it uses.
+The OpenAI key serves OpenAI STT models and OpenAI LLM models alike. There is one
+OpenAI key, not two. The Dashboard must state this, and `CMP-12` keys health by
+credential for exactly this reason (ADR-017).
 
 ### 2.3 Profile and documents
 
@@ -226,7 +282,7 @@ interface Session {
 type TranscriptEntry = { seq: number } & (
   | { kind: 'turn'; source: 'interviewer' | 'candidate'; text: string; at: string }
   | { kind: 'suggestion'; forQuestion: string; bullets: string[];
-      model: string; providerId: LlmProviderId; at: string;
+      model: string; providerId: string; at: string;
       status: 'complete' | 'cancelled' }
 );
 // `seq` is monotonic and assigned by CMP-08 at append time. Order is seq order,
@@ -261,7 +317,7 @@ interface TranscriptEvent {
   text: string;
   isFinal: boolean;
   timestamp: number;        // epoch ms, chunk arrival time
-  providerId: SttProviderId;
+  providerId: string;         // registry key, e.g. 'deepgram'
 }
 
 interface AudioChunk {
@@ -288,7 +344,7 @@ interface SuggestionLine {
 ```ts
 interface SttSession {
   readonly source: 'interviewer' | 'candidate';
-  readonly providerId: SttProviderId;
+  readonly choice: ProviderChoice;
   push(chunk: AudioChunk): void;
   close(): Promise<void>;
   on(e: 'transcript', h: (t: TranscriptEvent) => void): void;
@@ -297,26 +353,36 @@ interface SttSession {
 }
 
 interface SttProvider {
-  readonly id: SttProviderId;
-  readonly supportsInterim: boolean;
-  readonly supportsEndpointing: boolean;
-  open(source: 'interviewer' | 'candidate', key: string): Promise<SttSession>;
-  validateKey(key: string): Promise<ValidationResult>;
+  readonly id: string;
+  open(choice: ProviderChoice, source: 'interviewer' | 'candidate',
+       key: string): Promise<SttSession>;
+  validateKey(key: string, modelId: string): Promise<ValidationResult>;
 }
 ```
 
-- `deepgram`: `supportsInterim: true`, `supportsEndpointing: true`. Connects to
-  the streaming WebSocket with `encoding=linear16`, `sample_rate=16000`,
+Capability flags come from the **registry entry for the selected model**, never
+from the provider id. `CMP-05` reads `supportsEndpointing` off the descriptor, so
+a new streaming provider needs no trigger change (`FR-037`, `TC-056`).
+
+Adapter notes:
+- `deepgram`: WebSocket with `encoding=linear16`, `sample_rate=16000`,
   `channels=1`, `interim_results=true`, `endpointing=800`.
-- `whisper`: `supportsInterim: false`, `supportsEndpointing: false`. Buffers
-  4000 ms, posts a WAV body to the transcription endpoint, emits one final event
-  per request. (ADR-008)
+- `openai` streaming: realtime transcription WebSocket, a transcription session
+  configured with the chosen model and server VAD. Deltas map to
+  `isFinal: false`, completed items to `isFinal: true`, the VAD stop event to
+  `endpoint`.
+- `elevenlabs`: Scribe v2 Realtime WebSocket, input format `pcm_16000`. Partial
+  transcripts map to `isFinal: false`, committed segments to `isFinal: true` and
+  to `endpoint`.
+- `openai` `whisper-1`: the one non-streaming model. Buffers 4000 ms, posts an
+  in-memory WAV body, emits one final event per request, never an interim, never
+  an endpoint. Held to `NFR-017`. (ADR-022)
 
 ### 3.2 LLM adapter (`CMP-07`)
 
 ```ts
 interface LlmProvider {
-  readonly id: LlmProviderId;
+  readonly id: string;              // registry key
   generate(req: GenerationRequest, signal: AbortSignal):
     AsyncIterable<{ delta: string } | { usage: TokenUsage }>;
   validateKey(key: string): Promise<ValidationResult>;
@@ -327,7 +393,7 @@ interface GenerationRequest {
   question: string;
   candidateContext: string;
   chunks: RetrievedChunk[];   // up to 3
-  model: string;
+  choice: ProviderChoice;     // provider + model from the LLM registry
 }
 ```
 
@@ -563,7 +629,10 @@ because the goal is factual recall, not creativity.
 
 ## 7. Cost model (`CMP-09`, ASM-011)
 
-A versioned price table ships with the app at `src/main/pricing.json`:
+A versioned price table ships with the app at `src/main/pricing.json`, keyed by
+`providerId:modelId` so a new registry entry needs a price row and nothing else.
+The numbers below are placeholders to be confirmed against each provider's
+published pricing at build time:
 
 ```json
 {
@@ -573,8 +642,11 @@ A versioned price table ships with the app at `src/main/pricing.json`:
     "gpt-4o-mini":               { "inputPerMTok": 0.15, "outputPerMTok": 0.60 }
   },
   "stt": {
-    "deepgram": { "perAudioMinute": 0.0043 },
-    "whisper":  { "perAudioMinute": 0.0060 }
+    "deepgram:nova-3":              { "perAudioMinute": 0.0043 },
+    "openai:gpt-4o-mini-transcribe":{ "perAudioMinute": 0.0030 },
+    "openai:gpt-4o-transcribe":     { "perAudioMinute": 0.0060 },
+    "elevenlabs:scribe-v2-realtime":{ "perAudioMinute": 0.0067 },
+    "openai:whisper-1":             { "perAudioMinute": 0.0060 }
   }
 }
 ```
@@ -595,8 +667,9 @@ is preferable to a network call during an interview.
 | `electron` | Shell. Pin to a stable line with `setContentProtection` on Windows | FR-001, FR-005 | Low |
 | `electron-store` | Non-secret settings | FR-020 | Low |
 | `electron-audio-loopback` | WASAPI loopback capture | FR-040 | **High**, small package, Windows-specific, single maintainer |
-| `@deepgram/sdk` | Streaming STT | FR-047 | Low |
-| `openai` | Whisper REST and GPT | FR-047, FR-070 | Low |
+| `@deepgram/sdk` | Deepgram streaming STT | FR-047 | Low |
+| `openai` | OpenAI realtime transcription, Whisper REST, GPT | FR-047, FR-070 | Low |
+| `@elevenlabs/elevenlabs-js` | Scribe v2 Realtime STT. A raw `ws` client is the fallback if the SDK does not expose the realtime STT socket cleanly | FR-047, ADR-022 | Medium, newest integration of the three |
 | `@anthropic-ai/sdk` | Claude | FR-070 | Low |
 | `@xenova/transformers` | Local embeddings | FR-066 | Medium, model download and ONNX runtime size |
 | `pdf-parse` | PDF to text | FR-060 | Medium, best-effort output |
@@ -683,7 +756,10 @@ src/
     ai/
       stt.ts           CMP-04 facade
       stt/deepgram.ts
+      stt/openaiRealtime.ts
+      stt/elevenlabs.ts
       stt/whisper.ts
+      stt/wav.ts
       trigger.ts       CMP-05
       llm.ts           CMP-07 facade
       llm/anthropic.ts
@@ -710,6 +786,8 @@ src/
       loopback.ts
       pcm-worklet.ts
   shared/
+    registry/stt.ts    ADR-022 STT provider + model registry
+    registry/llm.ts    ADR-022 LLM provider + model registry
     ipc.ts             channel ids + zod schemas
     types.ts           the data model in section 2
 tests/

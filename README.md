@@ -16,16 +16,15 @@ Read them in this order. The decision log wins over every other document.
 | Document | What it answers |
 |---|---|
 | [`docs/00-decision-log.md`](docs/00-decision-log.md) | Which way each contested question was settled, what is still an assumption, and what is still open |
-| [`docs/01-requirements.md`](docs/01-requirements.md) | What the product must do, as 104 verifiable requirements |
+| [`docs/01-requirements.md`](docs/01-requirements.md) | What the product must do, as 107 verifiable requirements |
 | [`docs/02-architecture.md`](docs/02-architecture.md) | Components, data model, interfaces, IPC contract, dependencies |
 | [`docs/03-tasks.md`](docs/03-tasks.md) | 26 implementation tasks with binary acceptance criteria and the global Definition of Done |
-| [`docs/04-test-strategy.md`](docs/04-test-strategy.md) | 117 automated test cases, 12 manual Windows checks, the CI pipeline |
+| [`docs/04-test-strategy.md`](docs/04-test-strategy.md) | 123 automated test cases, 13 manual Windows checks, the CI pipeline |
 | [`docs/05-traceability.md`](docs/05-traceability.md) | Generated matrix. Every requirement maps to a task and a test |
 | [`MASTER_BUILD_PROMPT.md`](MASTER_BUILD_PROMPT.md) | The original product brief, corrected, kept for context |
 
-Two questions are open for the product owner and are recorded as OQ-001 and
-OQ-002 in the decision log. Neither blocks the build. Both change the product if
-answered differently.
+Both open questions have been answered and are recorded as OQ-001 and OQ-002 in
+the decision log. Nothing is blocking.
 
 ---
 
@@ -50,17 +49,27 @@ log, not a code change.
 - **Audio is never written to disk by this app.** Buffers live in memory and are
   released once transcribed. Proven by a filesystem write monitor, not only by a
   lint rule (ADR-019). Only text transcripts persist, and the user deletes them
-  whenever they choose. Today those transcripts are plaintext JSON and are kept
-  forever by default. See OQ-001. (FR-043, ADR-003)
+  whenever they choose. Transcripts are plaintext JSON kept until deleted, with
+  no encryption at rest and no retention window in v1. That is a deliberate
+  choice, and the app says so in the Dashboard and in the consent copy rather
+  than leaving it implicit. (FR-043, FR-110, ADR-003, OQ-001)
 
 ---
 
 ## Stack
 
-Electron, TypeScript, React, Tailwind CSS, Framer Motion, Magic UI. Deepgram or
-OpenAI Whisper for speech to text. Anthropic or OpenAI for suggestions. Local
+Electron, TypeScript, React, Tailwind CSS, Framer Motion, Magic UI. Local
 embeddings with `@xenova/transformers`. Packaged for Windows 10 and 11 x64 with
 electron-builder.
+
+Speech to text and suggestions both come from a **provider registry**, so the
+user picks a provider and a specific model, and adding a provider later costs one
+registry entry plus one adapter (ADR-022).
+
+| Capability | Ships with |
+|---|---|
+| Speech to text | Deepgram `nova-3` (default) and `nova-2`, OpenAI `gpt-4o-transcribe` and `gpt-4o-mini-transcribe`, ElevenLabs `scribe-v2-realtime`, plus OpenAI `whisper-1` as a clearly labeled non-streaming option |
+| Suggestions | Anthropic `claude-haiku-4-5-20251001` (default), OpenAI `gpt-4o-mini` |
 
 ---
 
