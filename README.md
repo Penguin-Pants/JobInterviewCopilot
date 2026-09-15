@@ -22,7 +22,7 @@ Read them in this order. The decision log wins over every other document.
 | [`docs/04-test-strategy.md`](docs/04-test-strategy.md) | 130 automated test cases, 13 manual Windows checks, the CI pipeline |
 | [`docs/06-verification-map.md`](docs/06-verification-map.md) | Hand-authored. One row per requirement naming the tests that actually prove it |
 | [`docs/05-traceability.md`](docs/05-traceability.md) | Generated matrix. Do not edit |
-| [`MASTER_BUILD_PROMPT.md`](MASTER_BUILD_PROMPT.md) | The original product brief, corrected, kept for context |
+| [`docs/OLD_MASTER_BUILD_PROMPT.md`](docs/OLD_MASTER_BUILD_PROMPT.md) | The original product brief, corrected, kept for context |
 
 Both open questions have been answered and are recorded as OQ-001 and OQ-002 in
 the decision log. Nothing is blocking.

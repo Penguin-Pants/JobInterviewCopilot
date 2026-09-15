@@ -31,6 +31,47 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 
 ## Milestone 0 — Foundations
 
+**Status: COMPLETE, 2026-09-15.** All six tasks implemented and verified.
+`npm run typecheck`, `npm run lint`, `npm run format:check`, `npm run licenses`,
+98 unit and integration tests, and `npm run build` all pass. Line coverage is
+93.6 percent against an 80 percent floor.
+
+Two acceptance criteria could not be verified in the development container and
+are verified in CI instead, not waived:
+
+| Criterion | Why not here | Where it runs |
+|---|---|---|
+| `npm run package` produces a Windows x64 installer | Wine is not installed in the Linux container, so electron-builder cannot emit NSIS | The `package` job on `windows-latest` |
+| The five E2E cases (TC-005, TC-007, TC-008, TC-009, TC-148) | They assert window flags, capture protection and single-instance focus, none of which mean anything off Windows. The suite skips rather than passing vacuously | The `e2e` job on `windows-latest` |
+
+Deferred out of Milestone 0 by design, each failing loudly rather than silently:
+- Invoke channels for profiles, documents, sessions and `consent:dismiss` are
+  declared in the contract but have no handler yet. A caller gets an error
+  rather than a plausible-looking stub.
+- `validateKey` refuses every key until the provider adapters land in TASK-012
+  and TASK-032, because FR-026 forbids saving a key that has not passed
+  validation.
+- The `togglePause` hotkey is registered and rebindable, but its handler only
+  logs until the trigger exists in TASK-030.
+
+Follow-up work found during implementation:
+- **OQ-003** (blocks TASK-011): Electron cannot transfer an `ArrayBuffer` across
+  IPC, so `CH-303`'s transfer mechanism and `TC-041` need replacing.
+- **TASK-011** must add the `media` permission to the permission request
+  handler, which Milestone 0 sets to deny everything.
+- `Logger.rotateIfNeeded` calls `statSync` on every line. Harmless at Milestone 0
+  volumes, worth revisiting if logging becomes hot during a live session.
+- The content security policy lists `file:` because the packaged app loads
+  renderers over `file://`, where `'self'` alone does not match. A probe in the
+  Linux container could not settle whether the stricter form breaks asset
+  loading under Electron, because plain Chromium cannot load ES modules from
+  `file://` at all and the no-CSP baseline failed the same way. `TC-008` on the
+  Windows runner is the real check: it fails if `eval` is permitted, and the
+  suite's own setup fails if the Dashboard does not render.
+- `ConfigStore` rewrites `settings.json` on every construction even when nothing
+  changed. Harmless, but it touches mtime on every launch.
+
+
 ### TASK-001 Project scaffold
 **Traces** FR-001, FR-086, NFR-006, NFR-015, NFR-016
 **Depends on** nothing
@@ -172,8 +213,10 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 - Each chunk is exactly 32000 bytes (1000 ms at 16 kHz, 16-bit, mono) except
   the final partial chunk on stop.
 - Chunks carry `source`, `timestamp` and a per-source monotonic `sequence`.
-- The `ArrayBuffer` is transferred on `CH-303`, so `byteLength` in the worker is
-  0 after send.
+- The chunk is handed to main on `CH-303` and the worker keeps no reference to
+  it afterwards. **Electron cannot transfer an `ArrayBuffer` across IPC, so the
+  original "byteLength is 0 after send" criterion is not achievable; see OQ-003,
+  which this task must answer before the criterion is final.**
 - An ESLint rule forbids importing `fs`, `fs/promises` or `original-fs` across
   the whole reachable audio path, not just its start: `src/renderer/audio-worker/**`,
   `src/main/audio.ts`, `src/main/ai/stt.ts` and `src/main/ai/stt/**`. Transferring
