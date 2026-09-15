@@ -3,7 +3,18 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    # Every branch, not just main. A feature branch had no CI at all until a
+    # pull request existed, so work could sit unverified for as long as the PR
+    # was delayed, and a spike job whose whole purpose is to answer a question
+    # could not answer it.
+    branches: ['**']
+
+# A push to a branch with an open pull request triggers both events. Keep the
+# newest run for a ref and cancel the rest, so the duplication costs a
+# cancelled job rather than a doubled queue.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   checks:
