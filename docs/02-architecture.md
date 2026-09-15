@@ -147,11 +147,16 @@ They are data, and they are the only place a provider is named. Adding a provide
 is one entry plus one adapter (`FR-037`).
 
 ```ts
-interface ProviderDescriptor {
+/**
+ * Generic over its model descriptor, because STT and LLM models carry different
+ * fields. This originally read `models: ModelDescriptor[]`, a type this document
+ * never defined; corrected during TASK-002 when the types were implemented.
+ */
+interface ProviderDescriptor<M> {
   id: string;                     // 'deepgram', 'openai', 'elevenlabs', 'anthropic'
   displayName: string;
   credentialId: CredentialId;     // which vault key it uses
-  models: ModelDescriptor[];
+  models: M[];
 }
 
 interface SttModelDescriptor {
@@ -543,9 +548,18 @@ payload is rejected and logged, never passed through.
 | CH-303 | `audio:chunk` | worker to main | `AudioChunk` (transferable `ArrayBuffer`) |
 | CH-304 | `audio:streamState` | worker to main | `{ source, state, error? }` |
 
-`CH-303` transfers the `ArrayBuffer` rather than copying it, so the worker's
-reference is neutered on send. This enforces `FR-043` by construction: there is
-no second copy to leak.
+**Correction, found while implementing Milestone 0 (OQ-003).** `CH-303` was
+specified to transfer the `ArrayBuffer` so the worker's reference is neutered on
+send, "enforcing `FR-043` by construction". Electron cannot do that. Both
+`ipcRenderer.postMessage` and `MessagePortMain.postMessage` accept only
+`MessagePort` values in their transfer list, so every buffer crossing Electron
+IPC is structured-cloned, which means copied.
+
+`FR-043` and `NFR-002` still hold: a copy in memory is never written to disk.
+What is gone is the "by construction" part. The guarantee now rests on the
+ESLint ban across the whole reachable audio path and on the runtime
+filesystem-write monitor (`TC-137`), which is what actually proves it. The
+design question of how to bound the copies is open as `OQ-003` for `TASK-011`.
 
 ---
 

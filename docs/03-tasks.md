@@ -31,6 +31,126 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 
 ## Milestone 0 — Foundations
 
+**Status: COMPLETE, 2026-09-15.** All six tasks implemented and verified.
+`npm run typecheck`, `npm run lint`, `npm run format:check`, `npm run licenses`,
+98 unit and integration tests, and `npm run build` all pass. Line coverage is
+93.6 percent against an 80 percent floor.
+
+Two acceptance criteria could not be verified in the development container.
+Both are now **verified green on the Windows CI runner**, so neither is
+outstanding:
+
+| Criterion | Why not here | Verified |
+|---|---|---|
+| `npm run package` produces a Windows x64 installer | Wine is not installed in the Linux container, so electron-builder cannot emit NSIS | `package` job on `windows-latest`, green |
+| The five E2E cases (TC-005, TC-007, TC-008, TC-009, TC-148) | They assert window flags, capture protection and single-instance focus, none of which mean anything off Windows. The suite skips rather than passing vacuously | `e2e` job on `windows-latest`, all five green |
+
+Three questions left open during implementation were answered by those runs:
+- The content security policy does not break the packaged app. The renderer
+  loads and the Dashboard renders under `file://` in Electron with the meta
+  policy in place, so `'self' file:` is correct.
+- The policy is genuinely enforced. An inline script is blocked and the
+  violation is reported, verified both on the runner and locally by serving the
+  built renderer over HTTP and driving Chromium.
+- Reset Overlay works. It needed the window shown before its bounds were set:
+  Windows can re-apply the placement of a never-shown window when it is finally
+  shown, silently undoing the move.
+
+Deferred out of Milestone 0 by design, each failing loudly rather than silently:
+- Invoke channels for profiles, documents, sessions and `consent:dismiss` are
+  declared in the contract but have no handler yet. A caller gets an error
+  rather than a plausible-looking stub.
+- `validateKey` refuses every key until the provider adapters land in TASK-012
+  and TASK-032, because FR-026 forbids saving a key that has not passed
+  validation.
+- The `togglePause` hotkey is registered and rebindable, but its handler only
+  logs until the trigger exists in TASK-030.
+
+Found by the first CI run and fixed on the same branch:
+- The main process ships as CommonJS and `electron-store` is ESM-only, so
+  `require('electron-store')` yielded the module namespace object rather than
+  the class. `new` on it threw inside `bootstrap`, where the app's own
+  `unhandledRejection` handler swallowed it, leaving a live process with no
+  windows. All five E2E cases reported only a 30-second "no window appeared"
+  timeout. Fixed with an interop guard, pinned by `TC-037`, and turned into a
+  fast failure by `npm run smoke:main`, which loads the built bundle against a
+  stubbed Electron and asserts bootstrap wrote its settings file. `zod` was
+  checked for the same problem and is fine, because it exports `z` as a named
+  export that survives the namespace.
+
+Found by the second CI run and fixed on the same branch:
+- **Reset Overlay silently did nothing.** `resolveOverlayPosition` returns
+  `{ x, y, displayId }`, and that was spread straight into `setBounds`, which
+  takes a Rectangle. The extra string key made the call fail, so the window
+  stayed put. Extracted as `overlayBoundsFor` and pinned by a unit test.
+- **The Dashboard reported a failed IPC call as success.** An `IpcError`
+  resolves like any other response, so the reset button showed "Overlay reset"
+  even though the reset had thrown. It now checks `isIpcError` and shows a
+  failure. Errors belong in the Dashboard; `FR-076` bars them only from the
+  overlay.
+- **TC-008 was not testing anything.** It called `eval` inside
+  `page.evaluate`, which Playwright runs over the DevTools protocol, outside the
+  page's CSP. It now injects a script element, a page-level operation the policy
+  does govern, and asserts it neither runs nor passes without a violation. The
+  policy itself is verified enforced: an inline script is blocked and Chromium
+  reports `script-src-elem`.
+- The CSP question left open at the end of Milestone 0 is settled. The renderer
+  loads and the Dashboard renders under `file://` in Electron with the meta
+  policy in place, so `'self' file:` is correct and the app is not broken by it.
+
+Found by automated review and fixed on the same branch (nine findings, all
+valid, two of them security):
+- **The overlay preload forwarded every invoke channel.** Push had a per-window
+  allowlist, invoke had none, so a compromised overlay renderer could write
+  settings, rebind hotkeys or replace credentials. Both directions are now
+  allowlisted and the overlay's list is three channels.
+- **The bridge type promised only the success shape.** The router resolves with
+  an `IpcError` rather than rejecting, so TypeScript could not force callers to
+  check. `invoke` now returns `InvokeResponse<C> | IpcError`, which immediately
+  caught an unchecked caller at compile time.
+- **The consent gate could not work.** The overlay reported `overlay:ready` on
+  mount while the consent text was still null, because main only sent the text
+  in reply to that message. Main now pushes it on `did-finish-load` and the
+  renderer reports ready only after the card has painted (ADR-016).
+- **Theme changes never reached the running overlay.** `config:set` persisted
+  the patch and stopped; `translucencyChangeNeedsRecreate` was exported and
+  tested but never called. `config:set` now pushes the theme and recreates the
+  window on a mode change, preserving position and click-through (FR-085).
+- **A startup hotkey conflict was forgotten.** `register` stored the handler but
+  not the accelerator, so `reregisterAll` had nothing to retry, defeating Reset
+  Overlay's recovery path for the exact case it exists for (FR-009).
+- **A closed Dashboard could not be reopened.** The overlay keeps the process
+  alive, so a second launch lost the lock and returned early, leaving no way
+  back short of killing the process.
+- **Provider separation was only enforced on write.** A schema-valid file naming
+  the same provider for primary and backup loaded cleanly, so the app could run
+  with a backup sharing the failing service and credential. Now cleared on load
+  with a logged reason, rather than refusing to start (FR-025).
+- **The vault accepted a decrypted array.** Assigning a named property to an
+  array is dropped by `JSON.stringify`, so `set()` returned success while
+  storing nothing and `status()` stayed false. A silent credential loss.
+- **The overlay was not draggable.** A frameless window needs an explicit drag
+  region; accepting mouse events is not enough. The `moved` persistence handler
+  was unreachable through the UI (FR-082, FR-084).
+
+Follow-up work found during implementation:
+- **OQ-003** (blocks TASK-011): Electron cannot transfer an `ArrayBuffer` across
+  IPC, so `CH-303`'s transfer mechanism and `TC-041` need replacing.
+- **TASK-011** must add the `media` permission to the permission request
+  handler, which Milestone 0 sets to deny everything.
+- `Logger.rotateIfNeeded` calls `statSync` on every line. Harmless at Milestone 0
+  volumes, worth revisiting if logging becomes hot during a live session.
+- The content security policy lists `file:` because the packaged app loads
+  renderers over `file://`, where `'self'` alone does not match. A probe in the
+  Linux container could not settle whether the stricter form breaks asset
+  loading under Electron, because plain Chromium cannot load ES modules from
+  `file://` at all and the no-CSP baseline failed the same way. `TC-008` on the
+  Windows runner is the real check: it fails if `eval` is permitted, and the
+  suite's own setup fails if the Dashboard does not render.
+- `ConfigStore` rewrites `settings.json` on every construction even when nothing
+  changed. Harmless, but it touches mtime on every launch.
+
+
 ### TASK-001 Project scaffold
 **Traces** FR-001, FR-086, NFR-006, NFR-015, NFR-016
 **Depends on** nothing
@@ -172,8 +292,10 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 - Each chunk is exactly 32000 bytes (1000 ms at 16 kHz, 16-bit, mono) except
   the final partial chunk on stop.
 - Chunks carry `source`, `timestamp` and a per-source monotonic `sequence`.
-- The `ArrayBuffer` is transferred on `CH-303`, so `byteLength` in the worker is
-  0 after send.
+- The chunk is handed to main on `CH-303` and the worker keeps no reference to
+  it afterwards. **Electron cannot transfer an `ArrayBuffer` across IPC, so the
+  original "byteLength is 0 after send" criterion is not achievable; see OQ-003,
+  which this task must answer before the criterion is final.**
 - An ESLint rule forbids importing `fs`, `fs/promises` or `original-fs` across
   the whole reachable audio path, not just its start: `src/renderer/audio-worker/**`,
   `src/main/audio.ts`, `src/main/ai/stt.ts` and `src/main/ai/stt/**`. Transferring

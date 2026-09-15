@@ -81,7 +81,7 @@ not a flake. It is fixed or deleted, never retried.
 | ID | Level | Case | Pass condition |
 |---|---|---|---|
 | TC-040 | U | PCM framing | The worklet converter turns a known Float32 input into the expected Int16 LE bytes. A full chunk is exactly 32000 bytes |
-| TC-041 | I | Buffer transfer | After `CH-303`, the worker-side `ArrayBuffer.byteLength` is 0 |
+| TC-041 | I | Buffer handoff | After `CH-303`, the worker holds no reference to the chunk it sent. **Rewritten: the original asserted `byteLength` is 0 after a transfer, which Electron cannot do (OQ-003). The exact assertion is settled by TASK-011 when OQ-003 is answered.** |
 | TC-042 | U | No filesystem across the whole audio path | The ESLint rule fails a fixture importing `fs` under `src/renderer/audio-worker/**`, in `src/main/audio.ts`, in `src/main/ai/stt.ts` and under `src/main/ai/stt/**`. A rule covering only the first two fails this test |
 | TC-043 | I | Loopback failure | With loopback rejected, the mic stream still starts, interviewer state is `error`, and `session:start` is refused with a named reason |
 | TC-044 | I | Stream restart | An unexpected stream end retries exactly 3 times, then sets an error badge |

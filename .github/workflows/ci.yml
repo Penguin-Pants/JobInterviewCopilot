@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  checks:
+    name: Typecheck, lint, licenses, tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # The Electron binary is required, not optional: electron-store calls
+      # require('electron') at runtime, so the integration tests would either
+      # download it mid-test or throw. Skipping the download here made the job
+      # fragile for no gain.
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm run licenses
+      - run: npm run test:coverage
+      - name: Traceability (documents must not drift)
+        run: python3 scripts/traceability.py
+
+  build:
+    name: Build renderers and main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      # Catches a main-process startup crash in about a second. Without it the
+      # only symptom is the E2E suite timing out per test with "no window
+      # appeared", which costs minutes and names nothing.
+      - run: npm run smoke:main
+
+  e2e:
+    name: Electron E2E (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Force the Electron binary to be present before the tests. Otherwise the
+      # first launch downloads it mid-run and races the 30s window timeout.
+      - run: npx electron --version
+      - run: npm run build
+      - run: npm run smoke:main
+      - run: npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report/
+
+  package:
+    name: Windows installer
+    runs-on: windows-latest
+    needs: [checks, build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: release/*.exe

@@ -497,9 +497,43 @@ every download to serve the first run of an offline machine.
 
 ---
 
-## 3a. Open questions, resolved
+## 3a. Open questions
 
-Both were put to the product owner on 2026-09-15 and answered.
+OQ-001 and OQ-002 were put to the product owner on 2026-09-15 and answered.
+OQ-003 was found during implementation and is open.
+
+### OQ-003 — Audio buffers cannot be transferred across Electron IPC — OPEN, blocks TASK-011
+
+**Found while implementing Milestone 0, 2026-09-15.**
+
+The architecture said `CH-303` transfers the PCM `ArrayBuffer`, so the sending
+side's reference is neutered and `FR-043` is satisfied "by construction: there is
+no second copy to leak". That is not achievable. Electron's own typings show both
+`ipcRenderer.postMessage(channel, message, transfer?: MessagePort[])` and
+`MessagePortMain.postMessage(message, transfer?: MessagePortMain[])` accept only
+`MessagePort` values in a transfer list. Every buffer crossing Electron IPC is
+structured-cloned, which means copied.
+
+**What this does not break.** `FR-043` and `NFR-002` still hold. A copy living in
+memory is still never written to disk. `TC-041`, which asserts the worker-side
+`byteLength` is 0 after send, is the one test that becomes unachievable as
+written.
+
+**What is open, for TASK-011 to decide.** How to bound the number of live copies
+of a one-second PCM chunk, and what replaces `TC-041`. Candidates, none chosen:
+1. Accept the copy. One second of 16 kHz mono PCM is 32 KB, so the exposure is
+   small and short-lived. Replace `TC-041` with an assertion that the worker
+   drops its reference immediately after send.
+2. Keep the PCM in the worker and stream to the provider from there, sending
+   only transcripts to main. This changes `CMP-03a`'s role and puts network
+   access in a renderer, which cuts against `CMP-14`'s "never fetch from any
+   network" rule and would need its own decision.
+3. A `MessageChannelMain` port pair between the worker and main. This does not
+   avoid the copy; it only avoids the main-process hop.
+
+Milestone 0 does not depend on the answer. `src/preload/audioWorker.ts` sends by
+copy today and carries a comment pointing here, rather than encoding a mechanism
+that does not exist.
 
 ### OQ-001 — Transcript encryption at rest — RESOLVED: plaintext, stated plainly
 
