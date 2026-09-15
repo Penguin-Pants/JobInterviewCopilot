@@ -283,7 +283,7 @@ type TranscriptEntry = { seq: number } & (
   | { kind: 'turn'; source: 'interviewer' | 'candidate'; text: string; at: string }
   | { kind: 'suggestion'; forQuestion: string; bullets: string[];
       model: string; providerId: string; at: string;
-      status: 'complete' | 'cancelled' }
+      status: 'complete' | 'cancelled' | 'nonconforming' }
 );
 // `seq` is monotonic and assigned by CMP-08 at append time. Order is seq order,
 // not file order. A cancelled generation is appended, carrying the bullets
@@ -366,7 +366,11 @@ a new streaming provider needs no trigger change (`FR-037`, `TC-056`).
 
 Adapter notes:
 - `deepgram`: WebSocket with `encoding=linear16`, `sample_rate=16000`,
-  `channels=1`, `interim_results=true`, `endpointing=800`.
+  `channels=1`, `interim_results=true`, and
+  `endpointing=<settings.trigger.turnEndGapMs>`. The configured gap is passed
+  through, never hard-coded, so a native signal cannot preempt the user's chosen
+  value (`FR-050`). A provider that cannot accept the value has native
+  endpointing disabled and falls back to the local timer.
 - `openai` streaming: realtime transcription WebSocket, a transcription session
   configured with the chosen model and server VAD. Deltas map to
   `isFinal: false`, completed items to `isFinal: true`, the VAD stop event to
@@ -404,9 +408,20 @@ The adapter yields raw deltas. Line buffering is done above the adapter in
 
 Accumulate deltas into a pending string. Flush a `SuggestionLine` when the
 pending string contains `\n`, splitting on it. Flush the remainder when the
-stream completes. Cap the pending string at 240 characters. If the cap is hit
-without a newline, flush what is there. This prevents a model that emits one long
-run-on from stalling the overlay forever.
+stream completes.
+
+Structure is enforced here, not left to the prompt (`FR-004`, ADR-025):
+
+1. **Forced flush.** If the pending string reaches 240 characters with no
+   newline, flush up to the last word boundary before 240. Never mid-word. The
+   remainder stays pending.
+2. **Line cap.** A flushed line longer than 120 characters is prose, not a cue.
+   Truncate it at the last word boundary before 120 and append an ellipsis.
+3. **Card cap.** A card renders at most 5 lines. Line 6 and beyond are dropped,
+   never sent.
+4. **Diagnostics.** A generation that completed without ever emitting a newline
+   is recorded in the transcript with `status: 'nonconforming'`. The overlay
+   still shows the salvaged lines. It never shows an error, per `FR-076`.
 
 ### 3.4 Retrieval (`CMP-06`)
 
@@ -452,9 +467,19 @@ USING_PRIMARY (at next clean boundary)
        boundary with no audio in flight. An STT provider switch never
        happens mid-utterance.
 
-If no backup is configured:
-DEGRADED  -- keep retrying primary with backoff capped at 10 s,
-             Dashboard badge visible, overlay unchanged (FR-076)
+If no backup is configured, the path splits on `retryable` (ADR-024):
+
+DEGRADED         -- retryable failure (network, timeout, server, rate-limit).
+                    Keep retrying the primary with backoff capped at 10 s.
+                    Dashboard badge visible, overlay unchanged (FR-076).
+
+CONFIG_REQUIRED  -- non-retryable failure (auth, client). Terminal for that
+                    credential for the rest of the session. No further requests
+                    are sent, so a revoked key does not fire a doomed request
+                    every ten seconds for the whole interview. The Dashboard
+                    badge names the credential and the remedy. The state clears
+                    when the user saves a new key for that credential, which
+                    runs live validation (FR-026). Overlay unchanged.
 ```
 
 ---
@@ -651,6 +676,13 @@ published pricing at build time:
 }
 ```
 
+Selection is restricted to priced models: the Dashboard only offers models that
+exist in a registry, and `TC-156` fails the build if a registry model has no
+price row. There is therefore no unknown-model path at runtime. If a price row is
+ever missing anyway, the meter counts the tokens, contributes zero dollars for
+that model, and the Dashboard labels the estimate "incomplete" rather than
+showing a number that silently understates spend.
+
 `estimatedUsd = sum(llm token cost) + sum(stt minutes * rate)` across both
 streams. The UI labels it "estimate" and shows the price table version. The
 table is not fetched at runtime. A stale table is a known, bounded inaccuracy and
@@ -708,7 +740,7 @@ work begins.
 | Keys never in plaintext on disk | `safeStorage` DPAPI, separate file, refuse to save if unavailable | TC-021, TC-022 |
 | Keys never reach a renderer | `secrets:status` returns booleans only. No channel returns a key | TC-023, code review |
 | Keys never in logs | A redaction function runs on every log argument and every serialized error | TC-024 |
-| No audio on disk | The only `ArrayBuffer` is transferred, never passed to `fs`. Lint rule forbids `fs` imports in the audio path | TC-041, TC-042 |
+| No audio on disk | The only `ArrayBuffer` is transferred, never passed to `fs`. The lint rule covers the whole reachable audio path: `src/renderer/audio-worker/**`, `src/main/audio.ts`, `src/main/ai/stt.ts` and `src/main/ai/stt/**`. A runtime filesystem write monitor covers what lint cannot | TC-041, TC-042, TC-137 |
 | Renderer isolation | `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`, preload allowlist | TC-086 |
 | No remote code in renderers | CSP without `unsafe-eval`, `will-navigate` and `setWindowOpenHandler` both deny | TC-087 |
 | Overlay hidden from capture | `setContentProtection(true)` at creation, never disabled | TC-005, manual MW-01 |

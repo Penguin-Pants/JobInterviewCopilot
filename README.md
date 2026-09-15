@@ -19,8 +19,9 @@ Read them in this order. The decision log wins over every other document.
 | [`docs/01-requirements.md`](docs/01-requirements.md) | What the product must do, as 107 verifiable requirements |
 | [`docs/02-architecture.md`](docs/02-architecture.md) | Components, data model, interfaces, IPC contract, dependencies |
 | [`docs/03-tasks.md`](docs/03-tasks.md) | 26 implementation tasks with binary acceptance criteria and the global Definition of Done |
-| [`docs/04-test-strategy.md`](docs/04-test-strategy.md) | 123 automated test cases, 13 manual Windows checks, the CI pipeline |
-| [`docs/05-traceability.md`](docs/05-traceability.md) | Generated matrix. Every requirement maps to a task and a test |
+| [`docs/04-test-strategy.md`](docs/04-test-strategy.md) | 130 automated test cases, 13 manual Windows checks, the CI pipeline |
+| [`docs/06-verification-map.md`](docs/06-verification-map.md) | Hand-authored. One row per requirement naming the tests that actually prove it |
+| [`docs/05-traceability.md`](docs/05-traceability.md) | Generated matrix. Do not edit |
 | [`MASTER_BUILD_PROMPT.md`](MASTER_BUILD_PROMPT.md) | The original product brief, corrected, kept for context |
 
 Both open questions have been answered and are recorded as OQ-001 and OQ-002 in
@@ -80,5 +81,13 @@ python scripts/traceability.py
 ```
 
 Regenerates `docs/05-traceability.md` and exits non-zero if any requirement has
-no task, any requirement has no test, any task cites an undefined test, or any
-test is orphaned. This runs in CI. Documents that drift apart fail the build.
+no task, any requirement has no authored verification row, any requirement claims
+a test no task builds, any task cites an undefined test, or any test verifies
+nothing. This runs in CI. Documents that drift apart fail the build.
+
+Requirement-to-test coverage is read from the hand-authored
+`docs/06-verification-map.md`, never inferred from task membership. An earlier
+version derived it by Cartesian product, crediting every test of a task to every
+requirement that task traced, which let a requirement report full coverage with
+no test that would fail if it broke. List a test on a requirement only if it
+would fail when that requirement is broken.

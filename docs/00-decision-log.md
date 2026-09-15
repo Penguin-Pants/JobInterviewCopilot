@@ -420,6 +420,81 @@ the only OpenAI choice.
 WebSocket transcription sessions, ElevenLabs Scribe v2 Realtime WebSocket with
 `pcm_16000` input.
 
+### ADR-023 — Chunk cap is 256 tokens, the model's real input limit
+
+**Supersedes the 500-token figure in ASM-001.**
+
+**Context.** `all-MiniLM-L6-v2` has a maximum sequence length of 256 word pieces
+and silently truncates anything longer. A 500-token chunk would embed its first
+256 tokens only. The tail would be stored, displayed and retrievable by keyword
+in the UI, but it would contribute nothing to the vector. A question matching
+only the tail could never retrieve the chunk, and nothing would look broken.
+
+**Decision.** The chunk cap is 256 tokens measured with the MiniLM tokenizer.
+Multi-window embedding with mean pooling was considered and rejected for v1: it
+doubles the embedding cost and blurs the vector, and 256 tokens is already a
+reasonable retrieval granularity for resume and notes content.
+
+**Consequence.** A test asserts no chunk exceeds the model's
+`max_seq_length`, read from the model config rather than hard-coded, so a model
+swap cannot silently reintroduce truncation.
+
+### ADR-024 — A non-retryable error with no backup is terminal, not a retry loop
+
+**Context.** The `DEGRADED` state retried the primary forever with backoff capped
+at 10 s, for every error class. `ProviderError.retryable` is false for `auth` and
+`client`, and ADR-010 already says a rejected key must not be retried blindly. A
+user with a revoked key and no backup would have fired a doomed request every ten
+seconds for the whole interview.
+
+**Decision.** Split the no-backup path.
+- A **retryable** failure (`network`, `timeout`, `server`, `rate-limit`) enters
+  `DEGRADED` and retries with backoff capped at 10 s, as before.
+- A **non-retryable** failure (`auth`, `client`) enters `CONFIG_REQUIRED`, a
+  terminal state for that credential for the rest of the session. No further
+  requests are sent. The Dashboard badge says the credential was rejected and
+  what to do about it.
+- `CONFIG_REQUIRED` clears when the user saves a new key for that credential,
+  which already runs live validation (`FR-026`).
+- The overlay is still never touched. `FR-076` is unchanged.
+
+### ADR-025 — Cue-form output is enforced, not merely requested
+
+**Context.** `FR-004` requires 3 to 5 short bullets and forbids a scripted
+paragraph, but the only mechanism was a line-buffer rule that split a run-on
+response into arbitrary 240-character fragments. A provider that ignored the
+prompt would have had its prose rendered into the overlay as if it were cues.
+The prohibition was a request to the model, not a property of the system.
+
+**Decision.** Structure is enforced at the line buffer.
+- The forced flush wraps at the last word boundary before 240 characters, never
+  mid-word.
+- A card renders at most 5 lines. Lines beyond the fifth are dropped, not shown.
+- A line longer than 120 characters after wrapping is treated as prose, not a
+  cue, and is truncated at the last word boundary before 120 characters with a
+  trailing ellipsis.
+- A generation that produced no newline at all is recorded in the transcript with
+  `status: 'nonconforming'` for diagnostics. The overlay still shows what was
+  salvaged, because `FR-076` forbids an error card and a degraded cue beats a
+  blank card mid-interview.
+
+### ADR-026 — The offline guarantee is scoped to an installation that has its model
+
+**Context.** `NFR-008` promised that with no network the app could still import
+documents and compute embeddings. `ADR-011` blocks ingestion until a roughly
+90 MB model download completes. On a fresh install with no network, both cannot
+be true, and `TC-132` could only have passed by quietly pre-seeding the cache.
+
+**Decision.** The offline guarantee applies to an installation whose embedding
+model is already cached. Stated in `NFR-008` rather than implied by a test
+fixture. A fresh install with no network starts, manages profiles and shows an
+explicit "embedding model not downloaded" state on the document manager with a
+retry action. It does not hang and it does not look broken. `TC-132` runs the
+cached case and `TC-161` runs the fresh-install case.
+
+**Rejected.** Packaging the model in the installer. It would add about 90 MB to
+every download to serve the first run of an offline machine.
+
 ---
 
 ## 3a. Open questions, resolved
@@ -459,7 +534,7 @@ specified but can be changed cheaply before build starts.
 
 | ID | Assumption | Where it binds | Cost to change |
 |---|---|---|---|
-| ASM-001 | RAG chunk cap is 500 tokens, measured with the MiniLM tokenizer, soft-split on paragraph breaks | `FR-062` | Low, one constant |
+| ASM-001 | RAG chunk cap is **256** tokens, the MiniLM input limit, soft-split on paragraph breaks. Was 500, corrected in ADR-023 because the model truncates beyond 256 | `FR-062` | Low, one constant |
 | ASM-002 | Default hotkeys are `Ctrl+Shift+I` (interaction toggle) and `Ctrl+Shift+P` (pause trigger) | `FR-084` | Low, defaults only |
 | ASM-003 | Default LLM models are `claude-haiku-4-5-20251001` for Anthropic and `gpt-4o-mini` for OpenAI | `FR-071` | Low, config default |
 | ASM-004 | A new turn cancels an in-flight generation | `FR-054` | Medium, changes trigger state machine |

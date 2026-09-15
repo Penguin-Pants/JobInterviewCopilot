@@ -38,7 +38,13 @@ speech. Candidate speech must never trigger a suggestion.
 
 **FR-004** Suggestions must be cue-form, meaning 3 to 5 short bullets of
 keywords or STAR-method reminders. The app must instruct the model never to
-return a scripted paragraph.
+return a scripted paragraph, **and must enforce the shape rather than trusting
+the instruction**. A card renders at most 5 lines. A forced flush wraps at a word
+boundary, never mid-word. A line still longer than 120 characters after wrapping
+is prose, not a cue, and is truncated at a word boundary with an ellipsis. A
+generation that produced no newline at all is recorded as `nonconforming`. The
+overlay still shows what was salvaged, because `FR-076` forbids an error card.
+(ADR-025)
 
 **FR-005** The overlay window must be excluded from screen capture and screen
 recording. The main process must call `setContentProtection(true)` on the
@@ -147,7 +153,10 @@ deleted when a fourth is created.
 
 **FR-033** Settings must be validated against a schema on load. An invalid or
 corrupt settings file must be replaced with defaults, and the corrupt file
-renamed to `settings.corrupt-<timestamp>.json` rather than deleted.
+renamed to `settings.corrupt-<epochMillis>.json` rather than deleted. The name
+must be filesystem-safe on Windows. An ISO 8601 timestamp must not be used: it
+contains colons, which are illegal in Windows file names, so the rename would
+fail at exactly the moment the app is recovering from corruption.
 
 ---
 
@@ -203,7 +212,11 @@ back to the silence-gap timer for any model whose registry entry declares
 **FR-050** A turn end on the interviewer stream is detected when a final
 transcript segment is followed by a silence gap of `turnEndGapMs`
 (default 800 ms, range 500 to 1500 ms), or when the provider emits a native
-endpointing signal, whichever comes first. (ASM-007)
+endpointing signal, whichever comes first. The configured `turnEndGapMs` must be
+passed to any provider that accepts an endpointing parameter, so that a native
+signal never preempts the user's chosen value. A provider that cannot accept the
+value must have its native endpointing disabled and fall back to the local timer.
+(ASM-007)
 
 **FR-051** A detected turn must not fire a suggestion when the accumulated
 interviewer text for that turn is shorter than 3 words or 12 characters.
@@ -236,8 +249,12 @@ When no heading structure is detected in a converted document, the app must wrap
 the whole body in a single synthetic `# Document` section.
 
 **FR-062** Markdown must be chunked by `#`, `##` and `###` headers. A chunk must
-be capped at 500 tokens measured with the MiniLM tokenizer, soft-split on
-paragraph breaks when a section exceeds the cap. (ASM-001)
+be capped at 256 tokens measured with the MiniLM tokenizer, soft-split on
+paragraph breaks when a section exceeds the cap. 256 is the model's maximum
+sequence length. A longer chunk would be silently truncated at embed time, so its
+tail would be stored and displayed but would contribute nothing to the vector.
+The cap must be read from the model config, not hard-coded, so a model swap
+cannot reintroduce truncation. (ADR-023, ASM-001)
 
 **FR-063** Each chunk must carry `{ sourceFile, headerPath, docType, profileId }`.
 
@@ -257,12 +274,19 @@ progress indicator. (ADR-011)
 file must not be re-embedded on relaunch.
 
 **FR-068** Each profile's knowledge base folder must be watched. An add, edit or
-delete must re-embed only the affected file, and the change must be reflected in
-query results within 5 seconds of the file system settling.
+delete must re-embed only the affected file. For a document at or below the
+supported ceiling of 2 MB and 200 chunks, the change must be reflected in query
+results within 5 seconds of the file system settling. Above the ceiling the
+document is still processed, the 5-second target does not apply, and the
+Dashboard shows progress for that document. The ceiling must be stated in the
+Dashboard, not just in this document.
 
 **FR-069** Every document must belong to exactly one profile. Deleting a profile
-must delete its documents, its chunks, its cached embeddings and its session
-history, after an explicit confirmation naming what will be deleted.
+must delete, from disk, its documents in `kb/`, its derived Markdown, its chunk
+files, its cached vectors and its session transcripts, after an explicit
+confirmation naming the counts. The profile directory must not exist afterwards.
+A partial delete must not leave transcript or document content on disk while the
+profile record is gone.
 
 **FR-077** The `kb/` folder is authoritative for which documents exist.
 `profile.json` is a derived index. A file that appears in `kb/` without going
@@ -458,9 +482,13 @@ launch on a warm start.
 **NFR-007** *(Overlay frame rate)* Card animations must hold 60 fps on
 integrated graphics. No animation may run while the overlay is idle.
 
-**NFR-008** *(Offline behavior)* With no network, the app must still start,
-manage profiles, ingest documents and compute embeddings. A session start must
-warn that transcription is unavailable.
+**NFR-008** *(Offline behavior)* With no network **and the embedding model
+already cached**, the app must start, manage profiles, ingest documents and
+compute embeddings. A session start must warn that transcription is unavailable.
+With no network and no cached model, the app must still start and manage
+profiles, and the document manager must show an explicit "embedding model not
+downloaded" state with a retry action. It must not hang and must not present the
+failure as a generic error. (ADR-026)
 
 **NFR-009** *(Resilience)* No unhandled promise rejection or uncaught exception
 may terminate a live session. The main process must install global handlers that

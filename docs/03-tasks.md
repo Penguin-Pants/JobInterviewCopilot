@@ -73,8 +73,10 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 - Every field and default from `Settings` in `02-architecture.md` section 2.1 is
   implemented, with the exact defaults listed there.
 - Loading a corrupt or schema-invalid file replaces it with defaults and renames
-  the original to `settings.corrupt-<ISO timestamp>.json`. The original is never
-  deleted.
+  the original to `settings.corrupt-<epochMillis>.json`. The original is never
+  deleted. The name must be filesystem-safe on Windows: an ISO 8601 timestamp
+  contains colons and the rename would fail at exactly the moment the app is
+  recovering from corruption (FR-033).
 - `schemaVersion` mismatch runs a migration chain. Version 1 is the baseline, so
   the chain is empty but the mechanism exists and is unit tested with a fake
   version 0.
@@ -172,8 +174,11 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 - Chunks carry `source`, `timestamp` and a per-source monotonic `sequence`.
 - The `ArrayBuffer` is transferred on `CH-303`, so `byteLength` in the worker is
   0 after send.
-- An ESLint rule forbids importing `fs`, `fs/promises` or `original-fs` anywhere
-  under `src/renderer/audio-worker/` and in `src/main/audio.ts`.
+- An ESLint rule forbids importing `fs`, `fs/promises` or `original-fs` across
+  the whole reachable audio path, not just its start: `src/renderer/audio-worker/**`,
+  `src/main/audio.ts`, `src/main/ai/stt.ts` and `src/main/ai/stt/**`. Transferring
+  the buffer neuters the worker's reference, it does not stop a downstream
+  adapter from persisting the bytes it receives (NFR-002).
 - Loopback failure still starts the mic, sets the interviewer stream state to
   `error` and blocks `session:start` with a named reason.
 - Unexpected stream end retries 3 times before surfacing an error badge.
@@ -194,7 +199,9 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
   registry itself.
 - Three streaming adapters ship and all three accept the same 16 kHz, 16-bit,
   mono PCM with no per-provider resampling:
-  - Deepgram: `encoding=linear16&sample_rate=16000&channels=1&interim_results=true&endpointing=800`.
+  - Deepgram: `encoding=linear16&sample_rate=16000&channels=1&interim_results=true`
+    and `endpointing` set from `settings.trigger.turnEndGapMs`, never hard-coded,
+    so a native signal cannot preempt the user's chosen gap (FR-050).
   - OpenAI realtime: a transcription session on the realtime WebSocket with the
     chosen model and server VAD. Deltas to `isFinal: false`, completed items to
     `isFinal: true`, VAD stop to `endpoint`.
@@ -209,7 +216,7 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 - Adding a fake provider to the registry makes it selectable and usable end to
   end with no edit outside the registry and its adapter (FR-037).
 - Every registry model has a `providerId:modelId` row in `pricing.json`.
-**Verified by** TC-050, TC-051, TC-052, TC-053, TC-054, TC-056, TC-151, TC-152, TC-153, TC-155, TC-156
+**Verified by** TC-050, TC-051, TC-052, TC-053, TC-054, TC-056, TC-151, TC-152, TC-153, TC-155, TC-156, TC-159
 
 ### TASK-013 Non-streaming STT class and the Whisper adapter
 **Traces** FR-047, FR-049, NFR-017, ADR-022
@@ -249,10 +256,15 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 - After failover the adapter stays on the backup for the rest of the session.
 - A probe runs against the primary every 60 s. Two consecutive passes return to
   the primary at the next clean boundary, not mid-stream.
-- With no backup configured the state is `DEGRADED`, retries continue with
-  backoff capped at 10 s, and the overlay is never touched.
+- With no backup configured the no-backup path splits on `retryable` (ADR-024):
+  a retryable failure enters `DEGRADED` and retries with backoff capped at 10 s;
+  a non-retryable failure (`auth`, `client`) enters `CONFIG_REQUIRED`, terminal
+  for that credential for the session, sending no further requests. A revoked key
+  must not fire a doomed request every ten seconds for a whole interview.
+  `CONFIG_REQUIRED` clears when the user saves a new key for that credential.
+  The overlay is never touched in either state.
 - `CH-202 state:providers` reflects every transition.
-**Verified by** TC-100, TC-101, TC-102, TC-103, TC-143, TC-144
+**Verified by** TC-100, TC-101, TC-102, TC-103, TC-143, TC-144, TC-162
 
 ---
 
@@ -272,7 +284,13 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
   out of the import call and never blocks other documents in the same batch.
 - Every document belongs to exactly one profile. There is no shared document
   store.
-**Verified by** TC-060, TC-061, TC-062, TC-063
+- Deleting a profile removes the whole profile directory from disk: `kb/`,
+  derived Markdown, chunk files, vectors and session transcripts. A test asserts
+  the directory does not exist afterwards and that no transcript or document
+  content survives anywhere under `userData` (FR-069).
+- A delete interrupted partway must not leave content on disk with the profile
+  record gone. The record is removed last.
+**Verified by** TC-060, TC-061, TC-062, TC-063, TC-160
 
 ### TASK-021 Chunking
 **Traces** FR-062, FR-063, ASM-001
@@ -280,10 +298,13 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 **Acceptance criteria**
 - Splits on `#`, `##`, `###`. `####` and deeper stay inside the parent chunk as
   body text.
+- The token cap is read from the embedding model's `max_seq_length` (256 for
+  MiniLM), not hard-coded. A test asserts no produced chunk exceeds it, so a
+  model swap cannot silently reintroduce truncation (FR-062, ADR-023).
 - `headerPath` is the ordered ancestor chain, for example
   `['Experience', 'Acme Corp']`.
-- A section over 500 MiniLM tokens soft-splits on blank lines. A single
-  paragraph over the cap is hard-split at the token boundary rather than dropped.
+- A section over the cap soft-splits on blank lines. A single paragraph over the
+  cap is hard-split at the token boundary rather than dropped.
 - Every chunk carries `{ sourceFile, headerPath, docType, profileId }` and a
   `tokenCount`.
 - Chunking is pure and deterministic: the same input bytes always produce the
@@ -298,12 +319,16 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 - Uses `@xenova/transformers` with `Xenova/all-MiniLM-L6-v2`, 384 dimensions.
 - First run shows determinate download progress on `CH-214`. Ingestion is
   blocked until it completes. Session start is not blocked.
+- With no network and no cached model, the document manager shows an explicit
+  "embedding model not downloaded" state with a retry action. It does not hang
+  and does not present the failure as a generic error. The `NFR-008` offline
+  guarantee applies to an installation whose model is already cached (ADR-026).
 - Vectors are L2-normalized before write, stored as a flat `Float32Array` in
   `<docId>.vectors.bin`.
 - The cache key is `sha256(fileBytes):chunkerVersion:embeddingModelId`. An
   unchanged file is not re-embedded on relaunch.
 - Changing `chunkerVersion` invalidates the cache with no manual purge.
-**Verified by** TC-068, TC-069, TC-070, TC-071
+**Verified by** TC-068, TC-069, TC-070, TC-071, TC-161
 
 ### TASK-023 Auto-tagging and user override
 **Traces** FR-064, FR-079
@@ -336,8 +361,11 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 **Acceptance criteria**
 - `chokidar` watches each profile's `kb/` folder with a 500 ms stability debounce.
 - An add, change or unlink re-processes only that file.
-- A change is reflected in `query` results within 5 s of the file system
-  settling.
+- For a document at or below the supported ceiling of 2 MB and 200 chunks, a
+  change is reflected in `query` results within 5 s of the file system settling.
+  Above the ceiling the document still processes, the 5-second target does not
+  apply, and the Dashboard shows progress. The ceiling is shown in the Dashboard
+  (FR-068).
 - A delete removes the document record, its chunks and its vectors.
 - Rapid successive writes to one file cause exactly one re-embed.
 - A file that appears in `kb/` outside `doc:import` is adopted: a record is
@@ -346,7 +374,7 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
   in `pending`, `converting` or `embedding` to `pending` (FR-078).
 - `chunks.json` and `vectors.bin` are written write-to-temp then rename. A row
   count mismatch at load discards both and re-embeds (FR-078).
-**Verified by** TC-079, TC-140, TC-141
+**Verified by** TC-079, TC-140, TC-141, TC-163
 
 ---
 
@@ -396,6 +424,12 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
   deltas plus one terminal usage record.
 - Line buffering is implemented once, above the adapters, so both providers
   produce identical `CH-208` timing.
+- Structure is enforced at the buffer, not trusted to the prompt (FR-004,
+  ADR-025): a forced flush wraps at a word boundary and never mid-word; a line
+  over 120 characters after wrapping is truncated at a word boundary with an
+  ellipsis; a card renders at most 5 lines and line 6 onward is never sent; a
+  generation that emitted no newline is recorded as `nonconforming`. The overlay
+  still shows what was salvaged and never an error (FR-076).
 - A `SuggestionLine` is emitted per newline, plus a final flush of the
   remainder, plus a forced flush at 240 pending characters with no newline.
 - A test feeds character-by-character deltas and asserts the number of
@@ -404,7 +438,7 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
   the request is aborted, not merely unsubscribed.
 - No code path sends an error to the overlay. A static test asserts the overlay
   preload exposes no error channel.
-**Verified by** TC-093, TC-094, TC-095, TC-096
+**Verified by** TC-093, TC-094, TC-095, TC-096, TC-157
 
 ---
 
@@ -478,7 +512,9 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
 - Key entry shows an inline pass or fail within 10 s and does not save a failing
   key.
 - Company Profiles supports create, switch, delete and drag-and-drop import,
-  with a doc-type override control per document row.
+  with a doc-type override control per document row. Exactly one profile is
+  active at a time and switching is disabled during a live session (FR-027,
+  FR-028, ADR-013).
 - Profile delete requires a confirmation that names the counts of documents and
   sessions to be deleted. Deleting the active profile activates another profile,
   or creates a default profile when none remains (FR-028).
@@ -490,7 +526,7 @@ A task is done only when **all** of these hold. No exceptions, no partial done.
   default states that an unencrypted local text transcript is kept for the
   session (FR-007, FR-110).
 - Every interactive element is reachable and operable by keyboard.
-**Verified by** TC-120, TC-121, TC-122, TC-123, TC-124, TC-125, TC-154
+**Verified by** TC-120, TC-121, TC-122, TC-123, TC-124, TC-125, TC-154, TC-158
 
 ### TASK-043 Overlay UI
 **Traces** FR-006, FR-007, FR-008, FR-076, FR-085, FR-090, FR-091, FR-092, FR-093, FR-094, FR-102, NFR-007, NFR-010

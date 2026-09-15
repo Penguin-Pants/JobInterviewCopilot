@@ -69,7 +69,7 @@ not a flake. It is fixed or deleted, never retried.
 | TC-024 | I | Validate before save | A rejected key returns the provider reason and is not persisted. A valid key is persisted |
 | TC-025 | U | Primary and backup differ | Setting backup equal to primary is rejected at the config layer, not only in the UI |
 | TC-030 | U | Defaults | Fresh settings match every default in `02-architecture.md` section 2.1 exactly |
-| TC-031 | I | Corrupt settings | A malformed file is replaced with defaults and renamed to `settings.corrupt-<ts>.json`. The original content survives in the renamed file |
+| TC-031 | I | Corrupt settings | A malformed file is replaced with defaults and renamed to `settings.corrupt-<epochMillis>.json`. The original content survives. The generated name contains no colon and creates successfully on Windows, where an ISO 8601 name would throw |
 | TC-032 | U | Migration chain | A stubbed version 0 file runs the chain and lands on `schemaVersion: 1` |
 | TC-033 | U | Clamping | `overlayOpacity` 5.0 clamps to 1.00, `overlayFontSizePx` 4 clamps to 16, `turnEndGapMs` 99 clamps to 500 |
 | TC-034 | I | Hotkey conflict | A rebind that `globalShortcut.register` rejects returns an error and the previous accelerator is still registered |
@@ -82,7 +82,7 @@ not a flake. It is fixed or deleted, never retried.
 |---|---|---|---|
 | TC-040 | U | PCM framing | The worklet converter turns a known Float32 input into the expected Int16 LE bytes. A full chunk is exactly 32000 bytes |
 | TC-041 | I | Buffer transfer | After `CH-303`, the worker-side `ArrayBuffer.byteLength` is 0 |
-| TC-042 | U | No filesystem in the audio path | The ESLint rule fails a fixture that imports `fs` under `src/renderer/audio-worker/` or in `src/main/audio.ts` |
+| TC-042 | U | No filesystem across the whole audio path | The ESLint rule fails a fixture importing `fs` under `src/renderer/audio-worker/**`, in `src/main/audio.ts`, in `src/main/ai/stt.ts` and under `src/main/ai/stt/**`. A rule covering only the first two fails this test |
 | TC-043 | I | Loopback failure | With loopback rejected, the mic stream still starts, interviewer state is `error`, and `session:start` is refused with a named reason |
 | TC-044 | I | Stream restart | An unexpected stream end retries exactly 3 times, then sets an error badge |
 | TC-045 | I | Teardown | After `session:stop`, both contexts are closed, all tracks stopped and the worker window destroyed |
@@ -110,7 +110,7 @@ not a flake. It is fixed or deleted, never retried.
 | TC-063 | I | Failure isolation | A corrupt file in a 3-file batch sets `state: 'error'` on that row only. The other two reach `ready` |
 | TC-064 | U | Header splitting | `#`, `##`, `###` create chunks. `####` stays inside the parent chunk |
 | TC-065 | U | Header path | A nested document produces `headerPath` equal to the ordered ancestor chain |
-| TC-066 | U | Token cap | A 1200-token section soft-splits on blank lines. A single 700-token paragraph hard-splits and loses no text |
+| TC-066 | U | Token cap at the model limit | The cap is read from the model's `max_seq_length` (256), not hard-coded. A 1200-token section soft-splits on blank lines. A single 700-token paragraph hard-splits and loses no text. No produced chunk exceeds the cap, so nothing is silently truncated at embed time |
 | TC-067 | U | Determinism | Chunking the same bytes twice produces a deeply equal array |
 | TC-068 | U | Vector shape | Each vector has 384 dimensions and an L2 norm within 1e-6 of 1.0 |
 | TC-069 | I | Cache hit | A second ingest of an unchanged file performs zero embedding calls |
@@ -198,7 +198,7 @@ All trigger tests run on fake timers with the pure state-machine module.
 |---|---|---|---|
 | TC-130 | I | Unhandled rejection | An injected unhandled rejection during a session is logged and the session stays active |
 | TC-131 | I | Soak | A 60-minute synthetic session keeps main-process RSS under 600 MB with no upward trend over the last 30 minutes |
-| TC-132 | I | Offline | With the network disabled the app starts, imports documents and embeds. `session:start` warns that transcription is unavailable |
+| TC-132 | I | Offline with a cached model | With the network disabled **and the model already cached**, the app starts, imports documents and embeds. `session:start` warns that transcription is unavailable |
 | TC-133 | I | Latency harness | With scripted fakes at fixed delays, the measured turn-end to first-line path adds under 150 ms of app-side overhead. Real end-to-end `NFR-001` numbers come from MW-06 |
 
 ### 3.12 Added from independent review
@@ -227,6 +227,13 @@ All trigger tests run on fake timers with the pure state-machine module.
 | TC-154 | E | Model picker | Each model shows its streaming capability and price. Selecting a non-streaming model shows the `NFR-017` latency consequence before the choice is saved. A backup from the same provider as the primary is rejected |
 | TC-155 | I | Fourth credential | The ElevenLabs key encrypts into the vault, validates on entry, and health is keyed to it like every other credential |
 | TC-156 | U | Price table coverage | Every model in both registries has a matching `providerId:modelId` row in `pricing.json`. A registry entry with no price row fails the test |
+| TC-157 | U | Cue-form shape is enforced | A provider returning one 900-character paragraph with no newline produces lines wrapped at word boundaries, never mid-word, at most 5 lines on the card, each truncated at a word boundary before 120 characters, and the generation recorded as `nonconforming`. No overlay error is sent |
+| TC-158 | E | Profile lifecycle | Create, switch and delete work. Exactly one profile is active. Deleting the active profile activates another, or creates a default when none remains. Switching is disabled during a live session |
+| TC-159 | U | Endpointing uses the configured gap | With `turnEndGapMs` set to 1400, the Deepgram connection sends `endpointing=1400`. A hard-coded 800 fails this test. A provider that cannot accept the value has native endpointing disabled and uses the local timer |
+| TC-160 | I | Profile deletion cascade | After deleting a populated profile, the profile directory does not exist, and a recursive scan of `userData` finds no chunk, vector, derived Markdown, original document or transcript belonging to it. A delete interrupted before the record is removed leaves no content orphaned |
+| TC-161 | I | Fresh install, no network, no model | The app starts and manages profiles. The document manager shows the "embedding model not downloaded" state with a retry action. It does not hang and does not show a generic error |
+| TC-162 | U | Non-retryable is terminal without a backup | With no backup, an `auth` failure enters `CONFIG_REQUIRED` and sends zero further requests for the rest of the session. A `network` failure enters `DEGRADED` and keeps retrying with backoff capped at 10 s. Saving a new valid key clears `CONFIG_REQUIRED` |
+| TC-163 | I | Re-embed SLA is bounded | A document within the 2 MB and 200-chunk ceiling is queryable within 5 s of settling. A document above the ceiling still completes, is exempt from the 5 s target, and reports progress |
 | TC-150 | I | Non-streaming latency harness | With a non-streaming model active and scripted fakes at fixed delays, the measured path is inside the `NFR-017` budget. Which budget applies is read from the registry entry. Real numbers come from MW-11 |
 
 ---
