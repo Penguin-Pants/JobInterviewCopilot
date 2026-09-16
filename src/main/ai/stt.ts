@@ -34,6 +34,17 @@ export interface SttSession {
   readonly source: TranscriptSource;
   readonly choice: ProviderChoice;
   push(chunk: AudioChunk): void;
+  /**
+   * PCM bytes this session has actually put on the wire, if it can say
+   * (`FR-103`, ADR-036).
+   *
+   * The Cost Meter bills audio "actually sent to a provider". A streaming
+   * adapter drops queued chunks during an outage rather than buffering without
+   * bound (ADR-027), so only the adapter knows what really went. Optional
+   * because an adapter that sends everything it is handed has nothing to
+   * correct; the caller then bills the chunk it handed over.
+   */
+  readonly sentBytes?: number;
   close(): Promise<void>;
   on(e: 'transcript', h: (t: TranscriptEvent) => void): void;
   /** Provider-native turn end. */

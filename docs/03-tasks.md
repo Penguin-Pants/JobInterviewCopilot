@@ -1273,11 +1273,13 @@ a session.
 
 Covered by `tests/integration/live-session.test.ts` (13 cases, every component
 below the loop real and only the audio worker, the STT transport and the LLM
-transport faked), `tests/unit/live-loop.test.ts` (20 failure-path cases) and
-seven wiring guardrails in `tests/unit/guardrails.test.ts`. `npm run typecheck`,
-`npm run lint`, `npm run format:check`, `npm run licenses`, `npm run build`,
-`npm run smoke:main`, `npm run trace` and 786 unit and integration tests all
-pass. Line coverage on `live.ts` is 98.6 percent.
+transport faked), `tests/unit/live-loop.test.ts` (24 failure-path cases) and
+eight wiring guardrails in `tests/unit/guardrails.test.ts`, plus the cases the
+Codex review added to `whisper.test.ts`, `stt-adapters.test.ts` and
+`overlay-surface.test.ts`. `npm run typecheck`, `npm run lint`,
+`npm run format:check`, `npm run licenses`, `npm run build`,
+`npm run smoke:main`, `npm run trace` and 795 unit and integration tests all
+pass. Line coverage on `live.ts` is 97.9 percent.
 
 **Design decisions taken here, with the alternatives rejected:**
 
@@ -1303,15 +1305,30 @@ pass. Line coverage on `live.ts` is 98.6 percent.
 | **A turn could become an unhandled rejection.** Nothing awaits the stored generation promise between one turn and the next | `NFR-009` would log it only after it had escaped, and the next turn would then await a rejected chain | The `catch` is attached to the stored promise, so the chain a later turn awaits can never reject. Pinned by a test that makes the machine throw and then answers another turn |
 | **`CH-201` was pushed after the loop came up** | The Dashboard rendered the session as inactive for as long as capture and both sockets took to start | Pushed as soon as the manager accepts, and pinned by a wiring guardrail |
 
+**Defects found in the Codex review of this task, all eight real and all fixed.**
+One mistake with eight faces, recorded as ADR-036: the loop trusted what a
+collaborator's signature implied rather than what the collaborator does.
+
+| Defect | Consequence | Fix |
+|---|---|---|
+| **A resolved `open` is not a connected socket.** Every streaming adapter asks its socket to connect and returns; a refusal arrives later on the `error` event | `runFor` had already recorded the open a success, so an unavailable or revoked primary never retried and never failed over. The session transcribed nothing for the rest of the interview and the Dashboard badge stayed green | The `error` event is raised **into** `CMP-12` and the pair is re-opened on whatever the machine then serves. This also closes the follow-up this task was going to carry about a socket dying mid-session |
+| **`[]` from `RagEngine.query` is not "nothing matched".** TASK-024 returned it for a missing model and for a failed embedding too, so a failure could not throw into a session | It reached the loop as "no relevant notes", and the loop generated from them: the ungrounded suggestion ADR-035 exists to prevent, one round after ADR-035 said so. The decision was not enforced anywhere | `query` throws `RetrievalUnavailableError` when notes that exist cannot be reached, and still answers `[]` when there is genuinely nothing to search (ADR-036) |
+| **Stop during the bring-up tore the start down from underneath it.** `session:start` pushes `CH-201` before awaiting the loop, so Stop is reachable while capture or a socket is still coming up | The teardown ran, and the start's continuation then opened the pair again and started the trigger, leaving sockets live against a transcript that had already been compacted | `stop` waits for the bring-up it interrupts. The start is held as a promise so there is something to wait for rather than a gap to slip through |
+| **`close` on a batch adapter is where its last answer comes from.** Whisper posts its remaining buffer inside `close`, and the loop cleared its stream map first | The final spoken segment of **every** session recorded with a batch model was dropped, twice over: the loop had stopped routing, and `close` set `closed` before the request returned, so `transcribe` discarded the response it had just paid for | Streams stay routable until `close` resolves, and `close` waits for its own requests. A `closing` flag keeps chunks out of a socket that is going away, which is what the early clear was really for |
+| **A configured backup is not a usable backup** | With a backup that has no key, the backup attempt silently re-ran the provider that had just failed, while health recorded `using-backup`. The Dashboard named a backup that never answered a request | An unusable backup fails the backup attempt explicitly, which is the truthful answer |
+| **A chunk handed to an adapter is not a chunk sent.** `SocketSttSession` drops queued chunks during an outage rather than buffering without bound (ADR-027) | An outage longer than the queue was billed as though every second of it had been transcribed, which contradicts the meter's own "actually sent to a provider" rule | `SttSession` gains an optional `sentBytes`, counted where a chunk reaches the socket. Closes this task's own declared follow-up about the batch tail rather than carrying it |
+| **One generation is not one billable request** | A retry or a failover sends the question again. Keyed alike, the second attempt's usage replaced the first, so everything the earlier attempts cost was dropped from the estimate and from the transcript | Each attempt is accounted under `<generationId>#n`. ADR-033's replacement still holds within one request, which is what it was for |
+| **A card the gate holds is not scoped to a session** | `noteClosed` keeps the card so a generation streaming through a translucency rebuild is replayed in full (ADR-016). Across a session boundary the card outlived its interview, and the next rebuild replayed the previous interview's suggestion to a session that had produced nothing | The gate is cleared at both ends of a session, pinned by a guardrail on both handlers |
+
 **Follow-up work carried out of TASK-044:**
 
 | Item | Why it is not done here | Owner |
 |---|---|---|
 | `FR-044`'s "must not start a session in a state where the interviewer would not be heard", and section 10's "loopback device missing, session start refused" | Capture starts **inside** `session:start`, after `CMP-08` has created the transcript and taken the lock, so the verdict is not available when the refusal would have to be made. A fifth named refusal on `CH-112` is a contract change with no acceptance criterion in this task, and rolling back a created session to refuse it is the transcript-deleting path ADR-032 exists to prevent. `AudioSupervisor.canStartSession` is the verdict it will read. Today a dead interviewer stream shows on the `CH-203` badge and the session runs | TASK-050 |
 | `noteCleanBoundary` at real turn boundaries, so a recovered primary is switched back to | Honoring it for STT means closing both sockets and reopening them on the new target at a boundary with no audio in flight. Calling it without that reopen would leave the machine reporting `using-primary` while the sockets are on the backup, which is the plausible-but-wrong state ADR-032 names. The LLM half needs no reopen and comes free with it | TASK-050 |
-| An STT socket that dies mid-session is logged, and not reopened | `FR-100`'s retry and failover cover a **request**. A streaming socket that closes after it opened is a different lifecycle, and `MAX_STREAM_RESTARTS` covers the audio stream beneath it rather than the transcription above it | TASK-050 |
+| ~~An STT socket that dies mid-session is logged, and not reopened~~ **Done in this task.** The Codex review showed it was not a separate lifecycle but the *only* way a streaming adapter reports a failed connection at all, so leaving it would have left failover dead (ADR-036) | The `error` event is the contract | TASK-044 |
 | A prompt-assembly failure inside an adapter is classified as a provider failure | `buildMessages` runs inside `provider.generate`, so a malformed retrieved chunk surfaces as a generation error and spends the whole retry ladder against a healthy credential. Pre-existing in `runGeneration`; the loop only made it reachable | TASK-050 |
-| A batch STT model's final buffer is billed although it is never posted | Seconds are counted when a chunk is handed to the adapter, which is the boundary that means "sent". A batch adapter holding up to its window at session end over-counts by at most that window, once per session | TASK-050 |
+| ~~A batch STT model's final buffer is billed although it is never posted~~ **Done in this task.** The Codex review found the same mistake with a worse consequence on the streaming path, where a reconnect drops queued chunks, so the boundary moved to `sentBytes` and both cases are right (ADR-036) | `SttSession.sentBytes` is the contract | TASK-044 |
 | Profile switching is not disabled in the Dashboard during a live session | The loop binds `profileId` at start and answers every turn from it, so the transcript and the retrieval are both safe. The control that must be disabled is a renderer that does not exist | TASK-042 |
 
 ### TASK-042 Dashboard UI

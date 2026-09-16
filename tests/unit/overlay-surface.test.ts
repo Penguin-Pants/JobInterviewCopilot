@@ -247,6 +247,33 @@ describe('the overlay readiness gate', () => {
     expect(g.sent).toHaveLength(0);
   });
 
+  /**
+   * ADR-036. `noteClosed` keeps the card on purpose, so a generation streaming
+   * through a translucency rebuild is replayed in full to the new renderer. A
+   * session boundary is the case where that is exactly wrong: the card outlives
+   * the interview, and the next rebuild replays the previous interview's
+   * suggestion to a session that has not produced one.
+   */
+  it('a session boundary forgets the card, so it cannot outlive its interview', () => {
+    const g = gate();
+    g.gate.noteReady();
+    g.gate.send(begin('gen-1'));
+    g.gate.send(line('gen-1', 'a cue from the last interview'));
+    expect(g.sent).toHaveLength(2);
+    expect(g.gate.currentGenerationId).toBe('gen-1');
+
+    g.gate.reset();
+    expect(g.gate.currentGenerationId).toBeNull();
+    expect(g.gate.pending).toBe(0);
+
+    // The overlay is rebuilt for the next session and reports ready again.
+    g.gate.noteClosed();
+    g.sent.length = 0;
+    g.gate.noteReady();
+
+    expect(g.sent).toEqual([]);
+  });
+
   it('gates exactly the three suggestion channels', () => {
     expect(isGatedChannel('suggestion:begin')).toBe(true);
     expect(isGatedChannel('suggestion:line')).toBe(true);

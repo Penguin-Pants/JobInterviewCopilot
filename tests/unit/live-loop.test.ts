@@ -30,6 +30,8 @@ const PROFILE_ID = 'p1';
 class StubSttSession implements SttSession {
   closed = 0;
   closeError: Error | null = null;
+  /** A batch adapter answers from inside `close`; this is how that is staged. */
+  onClose: (() => void) | null = null;
   readonly transcript: ((t: TranscriptEvent) => void)[] = [];
   readonly endpoints: (() => void)[] = [];
   readonly errors: ((e: ProviderError) => void)[] = [];
@@ -41,8 +43,15 @@ class StubSttSession implements SttSession {
 
   push(_chunk: AudioChunk): void {}
 
+  emit(text: string, isFinal = true): void {
+    for (const h of this.transcript) {
+      h({ source: this.source, text, isFinal, timestamp: 0, providerId: this.choice.providerId });
+    }
+  }
+
   close(): Promise<void> {
     this.closed += 1;
+    this.onClose?.();
     return this.closeError ? Promise.reject(this.closeError) : Promise.resolve();
   }
 
@@ -87,7 +96,8 @@ interface StubOptions {
   retrieve?: LiveSessionLoopOptions['retrieve'];
   generate?: LiveSessionLoopOptions['generate'];
   resolveLlmProvider?: (choice: ProviderChoice) => LlmProvider;
-  appendTurn?: () => Promise<number>;
+  runFor?: LiveSessionLoopOptions['health']['runFor'];
+  appendTurn?: (source: TranscriptSource, text: string) => Promise<number>;
   appendSuggestion?: () => Promise<number>;
   /** Makes the one call that sits outside the loop's own try blocks throw. */
   settleThrows?: boolean;
@@ -118,7 +128,7 @@ function makeLoop(stub: StubOptions = {}) {
       },
     },
     sessions: {
-      appendTurn: stub.appendTurn ?? (() => Promise.resolve(0)),
+      appendTurn: stub.appendTurn ?? ((): Promise<number> => Promise.resolve(0)),
       appendSuggestion: stub.appendSuggestion ?? (() => Promise.resolve(1)),
     },
     cost: {
@@ -126,9 +136,10 @@ function makeLoop(stub: StubOptions = {}) {
       noteGeneration: (generationId, choice) => noted.push({ generationId, choice }),
     },
     health: {
-      // The health policy itself is TASK-014's. Here it is the identity, so a
-      // test asserts what the loop does rather than what the ladder does.
-      runFor: (_capability, fn) => fn('primary'),
+      // The health policy itself is TASK-014's. The default here is the
+      // identity, so a test asserts what the loop does rather than what the
+      // ladder does; a case that is about the ladder supplies its own.
+      runFor: stub.runFor ?? ((_capability, fn) => fn('primary')),
     },
     settings: () => settings,
     retrieve: stub.retrieve ?? (() => Promise.resolve([])),
@@ -207,15 +218,47 @@ describe('start and stop', () => {
     ]);
   });
 
+  /**
+   * ADR-036. `session:start` tells the renderers the session is live before
+   * awaiting the loop, so Stop can arrive while capture or a socket is still
+   * coming up. Torn down from underneath, the start's own continuation then
+   * opened the pair again and started the trigger, leaving sockets live against
+   * a transcript the Session Manager had already compacted.
+   */
+  it('a stop during the bring-up leaves nothing open behind it', async () => {
+    let releaseCapture = (): void => {};
+    const capture = new Promise<void>((resolve) => {
+      releaseCapture = resolve;
+    });
+
+    const { loop, opened } = makeLoop({ audioStart: () => capture });
+
+    const starting = loop.start(PROFILE_ID);
+    // Stop arrives while `audio.start()` is still pending.
+    const stopping = loop.stop();
+    releaseCapture();
+    await Promise.all([starting, stopping]);
+
+    // Whatever the start opened, the stop closed. Nothing is live.
+    expect(loop.isRunning).toBe(false);
+    expect(loop.openStreamCount).toBe(0);
+    expect(opened.every((s) => s.closed === 1)).toBe(true);
+  });
+
   it('dispose releases the streams without awaiting, for will-quit', async () => {
     const { loop, opened } = makeLoop();
     await loop.start(PROFILE_ID);
 
     loop.dispose();
 
+    // The quit path cannot hold the app open, so `dispose` returns at once. The
+    // close is already issued by then; only the bookkeeping after it is not.
     expect(loop.isRunning).toBe(false);
-    await Promise.resolve();
     expect(opened.every((s) => s.closed === 1)).toBe(true);
+
+    // The bookkeeping after the closes settles on its own turn of the loop,
+    // which is precisely what `dispose` does not wait for.
+    await new Promise((resolve) => setImmediate(resolve));
     expect(loop.activeSttChoice).toBeNull();
   });
 
@@ -297,19 +340,42 @@ describe('the wiring of one open stream', () => {
     await loop.stop();
   });
 
-  it('reports a provider error on a stream and leaves the overlay alone', async () => {
-    const { loop, opened, errors } = makeLoop();
+  /**
+   * A streaming adapter's `open` resolves as soon as it has asked its socket to
+   * connect, so a refused or revoked connection is reported on this event after
+   * the adapter's own ladder is spent. Logging it was not enough: the health
+   * machine never saw the failure, so a dead primary never failed over and the
+   * session transcribed nothing for the rest of the interview (ADR-036).
+   */
+  it('raises a stream failure into the health machine and re-opens the pair', async () => {
+    const targets: ('primary' | 'backup')[] = [];
+    const { loop, opened, errors } = makeLoop({
+      runFor: async (_capability, fn) => {
+        // One retry, which is all this test needs of the real ladder.
+        try {
+          targets.push('primary');
+          return await fn('primary');
+        } catch {
+          targets.push('primary');
+          return await fn('primary');
+        }
+      },
+    });
     await loop.start(PROFILE_ID);
+    expect(opened).toHaveLength(2);
 
     const err = new Error('the socket closed') as ProviderError;
     err.class = 'network';
     err.providerId = 'deepgram';
     err.retryable = true;
     opened[0]?.errors.forEach((h) => h(err));
+    await loop.whenReopened();
 
-    expect(errors.map((e) => e.message)).toEqual([
-      'the interviewer transcription stream reported an error',
-    ]);
+    expect(errors.map((e) => e.message)).toContain('the interviewer transcription stream failed');
+    // The failure was raised into the machine, and the re-open followed it.
+    expect(targets.length).toBeGreaterThan(1);
+    expect(opened).toHaveLength(4);
+    expect(loop.openStreamCount).toBe(2);
     await loop.stop();
   });
 
@@ -335,6 +401,37 @@ describe('the wiring of one open stream', () => {
     await loop.stop();
   });
 
+  /**
+   * ADR-036. A batch adapter posts its remaining buffer inside `close` and
+   * answers with the last thing the interviewer said. Clearing the stream map
+   * before the close resolved made the loop drop exactly that segment, so every
+   * session recorded with a batch model lost its final turn.
+   */
+  it('routes a transcript a stream emits while it is closing', async () => {
+    const appended: string[] = [];
+    const opened: StubSttSession[] = [];
+    const { loop } = makeLoop({
+      appendTurn: (_source, text) => {
+        appended.push(text);
+        return Promise.resolve(appended.length - 1);
+      },
+      openStt: (choice, source) => {
+        const session = new StubSttSession(source, choice);
+        // A batch adapter's `close` posts the tail and answers from it.
+        session.onClose = () => {
+          session.emit('the last thing anyone said');
+        };
+        opened.push(session);
+        return Promise.resolve(session);
+      },
+    });
+    await loop.start(PROFILE_ID);
+
+    await loop.stop();
+
+    expect(appended).toContain('the last thing anyone said');
+  });
+
   it('bills nothing for a chunk with no stream to send it to', async () => {
     const noteAudio = vi.fn();
     const { loop } = makeLoop();
@@ -345,6 +442,60 @@ describe('the wiring of one open stream', () => {
       sequence: 1,
     });
     expect(noteAudio).not.toHaveBeenCalled();
+  });
+});
+
+describe('a backup the health machine believes in but the loop cannot use', () => {
+  /**
+   * ADR-036. The machine's binding says a backup exists; whether it is
+   * **usable** is the loop's question. Falling back to the primary there ran the
+   * provider that had just failed while the machine recorded `using-backup`, so
+   * the Dashboard named a backup that never answered a request.
+   */
+  it('fails the backup attempt rather than silently re-running the primary', async () => {
+    const attempts: ('primary' | 'backup')[] = [];
+    const opens: ProviderChoice[] = [];
+    const settings = defaultSettings();
+
+    const { loop, errors } = makeLoop({
+      settings: {
+        providers: {
+          ...settings.providers,
+          stt: {
+            primary: settings.providers.stt.primary,
+            // Configured, but its key is missing, so the loop cannot use it.
+            backup: { providerId: 'elevenlabs', modelId: 'scribe-v2-realtime' },
+          },
+        },
+      },
+      keyFor: (providerId) => (providerId === 'elevenlabs' ? undefined : 'k'),
+      runFor: async (_capability, fn) => {
+        attempts.push('primary');
+        try {
+          return await fn('primary');
+        } catch {
+          attempts.push('backup');
+          return await fn('backup');
+        }
+      },
+      openStt: (choice) => {
+        opens.push(choice);
+        return Promise.reject(new Error('the socket refused'));
+      },
+    });
+
+    await loop.start(PROFILE_ID);
+
+    expect(attempts).toEqual(['primary', 'backup']);
+    // One open, from the primary attempt alone. The backup attempt opened
+    // nothing: it refused, rather than re-running the provider that had just
+    // failed under a target that says backup.
+    expect(opens).toHaveLength(1);
+    expect(opens[0]?.providerId).toBe(settings.providers.stt.primary.providerId);
+    expect(errors.map((e) => e.message)).toContain(
+      'the speech-to-text provider could not be reached',
+    );
+    await loop.stop();
   });
 });
 
@@ -393,7 +544,9 @@ describe('answering a turn', () => {
     // model did produce still reached the transcript and the meter.
     expect(errors.map((e) => e.message)).toEqual(['the language model failed']);
     expect(appended).toHaveLength(1);
-    expect(noted.map((n) => n.generationId)).toEqual(['g1']);
+    // Keyed per attempt: `noteGeneration` replaces by id, which is right for one
+    // request reporting usage twice and wrong across a retry (ADR-036).
+    expect(noted.map((n) => n.generationId)).toEqual(['g1#1']);
     await loop.stop();
   });
 
@@ -411,6 +564,50 @@ describe('answering a turn', () => {
     ]);
     // The tokens were spent whether or not the entry landed.
     expect(noted).toHaveLength(1);
+    await loop.stop();
+  });
+
+  /**
+   * ADR-036. `noteGeneration` replaces by id, which is right for one request
+   * reporting usage twice (ADR-033) and wrong across a retry or a failover:
+   * both requests are billable, possibly at different rates, and keying them
+   * alike drops everything the earlier attempts cost.
+   */
+  it('accounts every attempt, not only the one that finally answered', async () => {
+    const failure = new Error('the provider hung up') as ProviderError;
+    failure.class = 'server';
+    failure.providerId = 'anthropic';
+    failure.retryable = true;
+
+    let call = 0;
+    const { loop, noted } = makeLoop({
+      runFor: async (_capability, fn) => {
+        try {
+          return await fn('primary');
+        } catch {
+          return await fn('primary');
+        }
+      },
+      generate: () => {
+        call += 1;
+        return Promise.resolve(
+          call === 1
+            ? outcome({
+                status: 'cancelled',
+                usage: { inputTokens: 400, outputTokens: 10 },
+                error: failure,
+              })
+            : outcome({ usage: { inputTokens: 400, outputTokens: 55 } }),
+        );
+      },
+    });
+    await loop.start(PROFILE_ID);
+
+    loop.onFire(turn());
+    await loop.whenSettled();
+
+    // Two billable requests, two keys, so neither is lost under the other.
+    expect(noted.map((n) => n.generationId)).toEqual(['g1#1', 'g1#2']);
     await loop.stop();
   });
 

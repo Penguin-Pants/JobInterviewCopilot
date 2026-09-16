@@ -934,6 +934,18 @@ describe('TASK-044 live loop wiring', () => {
   });
 
   /**
+   * ADR-036. The gate keeps its card across a window rebuild on purpose, so a
+   * generation streaming through a translucency change is replayed in full. A
+   * card that survives a session boundary is the opposite: the next overlay
+   * rebuild replays the previous interview's suggestion to a session that has
+   * not produced one.
+   */
+  it('clears the overlay gate at both ends of a session', () => {
+    expect(handlerBody('session:start')).toContain('overlayGate.reset()');
+    expect(handlerBody('session:stop')).toContain('overlayGate.reset()');
+  });
+
+  /**
    * ADR-018 and NFR-002 for the loop: it holds no file handle and no window,
    * and audio bytes pass through it, so neither Electron nor `fs` belongs here.
    */

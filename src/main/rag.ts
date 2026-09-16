@@ -39,6 +39,23 @@ import { IngestQueue, KnowledgeBaseWatcher, type WatcherFactory } from './rag/wa
 
 /** One retrieval hit, re-exported so callers need not reach past the facade (FR-065). */
 export type { RetrievedChunk } from './rag/store.js';
+
+/**
+ * The knowledge base could not be searched (ADR-036).
+ *
+ * Distinct from an empty result on purpose: `[]` says the notes were searched
+ * and nothing matched, this says they could not be reached. The live loop
+ * abandons the turn on it rather than answering from no notes (ADR-035).
+ */
+export class RetrievalUnavailableError extends Error {
+  constructor(
+    reason: string,
+    readonly detail?: unknown,
+  ) {
+    super(reason);
+    this.name = 'RetrievalUnavailableError';
+  }
+}
 /** The embedding model's lifecycle, as CH-124 and CH-214 carry it (ADR-011, ADR-026). */
 export type { ModelDownloadState } from './rag/embed.js';
 export { KB_CEILING } from '../shared/defaults.js';
@@ -836,26 +853,35 @@ export class RagEngine {
    * directory is ever read, so a cross-profile leak would need a different code
    * path rather than a missing predicate (TC-075).
    *
-   * @returns `[]` for a profile with no ready documents, for an empty question,
-   * and when the embedding model is not available. A live session is allowed to
-   * run without a model, and an empty chunk set is the documented behavior
-   * rather than a failure (ADR-011, TC-077).
+   * **Empty and failed are different answers** (ADR-036). `[]` means the notes
+   * were searched and nothing matched, or there was nothing to search: an empty
+   * question, an unknown profile, a profile with no ready document. A failure to
+   * *reach* notes that do exist **throws** `RetrievalUnavailableError`.
+   *
+   * TASK-024 collapsed both onto `[]` so a failure could not throw into a
+   * session. It reached the live loop as "no relevant notes", and the loop then
+   * built a suggestion the overlay renders identically to a grounded one, which
+   * is the plausible value ADR-032 forbids. The loop abandons the turn on the
+   * throw instead, which is neither a crash nor a fabricated answer (ADR-035).
    */
   async query(profileId: string, text: string, k = 3): Promise<RetrievedChunk[]> {
     if (text.trim().length === 0) return [];
     const candidates = this.chunkSetsFor(profileId);
+    // Nothing to search is genuinely empty, and it is checked first so a
+    // profile with no documents never depends on the model at all (TC-077).
     if (candidates.length === 0) return [];
 
-    // Never on the live path. `embed` loads the model on demand, and if the
-    // cache was cleared since the documents were embedded, the first question of
-    // an interview would start a 90 MB download inside the
-    // question-to-suggestion budget, or offline would return `[]` only after the
-    // network timed out. ADR-011 blocks ingestion on the model, not a session.
+    // Never loaded on the live path. `embed` loads the model on demand, and if
+    // the cache was cleared since these documents were embedded, the first
+    // question of an interview would start a 90 MB download inside the
+    // question-to-suggestion budget. Reaching here means ready documents exist
+    // and their notes cannot be searched, which is a failure rather than an
+    // empty result (ADR-011, ADR-036).
     if (!this.embedder.isReady()) {
-      this.options.onError?.('query skipped: the embedding model is not available', {
+      this.options.onError?.('query failed: the embedding model is not available', {
         state: this.modelState,
       });
-      return [];
+      throw new RetrievalUnavailableError('the embedding model is not available');
     }
 
     let queryVector: Float32Array | undefined;
@@ -863,9 +889,11 @@ export class RagEngine {
       [queryVector] = await this.embedder.embed([text]);
     } catch (err) {
       this.options.onError?.('query embedding failed', err);
-      return [];
+      throw new RetrievalUnavailableError('the question could not be embedded', err);
     }
-    if (!queryVector) return [];
+    if (!queryVector) {
+      throw new RetrievalUnavailableError('the embedder returned no vector for the question');
+    }
 
     return topK(queryVector, candidates, k, this.embedder.info().dimensions);
   }

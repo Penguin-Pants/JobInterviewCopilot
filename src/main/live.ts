@@ -38,7 +38,7 @@ import {
   type GenerationOutcome,
   type LlmProvider,
 } from './ai/llm.js';
-import { openSttSession, type SttSession } from './ai/stt.js';
+import { openSttSession, providerError, type SttSession } from './ai/stt.js';
 import type { TriggerMachine, TurnFired } from './ai/trigger.js';
 import type { CostMeter } from './cost.js';
 import type { GatedMessage } from './overlay-gate.js';
@@ -152,6 +152,29 @@ export class LiveSessionLoop {
    */
   private generation: Promise<void> | null = null;
 
+  /**
+   * The start in flight, so `stop` cannot interleave with it (ADR-036).
+   *
+   * `session:start` tells the renderers the session is live before awaiting the
+   * loop, so Stop can arrive while capture or a socket is still coming up.
+   * Without this, `stop` cleared the state and closed what was open, and the
+   * start then carried on and opened the pair again, leaving sockets live
+   * against a transcript the Session Manager had already compacted.
+   */
+  private starting: Promise<void> | null = null;
+
+  /** A re-open after a stream failure, serialized so two streams reopen once. */
+  private reopening: Promise<void> | null = null;
+
+  /**
+   * True while the sockets are closing.
+   *
+   * The streams stay in the map across a close so a batch adapter's final
+   * transcript is still routed, and this is what stops a *chunk* being pushed
+   * into a socket that is on its way out.
+   */
+  private closing = false;
+
   constructor(options: LiveSessionLoopOptions) {
     this.options = options;
     this.openStt = options.openStt ?? openSttSession;
@@ -192,6 +215,19 @@ export class LiveSessionLoop {
   }
 
   /**
+   * Resolves once a re-open after a stream failure has finished, or immediately
+   * when none is running. The counterpart of `whenSettled`, for the same
+   * reason: the work is a chain of awaits with no timer to advance.
+   */
+  async whenReopened(): Promise<void> {
+    try {
+      await this.reopening;
+    } catch {
+      // Reported where it happened.
+    }
+  }
+
+  /**
    * Bring the loop up for a session the Session Manager has already accepted
    * (`docs/02-architecture.md` section 5.1).
    *
@@ -203,7 +239,13 @@ export class LiveSessionLoop {
   async start(profileId: string): Promise<void> {
     if (this.isRunning) throw new Error('the live session loop is already running');
     this.profileId = profileId;
+    // Held before it is awaited, so a `stop` arriving during the bring-up has
+    // something to wait for rather than a gap it can slip through.
+    this.starting = this.bringUp();
+    await this.starting;
+  }
 
+  private async bringUp(): Promise<void> {
     // Capture first. The STT sessions are opened next, and chunks that arrive
     // before they exist are dropped rather than queued: a queue with no
     // consumer is the unbounded PCM retention ADR-027 exists to prevent.
@@ -230,10 +272,20 @@ export class LiveSessionLoop {
    */
   async stop(): Promise<void> {
     if (!this.isRunning) return;
+
+    // A start still coming up is finished first, rather than torn down from
+    // underneath. Abandoning it half-way is what leaves a socket open against a
+    // transcript that has been compacted: the start's own continuation would
+    // re-open the pair after the teardown had run. `bringUp` never throws.
+    const starting = this.starting;
+    this.starting = null;
+    if (starting) await starting;
+
     this.profileId = null;
 
     this.options.trigger.stop();
     await this.settleGeneration();
+    await this.reopening;
     await this.closeStreams();
 
     try {
@@ -252,6 +304,7 @@ export class LiveSessionLoop {
    */
   dispose(): void {
     this.profileId = null;
+    this.starting = null;
     this.options.trigger.stop();
     void this.closeStreams();
   }
@@ -266,15 +319,24 @@ export class LiveSessionLoop {
    * on (`FR-103`).
    */
   handleChunk(chunk: AudioChunk): void {
+    if (this.closing) return;
     const stream = this.streams.get(chunk.source);
     if (!stream) return;
 
+    const before = stream.session.sentBytes;
     stream.session.push(chunk);
-    this.options.cost.noteAudio(
-      chunk.source,
-      stream.choice,
-      chunkSeconds(chunk.pcm.byteLength, stream.sampleRate),
-    );
+
+    // What the adapter says it put on the wire, when it can say. A streaming
+    // socket that is down drops queued chunks rather than buffering without
+    // bound (ADR-027), and billing the chunk we handed over would charge an
+    // outage as though it had been transcribed. An adapter with no counter
+    // sends everything it is handed, so the chunk itself is the measurement.
+    const seconds =
+      before === undefined || stream.session.sentBytes === undefined
+        ? chunkSeconds(chunk.pcm.byteLength, stream.sampleRate)
+        : chunkSeconds(stream.session.sentBytes - before, stream.sampleRate);
+
+    this.options.cost.noteAudio(chunk.source, stream.choice, seconds);
   }
 
   /* ---------------------------------------------------------------- *
@@ -308,13 +370,91 @@ export class LiveSessionLoop {
 
     try {
       await this.options.health.runFor('stt', async (target) => {
-        const chosen = target === 'backup' && backup ? backup : primary;
-        await this.openPair(chosen);
+        await this.openPair(this.targetFor(target, primary, backup, 'speech-to-text'));
       });
     } catch (err) {
       // Every retry and the failover have already been spent by the health
       // machine, which owns the Dashboard badge. Nothing reaches the overlay.
       this.options.onError('the speech-to-text provider could not be reached', err);
+      return;
+    }
+
+    this.sttChoice = this.streams.get('interviewer')?.choice ?? null;
+    this.options.onSttChoice(this.sttChoice);
+  }
+
+  /**
+   * The target the health machine asked for, or a typed refusal (ADR-036).
+   *
+   * The machine's binding says a backup exists; whether that backup is
+   * **usable** is this loop's question, and it can answer no (no key, not in
+   * the registry, no adapter). Falling back to the primary there ran the
+   * provider that had just failed while the machine recorded `using-backup`, so
+   * the Dashboard named a backup that never answered a request. Refusing is the
+   * truthful answer: the backup attempt failed, and it failed because there is
+   * no usable backup.
+   */
+  private targetFor<T extends { choice: ProviderChoice }>(
+    target: 'primary' | 'backup',
+    primary: T,
+    backup: T | null,
+    what: string,
+  ): T {
+    if (target !== 'backup') return primary;
+    if (backup) return backup;
+    throw providerError(
+      primary.choice.providerId,
+      'client',
+      `The configured ${what} backup cannot be used, so there is nothing to fail over to.`,
+    );
+  }
+
+  /**
+   * A stream reported a terminal failure, after its adapter's own reconnect
+   * ladder (ADR-036).
+   *
+   * A streaming adapter's `open` resolves once it has asked its socket to
+   * connect, so a refused, revoked or dropped connection surfaces here rather
+   * than out of `openPair`. Without this the health machine never learned that
+   * the provider had failed: `runFor` had already recorded the open as a
+   * success, so no retry and no failover ever ran and the session transcribed
+   * nothing for the rest of the interview.
+   *
+   * The failure is raised **into** the machine so its policy decides what
+   * happens next, and the pair is re-opened on whatever it then serves.
+   */
+  private noteStreamFailure(cause: unknown): void {
+    if (!this.isRunning || this.reopening) return;
+    this.reopening = this.reopenAfterFailure(cause).finally(() => {
+      this.reopening = null;
+    });
+  }
+
+  private async reopenAfterFailure(cause: unknown): Promise<void> {
+    const settings = this.options.settings();
+    const primary = this.resolveStt(settings.providers.stt.primary, settings, 'primary');
+    const backup = this.resolveStt(settings.providers.stt.backup, settings, 'backup');
+    if (!primary) return;
+
+    await this.closeStreams();
+
+    let raised = false;
+    try {
+      await this.options.health.runFor('stt', async (target) => {
+        // The socket died outside any `runFor` call, so the machine has not
+        // seen the failure yet. The first attempt re-raises it rather than
+        // opening a socket the provider has just refused; every attempt after
+        // that is a real re-open, on whichever target the machine's own policy
+        // has moved to (ADR-010).
+        if (!raised) {
+          raised = true;
+          throw cause;
+        }
+        if (!this.isRunning) return;
+        await this.openPair(this.targetFor(target, primary, backup, 'speech-to-text'));
+      });
+    } catch (err) {
+      this.options.onError('transcription could not be restored for this session', err);
       return;
     }
 
@@ -358,8 +498,15 @@ export class LiveSessionLoop {
       });
     }
 
+    // A streaming adapter's `open` resolves as soon as it has asked its socket
+    // to connect; a refused or revoked connection is reported here, after the
+    // adapter's own reconnect ladder has been spent. Logging it was not enough:
+    // the health machine never saw the failure, so a dead primary never failed
+    // over and the session simply transcribed nothing for the rest of the
+    // interview (ADR-036).
     session.on('error', (err) => {
-      this.options.onError(`the ${source} transcription stream reported an error`, err);
+      this.options.onError(`the ${source} transcription stream failed`, err);
+      this.noteStreamFailure(err);
     });
 
     this.streams.set(source, {
@@ -469,10 +616,11 @@ export class LiveSessionLoop {
       outcome: null,
       choice: primary.choice,
     };
+    let attempt = 0;
 
     try {
       await this.options.health.runFor('llm', async (target) => {
-        const bound = target === 'backup' && backup ? backup : primary;
+        const bound = this.targetFor(target, primary, backup, 'language model');
         settled.choice = bound.choice;
 
         const outcome = await this.generate(
@@ -498,6 +646,18 @@ export class LiveSessionLoop {
           },
         );
         settled.outcome = outcome;
+
+        // Accounted per **attempt**, under a key of its own. `noteGeneration`
+        // replaces by id, which is right for one request reporting usage twice
+        // (ADR-033) and wrong across a retry or a failover: both requests are
+        // billable, possibly at different rates, and keying them alike would
+        // drop everything the earlier attempts cost.
+        attempt += 1;
+        this.options.cost.noteGeneration(
+          `${turn.generationId}#${String(attempt)}`,
+          bound.choice,
+          outcome.usage,
+        );
 
         // `runGeneration` returns a provider failure rather than throwing it,
         // because the overlay has no error state (`FR-076`). The health machine
@@ -526,11 +686,6 @@ export class LiveSessionLoop {
     } catch (err) {
       this.options.onError('a suggestion could not be appended to the transcript', err);
     }
-
-    // Keyed by the choice that actually answered. A failover mid-session moves
-    // the generation to a model at a different rate, and pricing it at the
-    // configured primary would bill the wrong one (ADR-033).
-    this.options.cost.noteGeneration(turn.generationId, settled.choice, outcome.usage);
   }
 
   /* ---------------------------------------------------------------- *
@@ -602,16 +757,21 @@ export class LiveSessionLoop {
   }
 
   /**
-   * Close every open stream.
+   * Close every open stream, and stay routable until each one has finished.
    *
-   * The map is cleared **before** the closes are awaited, so a chunk arriving
-   * during teardown is dropped rather than pushed into a socket that is going
-   * away. A close that throws is reported and the rest still close.
+   * The map is cleared **after** the closes resolve, not before (ADR-036). A
+   * batch adapter posts its remaining buffer inside `close` and answers with the
+   * last thing the interviewer said; clearing first made `handleTranscript`
+   * drop exactly that segment, so every session recorded with a batch model lost
+   * its final turn. `closing` is what keeps a *chunk* out of a socket that is
+   * going away, which is the other thing the early clear was doing.
+   *
+   * A close that throws is reported and the rest still close.
    */
   private async closeStreams(): Promise<void> {
     const open = [...this.streams.entries()];
-    this.streams.clear();
-    this.sttChoice = null;
+    if (open.length === 0) return;
+    this.closing = true;
 
     await Promise.all(
       open.map(async ([source, stream]) => {
@@ -622,5 +782,9 @@ export class LiveSessionLoop {
         }
       }),
     );
+
+    this.streams.clear();
+    this.sttChoice = null;
+    this.closing = false;
   }
 }

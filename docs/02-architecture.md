@@ -439,6 +439,7 @@ interface SttSession {
   readonly source: 'interviewer' | 'candidate';
   readonly choice: ProviderChoice;
   push(chunk: AudioChunk): void;
+  readonly sentBytes?: number;                 // PCM actually put on the wire
   close(): Promise<void>;
   on(e: 'transcript', h: (t: TranscriptEvent) => void): void;
   on(e: 'endpoint', h: () => void): void;      // provider-native turn end
@@ -474,6 +475,27 @@ All three v1 streaming providers take the gap as a parameter, so all three are
 | `elevenlabs:scribe-v2-realtime` | `min_silence_duration_ms`, VAD commit strategy |
 
 `openai:whisper-1` has no turn signal at all and is `false`.
+
+**Two properties of this interface, added in TASK-044 and recorded as ADR-036.**
+
+`open` resolving does **not** mean the provider accepted the connection. Every
+streaming adapter asks its socket to connect and returns; a refused, revoked or
+dropped connection arrives later on the `error` event, after the adapter's own
+reconnect ladder. The caller must therefore treat that event as the provider
+failing, not as a line for the log: `CMP-15` raises it into `CMP-12` and
+re-opens the pair on whatever the machine then serves. Without that, a dead
+primary never failed over, because the open had already been recorded a success.
+
+`sentBytes` is what the session has actually put on the wire, and it is optional.
+`SocketSttSession` drops queued chunks during an outage rather than buffering
+without bound (ADR-027), so only the adapter knows what really went; the Cost
+Meter's "audio actually sent to a provider" is read from here. An adapter that
+sends everything it is handed has nothing to correct and omits it, and the
+caller bills the chunk it handed over.
+
+`close` on a **batch** adapter posts its remaining buffer and answers from it,
+so a caller must stay routable until `close` resolves. Clearing the route first
+discarded the last thing said before Stop.
 
 Adapter notes:
 - `deepgram`: WebSocket with `encoding=linear16`, `sample_rate=16000`,
@@ -577,6 +599,19 @@ interface RetrievedChunk { chunk: Chunk; score: number; }
 Cosine similarity over L2-normalized vectors, so a dot product. Brute force over
 the profile's vectors. At an expected ceiling of 5000 chunks per profile a brute
 force scan is under 5 ms. No vector index in v1.
+
+**Empty and failed are different answers** (ADR-036, corrected in TASK-044).
+`[]` means the notes were searched and nothing matched, or there was nothing to
+search: an empty question, an unknown profile, a profile with no ready document.
+A failure to *reach* notes that do exist throws `RetrievalUnavailableError`:
+the embedding model is gone although ready documents were embedded with it, or
+the question could not be embedded.
+
+`TASK-024` collapsed both onto `[]`, so that a failure could not throw into a
+session. It reached `CMP-15` as "no relevant notes", and the loop then built a
+suggestion the overlay renders identically to a grounded one. The loop abandons
+the turn on the throw, which is neither a crash nor a fabricated answer
+(ADR-032, ADR-035).
 
 ### 3.5 Provider health and failover (`CMP-12`, ADR-009, ADR-010)
 
@@ -994,6 +1029,19 @@ smaller figure than the interim already charged. That is the decrease `FR-109`
 names, and the warning guard is membership in a fired list, so no decrease can
 re-arm a threshold.
 
+**One generation can be several billable requests** (ADR-036, TASK-044). A retry
+or a failover sends the question again, and both requests are billable, possibly
+at different rates. Replacement by `generationId` is right *within* one request
+and wrong across two, so `CMP-15` accounts each attempt under `<generationId>#n`
+and every attempt is summed. The transcript still records the outcome the
+overlay showed, which is the last attempt's.
+
+**Audio seconds are read from the adapter, not from the chunk handed to it**
+(ADR-036). `SocketSttSession` drops queued chunks during an outage rather than
+buffering without bound (ADR-027), so billing the chunk the supervisor passed on
+would charge an outage as though it had been transcribed. `SttSession.sentBytes`
+is the measurement.
+
 A generation cancelled before the provider reported any usage accounts zero
 tokens. The meter has no token counter of its own and does not estimate one from
 the text received: a number we invented would be presented as a measurement
@@ -1100,7 +1148,8 @@ The remaining concentrations of risk:
 | LLM provider failure | Dashboard badge only | Overlay unchanged |
 | Loopback device missing | Dashboard error badge, session start refused | No |
 | STT session cannot be opened | Dashboard badge, session runs with no transcription | Overlay unchanged |
-| Retrieval fails on a turn | Logged, the turn is left unanswered | Overlay unchanged |
+| An open STT socket fails terminally | Raised into `CMP-12`: retry, failover, and the pair re-opened on whichever target it then serves | Overlay unchanged |
+| Retrieval fails on a turn | Logged, the turn is left unanswered. Never answered from no notes (ADR-035, ADR-036) | Overlay unchanged |
 | Mic device missing | Dashboard warning badge, session continues | No |
 | RAG document conversion failure | Document row shows `error` with the message | No |
 | Embedding model download failure | Dashboard error, retry button, session still startable | No |

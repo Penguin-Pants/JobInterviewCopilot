@@ -888,6 +888,82 @@ change in the same pull request. Section 5.1's ordering is corrected: `CMP-09`
 starts before capture, because a meter that is not running discards the audio
 handed to it.
 
+### ADR-036 — Eight boundaries the live loop got wrong, and what each one is now
+
+**Decided 2026-09-16 during TASK-044**, from the Codex review on the pull
+request. All eight findings were real. They are recorded together because they
+are one mistake with eight faces: **the loop trusted what a collaborator's
+signature implied rather than what the collaborator actually does.**
+
+**1. A resolved `open` is not a connected socket.** Every streaming adapter asks
+its socket to connect and returns; a refused or revoked connection arrives later
+on the `error` event, after the adapter's own reconnect ladder. `runFor` had
+therefore already recorded the open as a success, so an unavailable primary
+never retried and never failed over, and the session simply transcribed nothing
+for the rest of the interview. That event is now raised **into** the health
+machine and the pair is re-opened on whatever the machine then serves. This also
+answers the follow-up TASK-044 was going to carry, that a socket dying
+mid-session was logged and never reopened.
+
+**2. `[]` from retrieval is not "nothing matched".** `RagEngine.query` returned
+`[]` when the embedding model was gone and when embedding threw, which TASK-024
+chose so that a failure could not throw into a session. ADR-035 had just decided
+that a failed retrieval must abandon the turn, and the two cannot both hold: the
+failure arrived as "no relevant notes" and the loop generated from them, which
+is the ungrounded suggestion ADR-035 exists to prevent. `query` now throws
+`RetrievalUnavailableError` when notes that exist cannot be reached, and still
+answers `[]` when there is genuinely nothing to search. Neither a crash nor a
+fabricated answer.
+
+**3. A live session is not a state machine with one thread.** `session:start`
+tells the renderers the session is live before awaiting the loop, so Stop can
+arrive while capture or a socket is still coming up. The teardown ran, and the
+start's own continuation then opened the pair again and started the trigger,
+leaving sockets live against a transcript the Session Manager had compacted.
+`stop` now waits for the bring-up it interrupts rather than tearing it down
+from underneath.
+
+**4. `close` on a batch adapter is where its last answer comes from.** Whisper
+posts its remaining buffer inside `close`. The loop cleared its stream map first,
+so that answer was dropped; and `close` set `closed` before the request came
+back, so `transcribe` discarded the response as well. The last thing said before
+Stop was posted, paid for, answered, and thrown away, on every session recorded
+with a batch model. The streams stay routable until `close` resolves, and
+`close` waits for its own requests. A separate `closing` flag keeps *chunks* out
+of a socket that is going away, which is what the early clear was really for.
+
+**5. A configured backup is not a usable backup.** The health machine's binding
+says a backup exists; whether it can be used (a key, a registry entry, an
+adapter) is the loop's question, and it can answer no. Falling back to the
+primary there re-ran the provider that had just failed while the machine
+recorded `using-backup`, so the Dashboard named a backup that never answered a
+request. An unusable backup now fails the backup attempt explicitly.
+
+**6. A chunk handed to an adapter is not a chunk sent.** `SocketSttSession`
+drops queued chunks during an outage rather than buffering without bound
+(ADR-027). Billing what the supervisor passed on charged an outage as though it
+had been transcribed, which contradicts the meter's own "actually sent to a
+provider" rule. `SttSession` gains an optional `sentBytes`, counted at the one
+place a chunk reaches the socket, and the meter reads that.
+
+**7. One generation is not one billable request.** A retry or a failover sends
+the question again. ADR-033's replacement by `generationId` is right within one
+request, which can report usage twice, and wrong across two, which are both
+billable and possibly at different rates. Each attempt is accounted under
+`<generationId>#n`.
+
+**8. A card the gate holds is not scoped to a session.** `noteClosed` keeps the
+card on purpose, so a generation streaming through a translucency rebuild is
+replayed in full to the new renderer (ADR-016). Across a session boundary that
+is exactly wrong: the card outlived the interview, and the next rebuild replayed
+the previous interview's suggestion to a session that had not produced one. The
+gate is cleared at both ends of a session.
+
+**Consequence.** `docs/02-architecture.md` sections 3.1, 3.4, 7 and 10 carry the
+corrected contracts. One of TASK-044's declared follow-ups is closed by finding
+1 and another by finding 6; both are struck through in `03-tasks.md`. Every fix
+is pinned by a test checked to fail without it.
+
 ---
 
 ## 3a. Open questions

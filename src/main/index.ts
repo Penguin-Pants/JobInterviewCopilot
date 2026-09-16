@@ -876,6 +876,13 @@ function registerIpcHandlers(): void {
         llmKeyPresent: keys[credentialFor(settings.providers.llm.primary.providerId)],
       });
 
+      // The gate forgets the previous interview's card. It deliberately keeps
+      // one across a window rebuild, so a generation streaming through a
+      // translucency change is replayed in full (ADR-016); across a session
+      // boundary that same card would be replayed to the next interview
+      // before it had produced anything of its own (ADR-036).
+      overlayGate.reset();
+
       // The overlay is created hidden and shown for the session, as section
       // 5.1 sequences it. `showInactive` so the interviewer's window keeps
       // focus: the overlay is a teleprompter, never a window to work in.
@@ -940,7 +947,9 @@ function registerIpcHandlers(): void {
     cost.stop();
 
     // Hidden again: an always-on-top window with no session behind it has
-    // nothing to say and sits over whatever the user does next.
+    // nothing to say and sits over whatever the user does next. The gate is
+    // cleared with it, so the card cannot outlive the interview it belongs to.
+    overlayGate.reset();
     if (overlayWindow && !overlayWindow.isDestroyed()) overlayWindow.hide();
 
     pushSessionState();
