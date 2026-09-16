@@ -3,7 +3,21 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    # Every branch, not just main. A feature branch had no CI at all until a
+    # pull request existed, so work could sit unverified for as long as the PR
+    # was delayed, and a spike job whose whole purpose is to answer a question
+    # could not answer it.
+    branches: ['**']
+
+# A push to a branch with an open pull request triggers both events. Group them
+# by branch name so the pair collapses to one run.
+#
+# `github.ref` does not do this: for a push it is refs/heads/<branch> and for a
+# pull_request it is refs/pull/<n>/merge, so the two events landed in different
+# groups and both ran. head.ref and ref_name are both the bare branch name.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
 
 jobs:
   checks:
@@ -66,6 +80,85 @@ jobs:
           name: playwright-report
           path: playwright-report/
 
+  loopback-spike:
+    name: TASK-010 loopback spike (Windows)
+    runs-on: windows-latest
+    # Never blocks the build. It answers a design question and records the
+    # answer; a headless runner with no audio endpoint is a legitimate result,
+    # not a failure of this PR.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Acquire a system-audio loopback stream in a sandboxed renderer
+        run: npx electron spike/loopback/main.cjs --json --out loopback-spike.json
+      - name: Publish the findings as step results
+        if: always()
+        shell: bash
+        run: |
+          # Step names and conclusions are readable without authentication,
+          # unlike job logs and artifacts. A spike exists to answer a question,
+          # so its answer should not be locked behind a sign-in.
+          node -e "
+            const fs = require('fs');
+            const r = fs.existsSync('loopback-spike.json')
+              ? JSON.parse(fs.readFileSync('loopback-spike.json', 'utf8'))
+              : { verdict: 'no-result' };
+            const out = [
+              ['SPIKE_VERDICT', r.verdict],
+              ['SPIKE_STREAM', String(r.streamAcquired === true)],
+              ['SPIKE_AUDIO_TRACKS', String(r.audioTrackCount ?? 0)],
+              ['SPIKE_NON_SILENT', String(r.nonSilent === true)],
+              ['SPIKE_CTX_RATE', String(r.contextSampleRate ?? 0)],
+              ['SPIKE_AGC', String(Boolean(r.audioSettings && r.audioSettings.autoGainControl))],
+              ['SPIKE_SOURCES', String(r.sourceCount ?? -1)],
+            ];
+            fs.appendFileSync(process.env.GITHUB_ENV, out.map(([k,v]) => k + '=' + v).join('\n') + '\n');
+            console.log(JSON.stringify(r, null, 2));
+          "
+      - name: 'FINDING sandboxed renderer acquired a stream'
+        if: env.SPIKE_STREAM == 'true'
+        run: echo ok
+      - name: 'FINDING stream carried an audio track'
+        if: env.SPIKE_AUDIO_TRACKS != '0'
+        run: echo ok
+      - name: 'FINDING non-silent samples arrived'
+        if: env.SPIKE_NON_SILENT == 'true'
+        run: echo ok
+      - name: 'FINDING AudioContext forced to 16000 Hz'
+        if: env.SPIKE_CTX_RATE == '16000'
+        run: echo ok
+      - name: 'FINDING mic processing defaults were ON and must be disabled'
+        if: env.SPIKE_AGC == 'true'
+        run: echo ok
+      - name: 'FINDING no capture sources on this runner'
+        if: env.SPIKE_SOURCES == '0'
+        run: echo ok
+      - name: 'VERDICT works-with-audio'
+        if: env.SPIKE_VERDICT == 'works-with-audio'
+        run: echo ok
+      - name: 'VERDICT stream-acquired-but-silent'
+        if: env.SPIKE_VERDICT == 'stream-acquired-but-silent'
+        run: echo ok
+      - name: 'VERDICT stream-without-audio-track'
+        if: env.SPIKE_VERDICT == 'stream-without-audio-track'
+        run: echo ok
+      - name: 'VERDICT no-capture-sources-on-this-machine'
+        if: env.SPIKE_VERDICT == 'no-capture-sources-on-this-machine'
+        run: echo ok
+      - name: 'VERDICT failed'
+        if: env.SPIKE_VERDICT == 'failed' || env.SPIKE_VERDICT == 'no-result'
+        run: echo ok
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: loopback-spike-windows
+          path: loopback-spike.json
+
   package:
     name: Windows installer
     runs-on: windows-latest
@@ -77,8 +170,27 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run package
+      - name: Build the installer
+        shell: bash
+        # `set -o pipefail` is load-bearing. Without it the pipeline exits with
+        # tee's status, so a failing `npm run package` reports success, the
+        # failure-log upload is skipped, and the installer upload only warns
+        # that release/*.exe is missing. A broken build would go green.
+        run: |
+          set -o pipefail
+          npm run package 2>&1 | tee package.log
+      - name: Confirm the installer exists
+        shell: bash
+        # A second, independent check. The step above proves the command
+        # succeeded; this proves it produced the artifact the job is named for.
+        run: test -n "$(ls release/*.exe 2>/dev/null)"
       - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: windows-package-log
+          path: package.log
+      - uses: actions/upload-artifact@v4
+        if: success()
         with:
           name: windows-installer
           path: release/*.exe

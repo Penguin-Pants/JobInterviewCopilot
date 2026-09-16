@@ -495,45 +495,181 @@ cached case and `TC-161` runs the fresh-install case.
 **Rejected.** Packaging the model in the installer. It would add about 90 MB to
 every download to serve the first run of an offline machine.
 
+### ADR-027 — Accept the PCM copy, and bound retention instead
+
+**Resolves OQ-003.** Decided 2026-09-15 at the start of Milestone 1.
+
+**The constraint.** Electron cannot transfer an `ArrayBuffer` across IPC. Both
+`ipcRenderer.postMessage` and `MessagePortMain.postMessage` accept only
+`MessagePort` values in a transfer list, so every buffer is structured-cloned.
+The mechanism exists in JavaScript (a real transfer does neuter the sender, and
+`structuredClone(buf, { transfer: [buf] })` proves it) but Electron does not
+expose it for buffers. `SharedArrayBuffer` does not help either, because the main
+process and the worker are separate OS processes.
+
+**The measurements.** One second of 16 kHz, 16-bit mono PCM is 32,000 bytes.
+
+| Quantity | Value |
+|---|---|
+| Chunk | 31.3 KiB per stream per second |
+| Both streams | 62.5 KiB per second |
+| Structured clone cost | 0.082 ms per chunk |
+| Share of the 1000 ms chunk budget | 0.008 percent |
+| Accumulated over a 60-minute session **if nothing is released** | 220 MiB |
+
+**The decision.** Take candidate 1 from OQ-003: accept the copy.
+
+The extra copy costs 31 KiB and 0.08 ms. Candidate 2, keeping PCM in the worker
+and streaming to the provider from there, would trade that for putting network
+access inside a renderer, which contradicts `CMP-14`'s rule and weakens the
+security boundary to save nothing that matters: the bytes live in memory either
+way, just in a different process. Candidate 3 avoids a process hop, not a copy.
+Paying a real security cost to avoid an imaginary privacy cost is the wrong
+trade.
+
+**The correction that matters.** The last row of that table is the real finding.
+The number of copies is not what threatens `FR-043` and `NFR-002`. **Retention
+is.** A pipeline that copies a chunk four times and releases all four is safe; a
+pipeline that copies once and holds the reference in a growing array leaks a
+quarter of a gigabyte of interview audio into memory over one session, which is
+exactly the kind of thing a "no audio on disk" guarantee is meant to prevent
+being casual about.
+
+So the invariant is not "do not copy". It is:
+
+> Every PCM reference is released once its chunk has been handed on, and any
+> deliberate buffering is bounded by a declared constant.
+
+Deliberate buffering exists and is legitimate: the non-streaming Whisper adapter
+buffers 4000 ms, which is 4 chunks, by design (ADR-022). That is bounded and
+declared. An unbounded accumulation is not.
+
+**Consequences.**
+- `TC-041` is rewritten from "the worker-side `byteLength` is 0 after send",
+  which is unachievable, to a retention assertion: after a chunk is handed on,
+  neither the worker nor the supervisor holds a reference, and across a long run
+  the count of live chunks never exceeds the declared bound.
+- `FR-043` gains the bounded-retention wording explicitly, so the requirement
+  states the property that is actually enforceable.
+- `NFR-002` is unchanged. Nothing here writes to disk, and the lint ban plus the
+  runtime filesystem-write monitor (`TC-137`) remain what prove it.
+- The audio path must expose its live-chunk count so the assertion can be made
+  from outside, rather than inferred.
+
+**What that count does and does not prove.** Corrected after code review on
+PR #4. `chunksInFlight` measures concurrency: how many chunks have been handed
+to the consumer and not yet finished with. It cannot detect a consumer that
+returns promptly and keeps the buffer, which is the retention this ADR is about.
+Retention is proved by the direct-reference assertions in `TC-041` and by
+`TC-137`'s runtime filesystem-write monitor. The count is still worth asserting,
+as a bound on how much audio can be outstanding at once, but it is not the
+retention proof and this document no longer implies it is.
+
+An async consumer is not finished when it returns its promise. The count is
+released when the promise settles, or the bound would read as one while several
+requests were genuinely outstanding.
+
+### ADR-028 — Acquire loopback with the platform API, not a third-party package
+
+**TASK-010 spike result. Confirmed on Windows 2026-09-15; the gate is closed.**
+
+**What the spike asked.** `electron-audio-loopback` was the project's
+highest-risk dependency: one maintainer, 19.5 kB, last published a year ago, and
+the entire product depends on interviewer capture. `TASK-010` exists to prove it
+works before the audio pipeline is built on it.
+
+**What reading it showed.** It is a wrapper of roughly sixty lines. Its main
+half calls `session.setDisplayMediaRequestHandler` and answers with
+`audio: 'loopback'`. Its renderer half calls `ipcRenderer.invoke` twice, purely
+to switch that handler on and off around one `getDisplayMedia` call.
+
+That renderer half cannot run in our audio worker. `FR-086` requires every
+renderer to have `sandbox: true` and `contextIsolation: true`, and such a
+renderer has no `ipcRenderer`. Using the package as published would mean
+weakening the sandbox on the one window that handles raw audio.
+
+**What the spike measured.** A hidden renderer with `sandbox: true`,
+`contextIsolation: true` and `nodeIntegration: false`, calling only
+`navigator.mediaDevices.getDisplayMedia`, with main owning the handler for the
+session:
+
+| Observation | Linux | Windows |
+|---|---|---|
+| Stream acquired in a sandboxed renderer | yes | yes |
+| Audio track present | 1, `System audio`, `deviceId: loopback` | yes |
+| `AudioContext({ sampleRate: 16000 })` | reported 16000 | reported 16000 |
+| Non-silent samples within 3 s | yes | yes |
+| Microphone processing defaults on | yes | yes |
+| Verdict | works-with-audio | **works-with-audio** |
+
+Windows is the target platform (`NFR-011`), so that column is the one that
+closes the gate. The findings are published as step names and conclusions on the
+`loopback-spike` job, because job logs and artifacts need authentication and a
+spike whose answer cannot be read without signing in is not an answer.
+
+**Decision.** Acquire loopback through the platform API directly. Main owns
+`setDisplayMediaRequestHandler` for the life of a session and answers with
+`audio: 'loopback'`; the audio worker calls `getDisplayMedia` and immediately
+stops the video track. `electron-audio-loopback` is not used.
+
+This removes the highest-risk dependency, keeps the audio worker fully
+sandboxed, and leaves roughly ten lines of code we own in place of a wrapper we
+cannot configure. ADR-005's "first fallback" turns out to be the same mechanism
+the package implements, so nothing is being invented here.
+
+**Two details the spike turned up that the design would otherwise have missed.**
+
+1. `setDisplayMediaRequestHandler` needs `{ useSystemPicker: false }`, and its
+   callback must be called on every path. Returning without calling it leaves
+   `getDisplayMedia` pending forever, which would present as an audio pipeline
+   that never starts and never errors.
+2. The loopback track arrives with `autoGainControl`, `echoCancellation` and
+   `noiseSuppression` all **true**. Those are microphone processing defaults and
+   they are wrong for a loopback stream: they will pump levels and suppress
+   parts of the interviewer's speech before it ever reaches the transcriber.
+   `TASK-011` must request them off explicitly. This is a transcription-quality
+   bug that would have been extremely hard to diagnose from bad suggestions.
+
+**A third cost, found while removing it.** Declaring the package as a production
+dependency pulled `electron` into the production dependency tree: it lists
+`electron` as a peer dependency and npm auto-installs peers. electron-builder
+treats `electron` outside `devDependencies` as an error, so this was a real cost
+of the package independent of its maintenance risk.
+
+It is now a test: `npm ls electron --omit=dev` must report an empty production
+tree, verified by reinstalling the package and watching the test fail naming the
+offender.
+
+**Correction.** This was first written up as the cause of the Windows installer
+failure. It was not. Removing the package did not fix that job, and the real
+cause turned out to be unrelated (see the note under `package` in the CI
+workflow: electron-builder was attempting an implicit GitHub Release publish).
+The peer-dependency problem is genuine and worth guarding against, but it was
+diagnosed from a plausible story rather than from the log, and the story was
+wrong.
+
+**Status.** Confirmed on Windows and closed. The package is removed, and the
+spike's own harness never imported it, so its result stands on its own.
+
+Had Windows contradicted the Linux result, the fallback was to reinstate the
+package, accept a non-sandboxed audio worker, record the deviation from
+`FR-086`, and rework the dependency so the production tree stayed clean. Three
+costs avoided, which is the measure of what the direct path was worth.
+
 ---
 
 ## 3a. Open questions
 
 OQ-001 and OQ-002 were put to the product owner on 2026-09-15 and answered.
-OQ-003 was found during implementation and is open.
+OQ-003 was found while implementing Milestone 0 and is resolved by ADR-027.
+No open questions remain.
 
-### OQ-003 — Audio buffers cannot be transferred across Electron IPC — OPEN, blocks TASK-011
+### OQ-003 — Audio buffers cannot be transferred across Electron IPC — RESOLVED by ADR-027
 
-**Found while implementing Milestone 0, 2026-09-15.**
-
-The architecture said `CH-303` transfers the PCM `ArrayBuffer`, so the sending
-side's reference is neutered and `FR-043` is satisfied "by construction: there is
-no second copy to leak". That is not achievable. Electron's own typings show both
-`ipcRenderer.postMessage(channel, message, transfer?: MessagePort[])` and
-`MessagePortMain.postMessage(message, transfer?: MessagePortMain[])` accept only
-`MessagePort` values in a transfer list. Every buffer crossing Electron IPC is
-structured-cloned, which means copied.
-
-**What this does not break.** `FR-043` and `NFR-002` still hold. A copy living in
-memory is still never written to disk. `TC-041`, which asserts the worker-side
-`byteLength` is 0 after send, is the one test that becomes unachievable as
-written.
-
-**What is open, for TASK-011 to decide.** How to bound the number of live copies
-of a one-second PCM chunk, and what replaces `TC-041`. Candidates, none chosen:
-1. Accept the copy. One second of 16 kHz mono PCM is 32 KB, so the exposure is
-   small and short-lived. Replace `TC-041` with an assertion that the worker
-   drops its reference immediately after send.
-2. Keep the PCM in the worker and stream to the provider from there, sending
-   only transcripts to main. This changes `CMP-03a`'s role and puts network
-   access in a renderer, which cuts against `CMP-14`'s "never fetch from any
-   network" rule and would need its own decision.
-3. A `MessageChannelMain` port pair between the worker and main. This does not
-   avoid the copy; it only avoids the main-process hop.
-
-Milestone 0 does not depend on the answer. `src/preload/audioWorker.ts` sends by
-copy today and carries a comment pointing here, rather than encoding a mechanism
-that does not exist.
+Found while implementing Milestone 0 and answered at the start of Milestone 1.
+The reasoning and the measurements are in `ADR-027`. In short: the copy is real,
+it is also irrelevant, and the property worth testing is retention rather than
+copy count.
 
 ### OQ-001 — Transcript encryption at rest — RESOLVED: plaintext, stated plainly
 
@@ -585,6 +721,41 @@ specified but can be changed cheaply before build starts.
 
 Any change to an `ASM` row requires an update to this table, to the bound
 requirement, and to the affected test cases in the same change.
+
+### ADR-029 — One `ws` transport for all three streaming STT adapters
+
+**TASK-012.** Section 8 listed `@deepgram/sdk`, `openai` and
+`@elevenlabs/elevenlabs-js` as the runtime dependencies for streaming speech to
+text, with "a raw `ws` client is the fallback if the ElevenLabs SDK does not
+expose the realtime STT socket cleanly".
+
+**Decision.** Use one `ws` client for all three streaming adapters. The SDKs are
+still the right choice where they add something: Whisper REST (`TASK-013`) and
+the LLM adapters (`TASK-032`) keep them.
+
+**Why.**
+- **The tests the plan demands are wire-level.** `TC-052` asserts the query
+  string on the connection URL, `TC-159` asserts the gap inside it, `TC-153`
+  asserts the audio format. Each SDK builds its socket internally, so asserting
+  what it put on the wire means reaching past the SDK's own abstraction, which
+  tests the reach rather than the adapter.
+- **Reconnect must behave identically on all three.** `TC-054` requires a
+  dropped socket to come back without ending the session. Three SDKs means three
+  reconnect policies, three backoff ladders and three definitions of "gave up".
+  `SocketSttSession` gives one, tested once.
+- **Two of the three authenticate with a request header.** The platform
+  `WebSocket` constructor cannot set one, so a Node client is needed regardless.
+- **Three SDKs are three production dependencies on the critical audio path.**
+  The `electron-audio-loopback` lesson (ADR-028) is that a dependency on this
+  path has to earn its place. `npm ls electron --omit=dev` staying empty is a
+  guard the project already runs; fewer production packages keeps it easy.
+
+**Cost.** Protocol changes at any of the three providers land on us rather than
+on an SDK release. Accepted: each adapter is under 120 lines, the frame handling
+is a switch on a message type, and the fake-socket tests make a protocol change
+a visible failure rather than a silent one.
+
+**Consequence.** Section 8's runtime table is corrected in the same change.
 
 ---
 

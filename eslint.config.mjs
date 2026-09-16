@@ -15,14 +15,38 @@ import tsPlugin from '@typescript-eslint/eslint-plugin';
  */
 const AUDIO_PATH_FILES = [
   'src/renderer/audio-worker/**/*.ts',
+  // The worklet itself. It handles raw PCM and ships as a plain asset, so the
+  // glob has to name it: `**/*.ts` does not reach a `.js` file in public/.
+  'src/renderer/public/pcm-processor.js',
   'src/main/audio.ts',
+  'src/main/audio-host.ts',
   'src/main/ai/stt.ts',
   'src/main/ai/stt/**/*.ts',
 ];
 
 const FS_MODULES = ['fs', 'node:fs', 'fs/promises', 'node:fs/promises', 'original-fs'];
 
+/**
+ * The worklet runs in the AudioWorkletGlobalScope, which has its own globals and
+ * is not the window. It ships as a plain asset rather than through the bundler,
+ * because a `blob:` module URL is blocked by the renderer's `script-src`.
+ */
+const AUDIO_WORKLET_GLOBALS = {
+  AudioWorkletProcessor: 'readonly',
+  registerProcessor: 'readonly',
+  currentTime: 'readonly',
+  sampleRate: 'readonly',
+};
+
 export default [
+  {
+    files: ['src/renderer/public/pcm-processor.js'],
+    languageOptions: {
+      ecmaVersion: 2023,
+      sourceType: 'module',
+      globals: AUDIO_WORKLET_GLOBALS,
+    },
+  },
   {
     ignores: [
       'node_modules/**',
@@ -37,7 +61,14 @@ export default [
   js.configs.recommended,
   {
     // Node scripts run outside the app bundle and use Node globals directly.
-    files: ['scripts/**/*.mjs', 'scripts/**/*.cjs', '*.config.ts', '*.config.mjs'],
+    files: [
+      'scripts/**/*.mjs',
+      'scripts/**/*.cjs',
+      'spike/**/*.cjs',
+      'spike/**/*.js',
+      '*.config.ts',
+      '*.config.mjs',
+    ],
     languageOptions: {
       globals: {
         process: 'readonly',
@@ -47,6 +78,14 @@ export default [
         module: 'readonly',
         Buffer: 'readonly',
         setTimeout: 'readonly',
+        setInterval: 'readonly',
+        clearInterval: 'readonly',
+        window: 'readonly',
+        navigator: 'readonly',
+        document: 'readonly',
+        AudioContext: 'readonly',
+        Float32Array: 'readonly',
+        Date: 'readonly',
       },
     },
   },

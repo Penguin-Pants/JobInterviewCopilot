@@ -4,6 +4,7 @@
   "description": "Real-time glanceable interview cues from your own notes. Windows desktop accessibility aid.",
   "private": true,
   "license": "MIT",
+  "author": "Interview CoPilot",
   "main": "out/main/index.js",
   "engines": {
     "node": ">=20.11"
@@ -11,7 +12,7 @@
   "scripts": {
     "dev": "electron-vite dev",
     "build": "npm run typecheck && electron-vite build",
-    "package": "npm run build && electron-builder --win --x64",
+    "package": "npm run build && electron-builder --win --x64 --publish never",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint . --max-warnings 0",
     "format": "prettier --write .",
@@ -29,6 +30,7 @@
     "electron-store": "^11.0.2",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
+    "ws": "^8.21.3",
     "zod": "^4.6.5"
   },
   "devDependencies": {
@@ -37,6 +39,7 @@
     "@types/node": "^26.5.1",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
+    "@types/ws": "^8.18.1",
     "@typescript-eslint/eslint-plugin": "^8.70.0",
     "@typescript-eslint/parser": "^8.70.0",
     "@vitest/coverage-v8": "^5.0.1",

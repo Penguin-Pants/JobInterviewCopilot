@@ -369,6 +369,24 @@ Capability flags come from the **registry entry for the selected model**, never
 from the provider id. `CMP-05` reads `supportsEndpointing` off the descriptor, so
 a new streaming provider needs no trigger change (`FR-037`, `TC-056`).
 
+`supportsEndpointing: true` means one thing: this model's native turn-end signal
+fires at `settings.trigger.turnEndGapMs`, the gap the user chose. It does not
+mean "the provider has some endpoint signal". A provider that commits on its own
+schedule is `false`, and `CMP-05` runs the local timer instead, so a native
+signal can never preempt the user's value (`FR-050`, `TC-159`). Clarified during
+`TASK-012`, where the flag was otherwise ambiguous for ElevenLabs.
+
+All three v1 streaming providers take the gap as a parameter, so all three are
+`true`. Each adapter passes it to a differently named field:
+
+| Model | Field carrying `turnEndGapMs` |
+|---|---|
+| `deepgram:nova-*` | `endpointing` on the socket URL |
+| `openai:gpt-4o*-transcribe` | `turn_detection.silence_duration_ms`, server VAD |
+| `elevenlabs:scribe-v2-realtime` | `min_silence_duration_ms`, VAD commit strategy |
+
+`openai:whisper-1` has no turn signal at all and is `false`.
+
 Adapter notes:
 - `deepgram`: WebSocket with `encoding=linear16`, `sample_rate=16000`,
   `channels=1`, `interim_results=true`, and
@@ -379,10 +397,12 @@ Adapter notes:
 - `openai` streaming: realtime transcription WebSocket, a transcription session
   configured with the chosen model and server VAD. Deltas map to
   `isFinal: false`, completed items to `isFinal: true`, the VAD stop event to
-  `endpoint`.
-- `elevenlabs`: Scribe v2 Realtime WebSocket, input format `pcm_16000`. Partial
-  transcripts map to `isFinal: false`, committed segments to `isFinal: true` and
-  to `endpoint`.
+  `endpoint`. Audio goes up base64-encoded inside an
+  `input_audio_buffer.append` frame; this is the one v1 provider that does not
+  take raw binary frames.
+- `elevenlabs`: Scribe v2 Realtime WebSocket, input format `pcm_16000`, commit
+  strategy `vad`. Partial transcripts map to `isFinal: false`, committed
+  segments to `isFinal: true` and to `endpoint`.
 - `openai` `whisper-1`: the one non-streaming model. Buffers 4000 ms, posts an
   in-memory WAV body, emits one final event per request, never an interim, never
   an endpoint. Held to `NFR-017`. (ADR-022)
@@ -472,6 +492,31 @@ USING_PRIMARY (at next clean boundary)
        boundary with no audio in flight. An STT provider switch never
        happens mid-utterance.
 
+**Whether a backup exists is a property of the capability binding, not of the
+credential.** One OpenAI key can be the LLM primary with no backup and the STT
+backup at the same time, so the two capabilities disagree about whether there is
+anywhere to fail over to. The machine is therefore told per request, and a
+capability never falls to a backup that belongs to the other one. Clarified
+during `TASK-014`, where the shared-credential case otherwise had two answers.
+
+**`CONFIG_REQUIRED` is terminal for the credential, not for one capability.** A
+revoked key stays revoked even where another capability routes around it, so
+nothing but a newly saved, validated key moves the machine out of that state.
+
+**Projecting credential health onto `CH-202`.** The state machine is keyed by
+credential; `CH-202` is keyed by capability. A capability reports the worst
+state among every credential it depends on, its backup included. `TC-143` is the
+reason: there OpenAI is the STT *backup* and the LLM primary, so reading the
+primary alone would leave STT looking healthy while the key it would fail over
+to is revoked. Both capabilities report the same `config-required` naming the
+same `credentialId`, and the Dashboard groups by that id to render one badge
+naming both capabilities rather than two badges saying the same thing.
+
+**A clean boundary for STT requires no audio in flight.** The switch-back takes
+the live chunk count and refuses while it is above zero, so `TC-144` is enforced
+by the code rather than by the caller remembering. The pending switch is held,
+not cancelled.
+
 If no backup is configured, the path splits on `retryable` (ADR-024):
 
 DEGRADED         -- retryable failure (network, timeout, server, rate-limit).
@@ -556,10 +601,16 @@ send, "enforcing `FR-043` by construction". Electron cannot do that. Both
 IPC is structured-cloned, which means copied.
 
 `FR-043` and `NFR-002` still hold: a copy in memory is never written to disk.
-What is gone is the "by construction" part. The guarantee now rests on the
-ESLint ban across the whole reachable audio path and on the runtime
-filesystem-write monitor (`TC-137`), which is what actually proves it. The
-design question of how to bound the copies is open as `OQ-003` for `TASK-011`.
+What is gone is the "by construction" part. The guarantee rests on the ESLint ban
+across the whole reachable audio path and on the runtime filesystem-write monitor
+(`TC-137`).
+
+**Resolved by ADR-027.** The copy is accepted: 31 KiB and 0.08 ms per chunk, or
+0.008 percent of the chunk budget. The property that is enforced instead is
+bounded retention, because unbounded accumulation, not copying, is what would put
+220 MiB of interview audio in memory over one session. `CH-303` therefore sends
+by copy, every reference is released once its chunk is handed on, and deliberate
+buffering is bounded by a declared constant.
 
 ---
 
@@ -677,11 +728,12 @@ published pricing at build time:
 {
   "version": "2026-09-15",
   "llm": {
-    "claude-haiku-4-5-20251001": { "inputPerMTok": 1.00, "outputPerMTok": 5.00 },
-    "gpt-4o-mini":               { "inputPerMTok": 0.15, "outputPerMTok": 0.60 }
+    "anthropic:claude-haiku-4-5-20251001": { "inputPerMTok": 1.00, "outputPerMTok": 5.00 },
+    "openai:gpt-4o-mini":                  { "inputPerMTok": 0.15, "outputPerMTok": 0.60 }
   },
   "stt": {
     "deepgram:nova-3":              { "perAudioMinute": 0.0043 },
+    "deepgram:nova-2":              { "perAudioMinute": 0.0043 },
     "openai:gpt-4o-mini-transcribe":{ "perAudioMinute": 0.0030 },
     "openai:gpt-4o-transcribe":     { "perAudioMinute": 0.0060 },
     "elevenlabs:scribe-v2-realtime":{ "perAudioMinute": 0.0067 },
@@ -689,6 +741,13 @@ published pricing at build time:
   }
 }
 ```
+
+Both blocks are keyed `providerId:modelId`. This paragraph previously showed the
+`llm` block keyed by bare model id, which `TC-156` never accepted and which
+breaks the moment two providers ship a model of the same name. Corrected during
+`TASK-012`, along with the missing `deepgram:nova-2` row. `TC-156` now fails on a
+price row no registry model claims, as well as on a model with no row, so the
+table cannot drift in either direction.
 
 Selection is restricted to priced models: the Dashboard only offers models that
 exist in a registry, and `TC-156` fails the build if a registry model has no
@@ -712,10 +771,9 @@ is preferable to a network call during an interview.
 |---|---|---|---|
 | `electron` | Shell. Pin to a stable line with `setContentProtection` on Windows | FR-001, FR-005 | Low |
 | `electron-store` | Non-secret settings | FR-020 | Low |
-| `electron-audio-loopback` | WASAPI loopback capture | FR-040 | **High**, small package, Windows-specific, single maintainer |
-| `@deepgram/sdk` | Deepgram streaming STT | FR-047 | Low |
-| `openai` | OpenAI realtime transcription, Whisper REST, GPT | FR-047, FR-070 | Low |
-| `@elevenlabs/elevenlabs-js` | Scribe v2 Realtime STT. A raw `ws` client is the fallback if the SDK does not expose the realtime STT socket cleanly | FR-047, ADR-022 | Medium, newest integration of the three |
+| *(none)* | Loopback capture uses the platform API: main owns `setDisplayMediaRequestHandler({ useSystemPicker: false })` and answers `audio: 'loopback'`, the audio worker calls `getDisplayMedia`. `electron-audio-loopback` was evaluated and removed (ADR-028): its renderer half needs `ipcRenderer` inside the renderer, which `FR-086` forbids, and declaring it made `electron` a production dependency, which breaks electron-builder | FR-040, ADR-028 | Low, about ten lines we own |
+| `ws` | The single WebSocket transport behind all three streaming STT adapters. Two of the three authenticate with a request header, which the platform `WebSocket` constructor cannot set, and one transport means one reconnect policy to test (ADR-029) | FR-047, FR-048, ADR-029 | Low |
+| `openai` | Whisper REST and GPT. **Not** the realtime transcription socket, which is an adapter over `ws` | FR-049, FR-070 | Low |
 | `@anthropic-ai/sdk` | Claude | FR-070 | Low |
 | `@xenova/transformers` | Local embeddings | FR-066 | Medium, model download and ONNX runtime size |
 | `pdf-parse` | PDF to text | FR-060 | Medium, best-effort output |
@@ -737,13 +795,23 @@ is preferable to a network call during an interview.
 
 ### Dependency risk mitigation
 
-`electron-audio-loopback` is the single highest-risk dependency. `CMP-03b` must
-access it behind one narrow internal module, `src/renderer/audio-worker/loopback.ts`,
-exposing exactly `getLoopbackStream(): Promise<MediaStream>`. If the package
-breaks, the replacement (a `desktopCapturer` based `getUserMedia` constraint, or
-a native addon) is a single-file change. `TASK-030` includes a spike that proves
-the package works on both Windows 10 and Windows 11 before the rest of the audio
-work begins.
+`electron-audio-loopback` was the project's highest-risk dependency and is gone
+(ADR-028). Loopback is acquired through the platform API in about ten lines we
+own, so there is no package to break.
+
+The remaining concentrations of risk:
+
+- **`ws` carries all three streaming STT adapters** (ADR-029). A protocol change
+  at any provider lands on us rather than on an SDK release. Contained by
+  `SocketSttSession`, which owns every part that is not provider-specific, so an
+  adapter is a connect URL, a handshake frame and a switch on a message type.
+  The fake-socket tests make a protocol change a visible failure.
+- **`@xenova/transformers`** brings an ONNX runtime and a model download
+  (`TASK-022`). Its size and first-run behavior are the risk, not its API.
+
+`npm ls electron --omit=dev` must return empty. A package that declares
+`electron` as a peer dependency pulls it into the production tree, which breaks
+`electron-builder`. This is asserted in CI, not assumed.
 
 ---
 

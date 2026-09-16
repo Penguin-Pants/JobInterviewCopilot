@@ -134,10 +134,12 @@ valid, two of them security):
   was unreachable through the UI (FR-082, FR-084).
 
 Follow-up work found during implementation:
-- **OQ-003** (blocks TASK-011): Electron cannot transfer an `ArrayBuffer` across
-  IPC, so `CH-303`'s transfer mechanism and `TC-041` need replacing.
+- **OQ-003 resolved by ADR-027** at the start of Milestone 1: accept the copy,
+  bound retention instead. `TC-041` is rewritten from a byteLength assertion to
+  a retention assertion, and `FR-043` now states the enforceable property.
 - **TASK-011** must add the `media` permission to the permission request
-  handler, which Milestone 0 sets to deny everything.
+  handler, which Milestone 0 sets to deny everything. **Done.** The handler now
+  lives in `src/main/audio-host.ts` and grants `media` only to the Audio Worker.
 - `Logger.rotateIfNeeded` calls `statSync` on every line. Harmless at Milestone 0
   volumes, worth revisiting if logging becomes hot during a live session.
 - The content security policy lists `file:` because the packaged app loads
@@ -149,6 +151,63 @@ Follow-up work found during implementation:
   suite's own setup fails if the Dashboard does not render.
 - `ConfigStore` rewrites `settings.json` on every construction even when nothing
   changed. Harmless, but it touches mtime on every launch.
+
+
+Issues found by code review on PR #4 and fixed in the same branch. All ten were
+real; one had already been fixed when the review landed.
+
+- **A failing installer build reported success.** The step piped `npm run
+  package` into `tee` without `pipefail`, so the pipeline exited with `tee`'s
+  status. The failure-log upload was skipped and the installer upload only
+  warned about a missing `release/*.exe`. Now `set -o pipefail`, plus a separate
+  step that asserts the artifact exists.
+- **`session:start` was allowed while capture was still starting.** The gate
+  refused only on `error`, but `start()` resolves as soon as the worker has been
+  told to start, so a loopback failure was not yet known. It now requires
+  `running`, and the worker reports that state directly instead of the
+  supervisor inferring it from the first chunk a second later (FR-044).
+- **The worklet could never load.** It was fetched from a `blob:` URL, and a
+  module URL is governed by `script-src`, which the audio worker restricts to
+  `'self' file:`; `blob:` is allowed only in `worker-src`. Capture would have
+  failed on every start with no PCM ever emitted. The first fix was worse than
+  it looked: `new URL('./x.js', import.meta.url)` is rewritten by Vite into an
+  inlined `data:` URL, which `script-src` rejects for the same reason. The
+  worklet now ships from `src/renderer/public/` and is resolved against the page
+  URL, and a test reads the build output to prove it is neither form.
+- **An acquired stream leaked when graph setup failed.** Anything that threw
+  after `getDisplayMedia` or `getUserMedia` succeeded left the tracks live and
+  the context open, so the microphone or system audio stayed captured invisibly
+  while the stream reported `error`. Setup is now wrapped and releases both.
+- **The final partial chunk was discarded.** Stopping 1.5 s in emitted the first
+  full chunk and dropped the remaining half second, which TASK-011 requires to
+  be delivered. The processor now takes a `flush` message and emits the
+  remainder at its true length, not padded with silence.
+- **Sequence numbers reset on restart.** The counter lived inside the graph, and
+  a graph is replaced on the recovery path (FR-045), so the first chunk after a
+  restart repeated sequence 1 and the supervisor's gap detection saw a duplicate
+  on the exact path it exists to watch. The counter now lives per source and
+  resets only when the session stops.
+- **Stereo was truncated, not downmixed.** Taking channel 0 alone meant an
+  interviewer whose audio sat mostly in the right channel arrived as
+  near-silence. The channels are averaged.
+- **The audio worker window skipped the navigation lockdown.** A redirect to a
+  remote origin would have kept the window's preload bridge and still counted as
+  the media-authorized worker under `owns()`, handing a remote page the capture
+  and audio IPC surface every other renderer is denied (FR-086).
+- **`chunksInFlight` treated an async consumer as finished when it returned.**
+  The count is released when the promise settles now. The reviewer is also right
+  that the counter cannot detect a consumer that retains the buffer; it measures
+  concurrency, and retention is proved by the direct-reference assertions in
+  `TC-041` and by `TC-137`'s runtime write monitor, not by this number.
+- **The concurrency group did not dedupe push and pull-request runs.** Already
+  fixed before the review landed.
+
+Two process lessons, both fixed rather than noted:
+- The `git grep` guardrails missed untracked files, so a new file passed locally
+  and failed in CI once committed. That is how the Whisper rule was first
+  broken. They now pass `--untracked`, verified by planting a violation.
+- Coverage excluded `src/main/ai/**`, written before the directory existed. It
+  would have hidden every untested adapter.
 
 
 ### TASK-001 Project scaffold
@@ -267,7 +326,7 @@ Follow-up work found during implementation:
 
 ## Milestone 1 — Audio and transcription
 
-### TASK-010 Audio Worker spike
+### TASK-010 Audio Worker spike — COMPLETE
 **Traces** FR-040, ADR-005
 **Depends on** TASK-001
 **Acceptance criteria**
@@ -276,12 +335,17 @@ Follow-up work found during implementation:
 - The result is written into `docs/00-decision-log.md` as a confirmation note,
   or as a new ADR selecting the replacement approach if it fails.
 - If the package fails, the fallback is already designed in ADR-005 and is
-  selected here rather than invented. No new ADR is required, only a note
-  recording which of the three paths was chosen.
-- This task gates TASK-011. Do not start TASK-011 before it closes.
+  selected here rather than invented.
+- **Result: ADR-028. CLOSED, confirmed on Windows.** The package is not needed
+  and is removed. A sandboxed, context-isolated renderer acquires the loopback
+  stream through `getDisplayMedia` alone, with main owning
+  `setDisplayMediaRequestHandler({ useSystemPicker: false })`. The
+  `loopback-spike` job on `windows-latest` returns `works-with-audio`, with a
+  real audio track, non-silent samples and the context forced to 16 kHz.
+- This task gates TASK-011, and the gate is now open.
 **Verified by** MW-02
 
-### TASK-011 Dual-stream capture
+### TASK-011 Dual-stream capture — COMPLETE
 **Traces** FR-040, FR-041, FR-042, FR-043, FR-044, FR-045, FR-046, NFR-002
 **Depends on** TASK-010, TASK-005
 **Acceptance criteria**
@@ -292,10 +356,12 @@ Follow-up work found during implementation:
 - Each chunk is exactly 32000 bytes (1000 ms at 16 kHz, 16-bit, mono) except
   the final partial chunk on stop.
 - Chunks carry `source`, `timestamp` and a per-source monotonic `sequence`.
-- The chunk is handed to main on `CH-303` and the worker keeps no reference to
-  it afterwards. **Electron cannot transfer an `ArrayBuffer` across IPC, so the
-  original "byteLength is 0 after send" criterion is not achievable; see OQ-003,
-  which this task must answer before the criterion is final.**
+- PCM retention is bounded (ADR-027). After a chunk is handed on, neither the
+  worker nor the supervisor retains a reference. Any deliberate buffering is
+  bounded by an exported constant, and the audio path exposes its live-chunk
+  count so the bound can be asserted from outside rather than inferred. The
+  chunk is copied rather than transferred, because Electron cannot transfer an
+  `ArrayBuffer`; the copy costs 31 KiB and 0.08 ms and is not the risk.
 - An ESLint rule forbids importing `fs`, `fs/promises` or `original-fs` across
   the whole reachable audio path, not just its start: `src/renderer/audio-worker/**`,
   `src/main/audio.ts`, `src/main/ai/stt.ts` and `src/main/ai/stt/**`. Transferring
@@ -306,9 +372,23 @@ Follow-up work found during implementation:
 - Unexpected stream end retries 3 times before surfacing an error badge.
 - `session:stop` destroys both contexts, stops all tracks and closes the worker
   window. No `AudioContext` remains after stop.
+- **Result: complete.** The hidden Audio Worker acquires each stream through
+  its own `getDisplayMedia`/`getUserMedia` call and its own forced 16 kHz
+  `AudioContext`; the two graphs are never joined. `pcm-worklet.ts` emits
+  32000-byte Int16 LE mono chunks tagged with `source`, `timestamp` and a
+  per-source `sequence`. `AudioSupervisor` bounds live chunks by the exported
+  `MAX_CHUNKS_IN_FLIGHT` and exposes `chunksInFlight` so the bound is asserted
+  from outside. `main/index.ts` installs the loopback display-media handler
+  and replaces the Milestone 0 deny-all permission handler with one that
+  grants `media` to the Audio Worker `webContents` alone. Capture is wired but
+  not started; starting is TASK-040.
+- The runtime filesystem-write monitor is TASK-050 (TC-137). The static ban
+  required here is in place and covers `src/main/ai/stt.ts` and
+  `src/main/ai/stt/**` before those files exist, so TASK-012 cannot open the
+  hole it guards.
 **Verified by** TC-040, TC-041, TC-042, TC-043, TC-044, TC-045, TC-136
 
-### TASK-012 STT registry and the streaming adapters
+### TASK-012 STT registry and the streaming adapters — COMPLETE
 **Traces** FR-023, FR-037, FR-038, FR-047, FR-048, FR-100, NFR-001
 **Depends on** TASK-011, TASK-004
 **Acceptance criteria**
@@ -338,9 +418,40 @@ Follow-up work found during implementation:
 - Adding a fake provider to the registry makes it selectable and usable end to
   end with no edit outside the registry and its adapter (FR-037).
 - Every registry model has a `providerId:modelId` row in `pricing.json`.
+- **Result: complete.** `src/shared/registry/{stt,llm}.ts` hold the v1 contents.
+  `src/main/ai/stt.ts` is the facade; `src/main/ai/stt/` holds the three
+  adapters over one shared `SocketSttSession`. `TC-151` is enforced as a real
+  `git grep`, so a provider id written into the trigger or a renderer fails the
+  build rather than being caught in review.
+- **Spec corrections made in the same change** (DoD 9):
+  - `pricing.json` `llm` rows are keyed `providerId:modelId`, matching the `stt`
+    block and `TC-156`'s wording. Section 7 had shown bare model ids.
+  - `deepgram:nova-2` was in the registry table with no price row. Added.
+    `TC-156` now also fails on a price row no model claims.
+  - `supportsEndpointing` is defined as "the native signal fires at the user's
+    configured gap", not "the provider has a signal". It was ambiguous for
+    ElevenLabs and two engineers would have read it differently.
+  - Three provider SDKs replaced by one `ws` transport (ADR-029). Section 8's
+    runtime table and its stale `electron-audio-loopback` risk paragraph are
+    rewritten.
+  - Coverage no longer excludes `src/main/ai/**`. That exclusion was written
+    before the directory existed and would have hidden an untested adapter.
+    Only `ws-factory.ts`, which builds a real socket, stays excluded.
+- **Design decision found during implementation.** The reconnect ladder resets
+  only after a connection that stayed up for `HEALTHY_CONNECTION_MS`. Resetting
+  on `open` alone lets a provider that accepts and immediately drops the socket
+  reconnect forever, which is the unbounded retry ADR-024 rules out.
+- **Deferred to TASK-013:** `openai:whisper-1` routes to the `batch` adapter
+  table, which is empty, so it fails with a named reason rather than being
+  silently handled by the streaming adapter. The test asserting this is the
+  handoff.
+- **Deferred to TASK-014:** health keyed by credential, and failover. The error
+  classes and `retryable` flag this needs are in place and tested.
+- **Deferred to TASK-042:** the Dashboard model picker that reads the registry.
+  Selection is registry-driven at the model layer; no renderer exists yet.
 **Verified by** TC-050, TC-051, TC-052, TC-053, TC-054, TC-056, TC-151, TC-152, TC-153, TC-155, TC-156, TC-159
 
-### TASK-013 Non-streaming STT class and the Whisper adapter
+### TASK-013 Non-streaming STT class and the Whisper adapter — COMPLETE
 **Traces** FR-047, FR-049, NFR-017, ADR-022
 **Depends on** TASK-012
 **Acceptance criteria**
@@ -358,9 +469,28 @@ Follow-up work found during implementation:
 - The WAV header is written by hand in `src/main/ai/stt/wav.ts`. The body is
   built in memory. No file stream and no path is ever passed to the HTTP client
   (ADR-019).
+- **Result: complete.** `src/main/ai/stt/wav.ts` writes the 44-byte RIFF/WAVE
+  header by hand and `whisper.ts` buffers `WHISPER_BUFFER_CHUNKS` (four 1000 ms
+  chunks), posts each buffer as an in-memory `Blob` and emits `isFinal: true`
+  only. `on('endpoint')` is accepted and never called. No path and no stream
+  reaches the HTTP client (ADR-019, NFR-002).
+- `latencyBudgetFor(model)` in the STT registry returns `NFR-001` or `NFR-017`
+  from the entry's `streaming` flag, so which budget applies is computed, not
+  looked up by provider name.
+- The badge text now names both penalties, as `NFR-017` requires. It previously
+  named only the latency cost.
+- `TC-057`'s "no renderer names Whisper" half is enforced as a real `git grep`,
+  verified by planting a violation in a renderer and watching it fail. Its
+  Dashboard half waits on TASK-042, which builds the first model picker.
+- `TC-150`'s registry half is covered here. The end-to-end latency harness
+  needs the trigger and the LLM, so it lands with TASK-032; real numbers come
+  from MW-11.
+- Found while implementing: Whisper's `validateKey` was a copy of the realtime
+  adapter's. Both now call one `validateOpenAiKey`, because one key serves both
+  transports and two copies would drift (ADR-017).
 **Verified by** TC-055, TC-057, TC-150
 
-### TASK-014 Provider health and failover
+### TASK-014 Provider health and failover — COMPLETE
 **Traces** FR-100, FR-104, ADR-009, ADR-010, ADR-017
 **Depends on** TASK-012
 **Acceptance criteria**
@@ -386,6 +516,32 @@ Follow-up work found during implementation:
   `CONFIG_REQUIRED` clears when the user saves a new key for that credential.
   The overlay is never touched in either state.
 - `CH-202 state:providers` reflects every transition.
+- **Result: complete.** `src/main/ai/health.ts` holds `CredentialHealth` (one
+  machine per credential) and `ProviderHealthRegistry` (binding, projection,
+  probes). `main/index.ts` binds it from settings, rebinds on a provider change,
+  pushes `CH-202` on every transition and clears `CONFIG_REQUIRED` when a key is
+  saved and validated.
+- **Spec gaps found and closed in the same change** (DoD 9):
+  - `hasBackup` was modeled as a property of the credential. It is a property of
+    the capability binding: one OpenAI key can be the LLM primary with no backup
+    and the STT backup at once, and the first version failed the LLM over to a
+    backup that existed only for STT. Now passed per request.
+  - `CONFIG_REQUIRED` is terminal for the credential, not for one capability. A
+    revoked key stays flagged even where another capability routes around it.
+  - `CH-202` is capability-shaped while the machine is credential-shaped. A
+    capability now reports the worst state among every credential it depends on,
+    including its backup. Without this `TC-143`'s own scenario (OpenAI as STT
+    backup and LLM primary) left STT reading healthy.
+  - "No audio in flight" is enforced: `noteCleanBoundary` takes the live chunk
+    count and refuses above zero, holding the pending switch rather than
+    cancelling it. `TC-144` was otherwise a convention.
+- An unclassified failure is treated as retryable. Ending an interview on an
+  error we could not classify is worse than one more attempt.
+- **Deferred to TASK-040:** calling `noteCleanBoundary` at real turn boundaries,
+  and routing live STT and LLM requests through `runFor`. The session manager
+  owns both; the contract and its guards are in place and tested.
+- **Deferred to TASK-042:** the Dashboard badge that groups by `credentialId`.
+  The payload carries what it needs.
 **Verified by** TC-100, TC-101, TC-102, TC-103, TC-143, TC-144, TC-162
 
 ---

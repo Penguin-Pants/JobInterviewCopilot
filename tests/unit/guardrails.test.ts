@@ -49,6 +49,7 @@ describe('TC-042 no filesystem on the audio path', () => {
     for (const p of [
       'src/renderer/audio-worker/**/*.ts',
       'src/main/audio.ts',
+      'src/main/audio-host.ts',
       'src/main/ai/stt.ts',
       'src/main/ai/stt/**/*.ts',
     ]) {
@@ -276,5 +277,212 @@ describe('a second launch restores a closed Dashboard', () => {
     const handler = source.slice(source.indexOf("app.on('second-instance'"));
     expect(handler.slice(0, 500)).toContain('focusOrRecreateDashboard');
     expect(source).toMatch(/if \(!dashboardWindow \|\| dashboardWindow\.isDestroyed\(\)\)/);
+  });
+});
+
+/**
+ * Regression: electron must never be reachable as a production dependency.
+ *
+ * `electron-audio-loopback` declares electron as a peer dependency. npm
+ * auto-installs peers, so adding that package silently made electron a
+ * production dependency, and electron-builder hard-errors on electron outside
+ * devDependencies. The only symptom was the Windows installer job failing at
+ * `npm run package`, with nothing in the diff obviously about packaging.
+ *
+ * This is cheap to assert and expensive to rediscover.
+ */
+describe('electron stays out of production dependencies', () => {
+  it('is declared only as a devDependency', () => {
+    const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+    expect(pkg.devDependencies?.electron, 'electron must be a devDependency').toBeDefined();
+    expect(pkg.dependencies?.electron, 'electron must not be a dependency').toBeUndefined();
+  });
+
+  it('no production dependency pulls electron in as a peer', () => {
+    // `npm ls electron --omit=dev` prints the production tree only. A package
+    // whose peer dependency is electron shows up here even though nothing
+    // declared electron directly.
+    //
+    // npm exits non-zero when the package is absent, which is the state we
+    // want, so the throw carries the answer and has to be read rather than
+    // propagated.
+    let output: string;
+    try {
+      output = execSync('npm ls electron --omit=dev --json', {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (err) {
+      output = (err as { stdout?: string }).stdout ?? '{}';
+    }
+
+    const tree = JSON.parse(output) as { dependencies?: Record<string, unknown> };
+    const production = Object.keys(tree.dependencies ?? {});
+
+    expect(
+      production,
+      `these production dependencies pull electron into the packaged app: ${production.join(', ')}`,
+    ).toEqual([]);
+  });
+});
+
+/**
+ * ADR-028 regression: the two details the loopback spike found the hard way.
+ *
+ * Both are the kind of mistake that produces no error at all. A missing
+ * callback leaves getDisplayMedia pending forever, and microphone processing
+ * left on degrades the interviewer audio before the transcriber sees it, so the
+ * symptom is bad suggestions rather than anything that looks like an audio bug.
+ */
+describe('ADR-028 loopback acquisition details', () => {
+  it('the display-media handler disables the system picker', () => {
+    const source = readFileSync('src/main/audio-host.ts', 'utf8');
+    expect(source).toContain('useSystemPicker: false');
+  });
+
+  it('the handler calls its callback on every path, including failures', () => {
+    const source = readFileSync('src/main/audio-host.ts', 'utf8');
+    const handler = source.slice(
+      source.indexOf('export function installLoopbackHandler'),
+      source.indexOf('export function installPermissionHandler'),
+    );
+    // One for the no-source path, one for the error path, one for success.
+    expect((handler.match(/callback\(/g) ?? []).length).toBeGreaterThanOrEqual(3);
+    expect(handler).toContain('callback({})');
+  });
+
+  it('both streams request microphone processing off', () => {
+    const source = readFileSync('src/renderer/audio-worker/capture.ts', 'utf8');
+    for (const setting of ['autoGainControl', 'echoCancellation', 'noiseSuppression']) {
+      expect(source, `${setting} must be requested off`).toMatch(
+        new RegExp(`${setting}:\\s*false`),
+      );
+    }
+    // Applied to the loopback stream and the microphone alike.
+    expect((source.match(/RAW_AUDIO_CONSTRAINTS/g) ?? []).length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('the video track is dropped immediately after acquisition', () => {
+    // The video is only the vehicle Chromium requires for a display stream.
+    // Holding a screen capture in this app would be indefensible.
+    const source = readFileSync('src/renderer/audio-worker/capture.ts', 'utf8');
+    expect(source).toContain('getVideoTracks()');
+    expect(source).toContain('removeTrack(track)');
+  });
+
+  it('media permission is granted only to the audio worker', () => {
+    const source = readFileSync('src/main/audio-host.ts', 'utf8');
+    expect(source).toMatch(/permission === 'media' && isAudioWorker\(contents\)/);
+  });
+
+  it('electron-audio-loopback is not imported anywhere', () => {
+    const files = execSync('git ls-files src spike', { encoding: 'utf8' })
+      .trim()
+      .split('\n')
+      .filter(Boolean);
+    const importers = files.filter((f) =>
+      readFileSync(f, 'utf8').includes('electron-audio-loopback'),
+    );
+    // The spike harness may mention it in a comment; an import is the problem.
+    const realImports = importers.filter((f) =>
+      /(?:import|require)\s*\(?\s*['"]electron-audio-loopback/.test(readFileSync(f, 'utf8')),
+    );
+    expect(realImports).toEqual([]);
+  });
+});
+
+/**
+ * Regression: CI must never publish a release.
+ *
+ * electron-builder detects CI and triggers an implicit GitHub Release publish.
+ * With no GH_TOKEN it fails, and the installer job goes red *after* building
+ * the installer successfully, which reads as a packaging failure and is not
+ * one. Its own warning asks for an explicit --publish, and v27 removes the
+ * implicit behaviour, so stating it is right regardless.
+ */
+describe('packaging never publishes from CI', () => {
+  it('the package script passes --publish never', () => {
+    const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as {
+      scripts: Record<string, string>;
+    };
+    expect(pkg.scripts.package).toContain('--publish never');
+  });
+
+  it('declares an author, which electron-builder warns about and shows as publisher', () => {
+    const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as { author?: string };
+    expect(pkg.author).toBeTruthy();
+  });
+});
+
+/**
+ * TC-151 and TC-056: the registry drives everything.
+ *
+ * The acceptance criterion is "a grep finds no branch on a provider id string
+ * outside the adapter files and the registry itself". That is asserted here as
+ * a grep rather than described in a comment, because a comment does not fail a
+ * build when someone writes `if (providerId === 'deepgram')` in the trigger.
+ */
+describe('TC-151 no provider id outside the registry and its adapters', () => {
+  const PROVIDER_IDS = ['deepgram', 'elevenlabs', 'anthropic'];
+
+  /**
+   * 'openai' is deliberately absent. It is a credential id and appears in the
+   * vault's key map and the settings schema, which name credentials, not
+   * providers. The three above are equally credential ids, so the allowlist
+   * below carries the files that legitimately name a credential.
+   */
+  const ALLOWED = [
+    'src/shared/registry/',
+    'src/main/ai/stt/',
+    // Credential plumbing: these name a vault key, not a provider to branch on.
+    'src/shared/types.ts',
+    'src/shared/ipc.ts',
+    'src/shared/defaults.ts',
+    'src/main/secrets.ts',
+  ];
+
+  for (const id of PROVIDER_IDS) {
+    it(`does not name "${id}" outside the registry, the adapters and the vault`, () => {
+      // --untracked matters: without it a brand new file passes this guard
+      // locally and only fails in CI once committed, which is exactly how this
+      // rule was first broken.
+      const out = execSync(
+        `git grep -l --untracked -F "'${id}'" -- 'src/*.ts' 'src/*.tsx' || true`,
+        {
+          encoding: 'utf8',
+          cwd: process.cwd(),
+        },
+      );
+      const files = out
+        .split('\n')
+        .filter(Boolean)
+        .filter((f) => !ALLOWED.some((prefix) => f.startsWith(prefix)));
+      expect(files).toEqual([]);
+    });
+  }
+});
+
+/**
+ * TC-057: the non-streaming badge text comes from the registry entry. No
+ * renderer names Whisper, so swapping the model or its warning text is a
+ * registry edit rather than a UI edit (FR-037, ADR-022).
+ */
+describe('TC-057 no renderer names a model', () => {
+  it('does not mention Whisper outside the registry and its adapter', () => {
+    const out = execSync(`git grep -l -i --untracked -F "whisper" -- 'src/*' || true`, {
+      encoding: 'utf8',
+      cwd: process.cwd(),
+    });
+    const files = out
+      .split('\n')
+      .filter(Boolean)
+      // `pricing.json` is data keyed by the registry, not code branching on a
+      // model name, and TC-156 already proves its keys and the registry agree.
+      .filter((f) => !f.endsWith('.json'))
+      .filter((f) => !f.startsWith('src/shared/registry/') && !f.startsWith('src/main/ai/stt/'));
+    expect(files).toEqual([]);
   });
 });

@@ -8,6 +8,15 @@ import {
   screen,
   session,
 } from 'electron';
+import { AudioSupervisor } from './audio.js';
+import {
+  ElectronAudioWorkerHost,
+  installLoopbackHandler,
+  installPermissionHandler,
+} from './audio-host.js';
+import { ProviderHealthRegistry } from './ai/health.js';
+import { registerAllSttProviders } from './ai/stt/index.js';
+import { validateCredential } from './ai/validate.js';
 import { ConfigStore } from './config.js';
 import { HotkeyManager } from './hotkeys.js';
 import { IpcRouter, push } from './ipc/router.js';
@@ -24,7 +33,9 @@ import {
   translucencyChangeNeedsRecreate,
   windowsBuildNumber,
 } from './windows.js';
-import type { CredentialId, Settings, ValidationResult } from '../shared/types.js';
+import type { CredentialId, Settings, StreamState } from '../shared/types.js';
+import { findLlmProvider } from '../shared/registry/llm.js';
+import { findSttProvider } from '../shared/registry/stt.js';
 
 /**
  * Application bootstrap (CMP-01).
@@ -39,6 +50,10 @@ let config: ConfigStore;
 let secrets: SecretVaultStore;
 let hotkeys: HotkeyManager;
 let router: IpcRouter;
+
+let audioHost: ElectronAudioWorkerHost;
+let audio: AudioSupervisor;
+let health: ProviderHealthRegistry;
 
 let dashboardWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
@@ -78,6 +93,52 @@ async function bootstrap(): Promise<void> {
   await app.whenReady();
   applyContentSecurityPolicy();
 
+  // Audio capture is wired now but not started. Starting belongs to the session
+  // manager (TASK-040); what has to exist before then are the two main-process
+  // concessions loopback needs, and a supervisor ready to receive chunks.
+  audioHost = new ElectronAudioWorkerHost({
+    onChunk: (chunk) => audio.handleChunk(chunk),
+    onStreamState: ({ source, state, error }) => {
+      // Tell the supervisor first, so `canStartSession` reflects the worker's
+      // view rather than waiting for the first chunk to prove it.
+      audio.noteStreamState(source, state as StreamState, error);
+      if (state === 'error') {
+        void audio.handleStreamEnded(source, error ?? 'The audio stream ended.');
+      }
+      push(dashboardWindow?.webContents, 'state:audio', {
+        interviewer: audio.statusFor('interviewer').state,
+        candidate: audio.statusFor('candidate').state,
+      });
+    },
+  });
+
+  audio = new AudioSupervisor({
+    worker: audioHost,
+    // The chunk goes straight to the STT layer once TASK-012 lands. Until then
+    // it is dropped here rather than queued: a queue with no consumer is the
+    // unbounded retention ADR-027 exists to prevent.
+    onChunk: () => {},
+  });
+
+  // The STT adapters must be registered before any key is validated or any
+  // session is opened. Registration is pure; it opens no socket.
+  registerAllSttProviders();
+
+  // Health is keyed by credential, so one revoked key is one badge however many
+  // capabilities it serves (ADR-017). Bound from settings here and rebound when
+  // the user changes a provider, because the binding is what says which
+  // credential serves which capability.
+  health = new ProviderHealthRegistry(
+    (state) => {
+      push(dashboardWindow?.webContents, 'state:providers', state);
+    },
+    (credentialId) => () => probeCredential(credentialId),
+  );
+  bindHealthFromSettings(config.get());
+
+  installLoopbackHandler();
+  installPermissionHandler((contents) => audioHost.owns(contents));
+
   hotkeys = new HotkeyManager(globalShortcut);
   router = new IpcRouter(ipcMain);
   registerIpcHandlers();
@@ -102,6 +163,8 @@ async function bootstrap(): Promise<void> {
   });
   app.on('window-all-closed', () => app.quit());
   app.on('will-quit', () => {
+    health.dispose();
+    void audio.stop();
     hotkeys.disposeAll();
     router.dispose();
     getLogger().close();
@@ -175,11 +238,8 @@ function applyContentSecurityPolicy(): void {
     });
   });
 
-  // Milestone 0 needs no device access. Media permission is granted in
-  // TASK-011 when the audio worker actually needs it.
-  session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) =>
-    callback(false),
-  );
+  // The permission handler is installed by the audio host, which is the only
+  // component that knows which window may capture (TASK-011).
 }
 
 function wireOverlayWindow(): void {
@@ -278,15 +338,47 @@ function reportCaptureFidelity(): void {
 }
 
 /**
- * Live key validation is implemented per provider in TASK-012 and TASK-032.
- * Until those adapters exist this refuses rather than silently accepting a key,
- * because FR-026 says a key that has not passed validation is never saved.
+ * Maps the chosen providers onto credentials. The registry never reads settings
+ * itself, so a provider swap is a rebind rather than a restart.
  */
-async function validateKey(credentialId: CredentialId, _key: string): Promise<ValidationResult> {
-  return {
-    ok: false,
-    reason: `Live validation for ${credentialId} arrives with its provider adapter (TASK-012, TASK-032). Keys are not saved until it does (FR-026).`,
-  };
+function bindHealthFromSettings(settings: Settings): void {
+  health.bind({
+    capability: 'stt',
+    primary: credentialFor(settings.providers.stt.primary.providerId),
+    backup: settings.providers.stt.backup
+      ? credentialFor(settings.providers.stt.backup.providerId)
+      : null,
+  });
+  health.bind({
+    capability: 'llm',
+    primary: credentialFor(settings.providers.llm.primary.providerId),
+    backup: settings.providers.llm.backup
+      ? credentialFor(settings.providers.llm.backup.providerId)
+      : null,
+  });
+}
+
+/**
+ * Which vault key a provider uses, read from the registries rather than from a
+ * table here, so a new provider needs no edit in this file (FR-037).
+ */
+function credentialFor(providerId: string): CredentialId {
+  const descriptor = findSttProvider(providerId) ?? findLlmProvider(providerId);
+  if (!descriptor) {
+    throw new Error(`"${providerId}" is not in either provider registry.`);
+  }
+  return descriptor.credentialId;
+}
+
+/**
+ * The recovery probe: re-validate the credential against its provider. A key
+ * that validates is a provider that answered, which is what the probe asks.
+ */
+async function probeCredential(credentialId: CredentialId): Promise<boolean> {
+  const key = secrets.peek(credentialId);
+  if (key === undefined) return false;
+  const result = await validateCredential(credentialId, key);
+  return result.ok;
 }
 
 function registerIpcHandlers(): void {
@@ -295,13 +387,19 @@ function registerIpcHandlers(): void {
     const before = config.get();
     const after = config.set(patch);
     await applyThemeChange(before, after);
+    bindHealthFromSettings(after);
     return after;
   });
 
   router.handle('secrets:status', () => secrets.status());
-  router.handle('secrets:set', async ({ provider, key }) =>
-    secrets.set(provider, key, validateKey),
-  );
+  router.handle('secrets:set', async ({ provider, key }) => {
+    const result = await secrets.set(provider, key, validateCredential);
+    // A saved, validated key is the only thing that clears CONFIG_REQUIRED for
+    // that credential (FR-026, ADR-024). Checked on the result, because a key
+    // that failed validation was never saved and changes nothing.
+    if (!('error' in result)) health.noteKeySaved(provider);
+    return result;
+  });
 
   router.handle('hotkey:rebind', ({ action, accelerator }) => {
     const result = hotkeys.rebind(action, accelerator);
