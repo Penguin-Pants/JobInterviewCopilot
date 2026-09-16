@@ -854,4 +854,4 @@ Carried forward from product discovery. Do not add without a new decision.
 - No multi-user or team features.
 - No hard cost cutoff. The threshold produces a warning only. (`FR-103`)
 - No per-application audio capture. Loopback takes all system audio. (ADR-021)
-- No transcript encryption at rest, pending **OQ-001**.
+- No transcript encryption at rest. Transcripts are plaintext JSON and the Dashboard says so. (OQ-001)
