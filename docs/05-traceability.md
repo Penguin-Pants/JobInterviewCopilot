@@ -9,7 +9,7 @@ so a requirement could report coverage with no test that would fail if it
 broke. The script exits non-zero on any gap, so CI fails when the documents
 drift.
 
-Coverage: 107 requirements, 26 tasks, 130 automated test cases, 13 manual checks.
+Coverage: 107 requirements, 27 tasks, 131 automated test cases, 13 manual checks.
 
 ## Requirement to task to test
 
@@ -22,7 +22,7 @@ Coverage: 107 requirements, 26 tasks, 130 automated test cases, 13 manual checks
 | FR-005 | TASK-005 | TC-004, TC-005, MW-01 |
 | FR-006 | TASK-043 | TC-006, TC-138 |
 | FR-007 | TASK-043 | TC-006, TC-120 |
-| FR-008 | TASK-043 | TC-138 |
+| FR-008 | TASK-043, TASK-044 | TC-138 |
 | FR-009 | TASK-005 | TC-148 |
 | FR-020 | TASK-003 | TC-030, TC-031 |
 | FR-021 | TASK-004 | TC-020, TC-121, TC-155 |
@@ -49,16 +49,16 @@ Coverage: 107 requirements, 26 tasks, 130 automated test cases, 13 manual checks
 | FR-043 | TASK-011 | TC-041, TC-042, TC-107, TC-137 |
 | FR-044 | TASK-011 | TC-043 |
 | FR-045 | TASK-011 | TC-044 |
-| FR-046 | TASK-011 | TC-045 |
-| FR-047 | TASK-012, TASK-013 | TC-050, TC-051, TC-052, TC-152, TC-153 |
+| FR-046 | TASK-011, TASK-044 | TC-045 |
+| FR-047 | TASK-012, TASK-013, TASK-044 | TC-050, TC-051, TC-052, TC-152, TC-153, TC-164 |
 | FR-048 | TASK-012 | TC-050 |
 | FR-049 | TASK-013 | TC-055, TC-056, TC-057 |
-| FR-050 | TASK-030 | TC-033, TC-053, TC-080, TC-081, TC-082, TC-159 |
-| FR-051 | TASK-030 | TC-083 |
-| FR-052 | TASK-030 | TC-085 |
-| FR-053 | TASK-006, TASK-030 | TC-087, TC-088, MW-08 |
-| FR-054 | TASK-030 | TC-086, TC-134 |
-| FR-055 | TASK-030 | TC-084 |
+| FR-050 | TASK-030, TASK-044 | TC-033, TC-053, TC-080, TC-081, TC-082, TC-159 |
+| FR-051 | TASK-030, TASK-044 | TC-083 |
+| FR-052 | TASK-030, TASK-044 | TC-085 |
+| FR-053 | TASK-006, TASK-030, TASK-044 | TC-087, TC-088, MW-08 |
+| FR-054 | TASK-030, TASK-044 | TC-086, TC-134 |
+| FR-055 | TASK-030, TASK-044 | TC-084 |
 | FR-060 | TASK-020 | TC-060, TC-063 |
 | FR-061 | TASK-020 | TC-061, TC-062 |
 | FR-062 | TASK-021 | TC-064, TC-066, TC-067 |
@@ -71,11 +71,11 @@ Coverage: 107 requirements, 26 tasks, 130 automated test cases, 13 manual checks
 | FR-069 | TASK-020 | TC-122, TC-160 |
 | FR-070 | TASK-032 | TC-100, TC-102 |
 | FR-071 | TASK-032 | TC-154, TC-156 |
-| FR-072 | TASK-031 | TC-091 |
+| FR-072 | TASK-031, TASK-044 | TC-091 |
 | FR-073 | TASK-031 | TC-090, TC-092 |
 | FR-074 | TASK-032 | TC-093, TC-094 |
-| FR-075 | TASK-032 | TC-095 |
-| FR-076 | TASK-032, TASK-043 | TC-096, MW-05 |
+| FR-075 | TASK-032, TASK-044 | TC-095 |
+| FR-076 | TASK-032, TASK-043, TASK-044 | TC-096, MW-05 |
 | FR-077 | TASK-025 | TC-140 |
 | FR-078 | TASK-025 | TC-140, TC-141 |
 | FR-079 | TASK-023 | TC-149 |
@@ -94,13 +94,13 @@ Coverage: 107 requirements, 26 tasks, 130 automated test cases, 13 manual checks
 | FR-092 | TASK-043 | TC-112, TC-115 |
 | FR-093 | TASK-043 | TC-113, TC-114 |
 | FR-094 | TASK-043 | TC-116, TC-146 |
-| FR-100 | TASK-012, TASK-014 | TC-054, TC-100, TC-101, TC-103, TC-143, TC-144, TC-162, MW-09 |
-| FR-101 | TASK-040 | TC-105, TC-106, TC-107, TC-123 |
-| FR-102 | TASK-043 | TC-110 |
-| FR-103 | TASK-041 | TC-108, TC-109, TC-125 |
+| FR-100 | TASK-012, TASK-014, TASK-044 | TC-054, TC-100, TC-101, TC-103, TC-143, TC-144, TC-162, MW-09 |
+| FR-101 | TASK-040, TASK-044 | TC-105, TC-106, TC-107, TC-123, TC-164 |
+| FR-102 | TASK-043, TASK-044 | TC-110 |
+| FR-103 | TASK-041, TASK-044 | TC-108, TC-109, TC-125, TC-164 |
 | FR-104 | TASK-014 | TC-101, TC-143 |
-| FR-105 | TASK-040 | TC-105, TC-106, MW-10 |
-| FR-106 | TASK-040 | TC-134 |
+| FR-105 | TASK-040, TASK-044 | TC-105, TC-106, MW-10 |
+| FR-106 | TASK-040, TASK-044 | TC-134, TC-164 |
 | FR-107 | TASK-040 | TC-135, MW-10 |
 | FR-108 | TASK-040 | TC-135, MW-10 |
 | FR-109 | TASK-041 | TC-145 |
@@ -149,6 +149,7 @@ Coverage: 107 requirements, 26 tasks, 130 automated test cases, 13 manual checks
 | TASK-032 | LLM adapters and line buffering — COMPLETE | FR-070, FR-071, FR-074, FR-075, FR-076 | TC-093, TC-094, TC-095, TC-096, TC-157 |
 | TASK-040 | Session manager and transcript — COMPLETE | FR-088, FR-101, FR-105, FR-106, FR-107, FR-108 | TC-104, TC-105, TC-106, TC-107, TC-134, TC-135 |
 | TASK-041 | Cost meter — COMPLETE | FR-103, FR-109 | TC-108, TC-109, TC-145 |
+| TASK-044 | Live session loop | FR-008, FR-046, FR-047, FR-050, FR-051, FR-052, FR-053, FR-054, FR-055, FR-072, FR-075, FR-076, FR-100, FR-101, FR-102, FR-103, FR-105, FR-106 | TC-071, TC-080, TC-086, TC-087, TC-088, TC-164 |
 | TASK-042 | Dashboard UI | FR-023, FR-024, FR-025, FR-026, FR-027, FR-028, FR-029, FR-030, FR-031, FR-032, FR-038, FR-080, FR-087, FR-088, FR-110, NFR-010, NFR-014 | TC-120, TC-121, TC-122, TC-123, TC-124, TC-125, TC-154, TC-158 |
 | TASK-043 | Overlay UI | FR-006, FR-007, FR-008, FR-076, FR-085, FR-090, FR-091, FR-092, FR-093, FR-094, FR-102, NFR-007, NFR-010 | TC-006, TC-110, TC-111, TC-112, TC-113, TC-114, TC-115, TC-116, TC-117, TC-138 |
 | TASK-050 | Global resilience | NFR-001, NFR-002, NFR-004, NFR-005, NFR-008, NFR-009 | TC-130, TC-131, TC-132, TC-133, TC-137, MW-06 |

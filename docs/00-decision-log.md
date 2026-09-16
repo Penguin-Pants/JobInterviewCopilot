@@ -793,6 +793,49 @@ the accounting rule.
 
 ---
 
+### ADR-034 — The live session loop is its own task, not a section of the Dashboard task
+
+**Decided 2026-09-16, before TASK-044.** A planning decision, recorded here
+because restructuring the build plan is a DoD 9 event.
+
+**Context.** `TASK-042` had grown to six Dashboard sections, eight acceptance
+criteria of its own, **and** the whole live loop: starting capture, opening the
+STT sessions, feeding the trigger, answering `onFire` with retrieval and
+generation, and feeding the Cost Meter. The loop had arrived there by being
+carried rather than by being chosen. `TASK-040` handed it on because the Session
+Manager is the transcript's writer and not an orchestrator, and `TASK-041`
+handed it on again because the Cost Meter counts and does not drive. Each hand-on
+was right on its own and the effect of all of them was that the one piece of work
+every other Milestone 4 task depends on had no task of its own and no acceptance
+criteria of its own.
+
+Two consequences followed. The loop would have been reviewed as a part of a
+renderer task, against criteria written about renderer sections. And the first
+end-to-end suggestion, question in, bullets out, would not have been provable
+until a Dashboard existed to press Start, which puts the riskiest integration in
+the project behind the largest untested surface in it.
+
+**Decision.** The loop becomes `TASK-044 Live session loop`, depending on
+`TASK-013`, `TASK-030`, `TASK-032`, `TASK-040` and `TASK-041`, and blocking
+`TASK-042`. The three follow-ups parked on `TASK-042` that are really the loop
+move with it, `TC-071`'s remaining half included, and `TASK-030`'s
+`triggerConfigFrom` failover rebind joins them because the session is the
+component that owns the failover boundary.
+
+It is numbered **044** rather than inserted as a renumbered `042`. Renumbering
+would rewrite task ids across `03-tasks.md`, `05-traceability.md`,
+`06-verification-map.md`, the architecture and this log, and every one of those
+edits is a chance to break a trace that currently holds. A gap-free numbering is
+worth nothing; a trace that still points at the right task is worth a great deal.
+
+**Consequence.** The loop is driven by a test harness rather than by a renderer,
+so it is provable before `TASK-042` starts, and `TASK-042` shrinks back to the
+Dashboard. `TC-164` is added as its end-to-end case. `docs/03-tasks.md`,
+`docs/04-test-strategy.md` and `docs/06-verification-map.md` change in the same
+commit, and `docs/05-traceability.md` regenerates from them.
+
+---
+
 ---
 
 ## 3a. Open questions

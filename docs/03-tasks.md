@@ -637,7 +637,7 @@ vague intention:
 
 | Item | Why it is not done here | Owner |
 |---|---|---|
-| `TC-071`'s "`session:start` still succeeds during the download" half | `session:start` does not exist yet. The ingestion-blocking half and the determinate-progress half are covered now, in `tests/integration/rag-model-gate.test.ts` | TASK-040 |
+| `TC-071`'s "`session:start` still succeeds during the download" half | `session:start` does not exist yet. The ingestion-blocking half and the determinate-progress half are covered now, in `tests/integration/rag-model-gate.test.ts` | TASK-044 |
 | Calling `RagEngine.query` from the prompt builder | The trigger and the prompt do not exist yet. `query(profileId, text, k=3)` is the contract they will call | TASK-031 |
 | The Dashboard's document manager: the best-effort hover, the doc-type picker, the error retry button, the "model not downloaded" state, and the `2 MB / 200 chunks` ceiling text `FR-068` requires on screen | No renderer exists. `KB_CEILING`, `withinReembedCeiling`, `CH-123` and `CH-124` are the API it consumes | TASK-042 |
 | Prove the unpacked modules load from the **installed** app, not just that the installer builds | The `package` job builds the installer and asserts the `.exe` exists, which it does with or without a correct `asarUnpack` path: nothing launches the packaged app. A `.node` binary cannot be `dlopen`ed from inside an asar and Electron's asar shim does not cover Node's ESM loader, so both failures appear only at runtime. Needs either a packaged smoke launch in the `package` job or a new manual check; `MW-01` to `MW-13` cover none of it | TASK-051 |
@@ -978,9 +978,9 @@ vague intention:
 
 | Item | Why it is not done here | Owner |
 |---|---|---|
-| Drive the trigger from the live STT sessions, answer `onFire` with `RagEngine.query` plus `runGeneration`, and push `CH-207`/`CH-208`/`CH-209` through the overlay gate | `session:start` does not exist. `TurnFired` and `runGeneration` are the contract it will call | TASK-040 |
+| Drive the trigger from the live STT sessions, answer `onFire` with `RagEngine.query` plus `runGeneration`, and push `CH-207`/`CH-208`/`CH-209` through the overlay gate | `session:start` does not exist. `TurnFired` and `runGeneration` are the contract it will call | TASK-044 |
 | ~~Report a cancelled generation's token usage~~ **Answered in TASK-041.** The meter records what the provider reported and invents nothing, so a generation cancelled before any usage frame accounts zero (ADR-033) | An adapter that is aborted returns without yielding its terminal usage record, so a cancelled generation currently accounts zero tokens although the provider streamed some. The Cost Meter is where that decision belongs | TASK-041 |
-| `triggerConfigFrom` reads `supportsEndpointing` off the STT **primary**, even when health has failed over to the backup | The two models can disagree about native endpointing. Harmless today because nothing fails over yet: the trigger is never fed. The rebind belongs with the session that owns the failover boundary | TASK-040 |
+| `triggerConfigFrom` reads `supportsEndpointing` off the STT **primary**, even when health has failed over to the backup | The two models can disagree about native endpointing. Harmless today because nothing fails over yet: the trigger is never fed. The rebind belongs with the session that owns the failover boundary | TASK-044 |
 | Prove the overlay renders the idle card while paused, and that a suggestion buffered before `overlay:ready` reaches it | There is no overlay UI to assert against. `TC-087`'s integration half proves the main-process side; the renderer half needs `Overlay.tsx` | TASK-043 |
 | `CH-215 notice:captureFidelity` is documented as targeting the overlay, is pushed to the Dashboard, and is not in the overlay preload's allowlist | A Milestone 0 inconsistency, found by this milestone's `TC-096` test while enumerating the overlay surface. Not this milestone's to change: `NFR-012` decides which window should show it | TASK-043 |
 | A retrieved chunk's text is interpolated into the user message unescaped | The notes are the user's own documents, so this is not an injection path from a third party. A document containing a line like `CANDIDATE NOTES:` would still confuse the section structure | TASK-050 |
@@ -1049,8 +1049,9 @@ vague intention:
 
 ## Milestone 4 — Sessions, cost, UI
 
-**Status: IN PROGRESS.** `TASK-040` and `TASK-041` are complete. `TASK-042` and
-`TASK-043` are not started.
+**Status: IN PROGRESS.** `TASK-040` and `TASK-041` are complete. `TASK-044` is
+the live loop, split out of `TASK-042` by `ADR-034`. `TASK-042` and `TASK-043`
+are not started.
 
 ### TASK-040 Session manager and transcript — COMPLETE
 **Traces** FR-088, FR-101, FR-105, FR-106, FR-107, FR-108, ADR-003, ADR-013, ADR-018
@@ -1130,8 +1131,8 @@ instead of stopping.
 
 | Item | Why it is not done here | Owner |
 |---|---|---|
-| Start audio capture and the STT sessions on `session:start`, feed `CH-206` into the trigger, and answer `onFire` with `RagEngine.query` plus `runGeneration` through the overlay gate | The Session Manager is the file writer, not the orchestrator. The loop needs the Cost Meter to exist for `CH-204` and the Dashboard to drive it, so it lands with them | TASK-041, TASK-042 |
-| `TC-071`'s "`session:start` still succeeds during the model download" half, carried out of Milestone 2 | `session:start` exists now, but the assertion belongs with the live-session harness rather than with a manager that has no audio behind it. Re-carried by TASK-041 for the same reason | TASK-042 |
+| Start audio capture and the STT sessions on `session:start`, feed `CH-206` into the trigger, and answer `onFire` with `RagEngine.query` plus `runGeneration` through the overlay gate | The Session Manager is the file writer, not the orchestrator. The loop is a task of its own, so that the first end-to-end suggestion is provable before any renderer exists (ADR-034) | TASK-044 |
+| `TC-071`'s "`session:start` still succeeds during the model download" half, carried out of Milestone 2 | `session:start` exists now, but the assertion belongs with the live-session harness rather than with a manager that has no audio behind it. Re-carried by TASK-041 for the same reason | TASK-044 |
 | ~~Usage is an in-memory snapshot the Session Manager stores and writes at compaction. Nothing sets it yet~~ **Done in TASK-041.** `CMP-09` calls `noteUsage` on every tick and once more at stop | `noteUsage` is the contract the Cost Meter calls | TASK-041 |
 | `session:read` and `session:delete` scan every profile to find a session by id | The channels name a session but not its profile. One directory read per profile is correct and bounded; carrying `profileId` on the payload would be the faster fix and is a contract change | TASK-042 |
 | Profile switching is not yet disabled in the Dashboard during a live session | `ADR-013` binds the profile at start and the main process already snapshots it, so the transcript is safe. The control that must be disabled is a renderer that does not exist | TASK-042 |
@@ -1202,15 +1203,64 @@ Covered by `tests/unit/cost.test.ts` (36 cases), `tests/integration/cost-session
 
 | Item | Why it is not done here | Owner |
 |---|---|---|
-| Nothing calls `noteAudio` or `noteGeneration` yet: the meter is wired to the session lifecycle but not to a live loop, so a real session accounts zero | The feed is audio capture, the STT sessions and the generation loop, which is the live-loop work TASK-040 carried and which needs the Dashboard to drive and show it | TASK-042 |
-| `TC-071`'s "`session:start` still succeeds during the model download" half, carried from Milestone 2 and then from TASK-040 | Still the same reason: the assertion belongs with a live-session harness, and there is still no audio behind `session:start` | TASK-042 |
+| Nothing calls `noteAudio` or `noteGeneration` yet: the meter is wired to the session lifecycle but not to a live loop, so a real session accounts zero | The feed is audio capture, the STT sessions and the generation loop, which is the live-loop work TASK-040 carried and which is now a task of its own (ADR-034) | TASK-044 |
+| `TC-071`'s "`session:start` still succeeds during the model download" half, carried from Milestone 2 and then from TASK-040 | Still the same reason: the assertion belongs with a live-session harness, and there is still no audio behind `session:start` | TASK-044 |
 | The Dashboard's Cost and Usage panel: the live timer, the spend estimate, the price table version beside it and the `estimateIncomplete` label | No renderer exists. `CH-204`, `CH-205` and `estimateIncomplete` are the API it consumes | TASK-042 |
 | Usage accounted after `cost.stop()` and before the next `start()` is kept in the maps rather than refused | Harmless: `start()` clears every accumulator, and the only caller that could do it is an in-flight generation the trigger has already aborted. Refusing it would silently lose a late report instead | TASK-050 |
 | `estimate()` is recomputed up to three times per tick | O(models consumed), which is at most four, once a second. Measurably free, and caching it adds an invalidation rule to get wrong | TASK-050 |
 
+### TASK-044 Live session loop
+**Traces** FR-008, FR-046, FR-047, FR-050, FR-051, FR-052, FR-053, FR-054, FR-055, FR-072, FR-075, FR-076, FR-100, FR-101, FR-102, FR-103, FR-105, FR-106
+**Depends on** TASK-013, TASK-030, TASK-032, TASK-040, TASK-041
+**Blocks** TASK-042
+
+Split out of `TASK-042` by `ADR-034`. Every part this task joins already exists
+and is unit-tested; what does not exist is the thing that joins them, so a real
+`session:start` today opens no socket, feeds the trigger nothing, and accounts
+zero spend.
+
+**Acceptance criteria**
+- `session:start` starts audio capture and opens exactly one `SttSession` per
+  stream, both on the credential health is currently serving (`FR-047`,
+  `FR-100`).
+- Every transcript event is pushed on `CH-206 transcript:live` and handed to the
+  trigger. Every final reaches `SessionManager.appendTurn`, interviewer and
+  candidate alike (`FR-101`, `FR-105`).
+- `onFire` answers with `RagEngine.query(profileId, question, 3)` and then
+  `runGeneration`, pushing `CH-207`, `CH-208` and `CH-209` through the overlay
+  readiness gate rather than straight at the window (`FR-008`, `FR-072`).
+- Each generation's outcome reaches `appendSuggestion`, carrying the bullets
+  actually sent and the status the generation ended with.
+- Each generation's usage reaches `cost.noteGeneration(generationId, choice,
+  usage)`, keyed by the choice that answered rather than the configured one.
+- Audio seconds **actually sent to a provider** reach `cost.noteAudio`. A stream
+  whose session is not open bills nothing while the session timer runs on.
+- A new turn during `GENERATING` aborts the in-flight generation before the
+  replacement starts, and the cancelled entry, carrying the bullets already
+  flushed, is appended **before** the replacement's entry (`FR-106`, TC-134).
+- `session:stop` tears the loop down in an order that cannot append to a closed
+  handle: the trigger stops, the in-flight generation is awaited, the STT
+  sessions close, then capture stops, and only then does the Session Manager
+  compact (`FR-046`, `FR-107`).
+- No provider failure reaches the overlay. An STT open failure, an LLM failure
+  and a retrieval failure are each logged and reported through the Dashboard
+  badge, and the overlay keeps its idle card (`FR-076`, `FR-102`).
+- The trigger's `supportsEndpointing` and `batchIntervalMs` are read from the
+  model that is **actually serving the session**, not from the configured
+  primary, and are rebound when the session starts.
+
+**Verified by** TC-071, TC-080, TC-086, TC-087, TC-088, TC-164
+
+**Inherited follow-ups this task closes**
+- `triggerConfigFrom` reading `supportsEndpointing` off the STT primary even
+  when health has failed over to the backup, carried out of TASK-030.
+- `TC-071`'s "`session:start` still succeeds during the model download" half,
+  carried out of Milestone 2, then TASK-040, then TASK-041.
+- Nothing calling `noteAudio` or `noteGeneration`, carried out of TASK-041.
+
 ### TASK-042 Dashboard UI
 **Traces** FR-023, FR-024, FR-025, FR-026, FR-027, FR-028, FR-029, FR-030, FR-031, FR-032, FR-038, FR-080, FR-087, FR-088, FR-110, NFR-010, NFR-014
-**Depends on** TASK-003, TASK-004, TASK-014, TASK-025, TASK-041
+**Depends on** TASK-003, TASK-004, TASK-014, TASK-025, TASK-041, TASK-044
 **Acceptance criteria**
 - All six sections exist: Provider Setup, Company Profiles, Session History,
   Hotkeys, Cost and Usage, Consent Reminder.
