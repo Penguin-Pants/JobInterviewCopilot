@@ -354,9 +354,29 @@ entry is one `write()` of one complete line ending in a newline, so a crash can
 lose a line but cannot tear one. A `.ndjson` file found at startup means a crash.
 It is compacted with `endReason: 'crash-recovered'`, discarding an unparseable
 final line. When both a `.json` and a `.ndjson` exist for one session the `.json`
-wins and the `.ndjson` is deleted. A `session.lock` file next to the sessions
-folder enforces one session at a time across restarts and is cleared by the same
+wins and the `.ndjson` is deleted. A `session.lock` file at the `userData` root
+enforces one session at a time across restarts and is cleared by the same
 recovery pass. This satisfies `FR-105`, `FR-107` and `FR-108`.
+
+**Corrected during `TASK-040`.** This paragraph previously placed the lock "next
+to the sessions folder". There is one such folder per profile, so that reading
+permits one concurrent session *per profile*, while `FR-108` and `ADR-013` both
+say one session, full stop. The lock is at the `userData` root.
+
+Three further rules settled while implementing `TASK-040`:
+
+- **Only the final line of an `.ndjson` may be discarded.** A torn tail is the
+  crash signature. A malformed line anywhere else means the writer did not write
+  whole lines, which is a defect rather than a crash, so it is raised rather
+  than silently dropped.
+- **Compaction writes the `.json` through a temporary file and renames it.** A
+  crash between writing the `.json` and deleting the `.ndjson` would otherwise
+  leave a half-written `.json` whose source had already gone. The rename is
+  atomic, so one of the two files is always complete.
+- **Only the recovery pass clears the lock, never `session:start`.** A lock held
+  by a live process must refuse the start; clearing it there would silently
+  overwrite a running session's transcript. Recovery runs when no session of
+  ours exists, so any lock it finds is from a process that is gone.
 
 ### 2.6 Runtime events (not persisted)
 
