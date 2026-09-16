@@ -32,4 +32,17 @@ export interface CopilotBridge {
     payload?: InvokePayload<C>,
   ): Promise<InvokeResponse<C> | IpcError>;
   on<C extends PushChannel>(channel: C, listener: (payload: PushPayload<C>) => void): () => void;
+  /**
+   * The absolute path of a file the user dropped on this window (ADR-037).
+   *
+   * Optional, and present only in the Dashboard preload. `File.path` was
+   * removed from Electron's renderer, so `webUtils.getPathForFile` is the only
+   * way a drop can name a file on disk, and it has to be called in the preload.
+   * The overlay accepts no drops and does not expose it, which is why this is
+   * optional rather than required: a window that cannot drop cannot resolve.
+   *
+   * Returns an empty string when the path cannot be resolved, which is what a
+   * drop that is not a real file (a browser image, a text selection) gives.
+   */
+  pathForFile?(file: File): string;
 }

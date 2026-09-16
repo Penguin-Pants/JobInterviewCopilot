@@ -966,6 +966,65 @@ is pinned by a test checked to fail without it.
 
 ---
 
+### ADR-037 — Where a document's path comes from, and how a key check is bounded
+
+**Status.** Accepted, TASK-042.
+
+**Context.** Two things the Dashboard needs had no home in the contract.
+
+1. `TASK-042`'s acceptance criteria require drag-and-drop import. No `FR-`
+   requires it; `FR-063` is about chunk metadata and does not apply. `File.path`
+   was removed from Electron's renderer, so a dropped file has no path unless
+   the preload calls `webUtils.getPathForFile`, which is reachable from a
+   preload only.
+2. Milestone 2 carried a follow-up into this task: `doc:import` takes an
+   unbounded array of absolute paths the renderer supplies, and there was no
+   main-process dialog choosing them.
+3. `FR-026` requires an inline pass or fail **within 10 seconds**. No adapter
+   carries a deadline, so a wedged connection left the Dashboard with a
+   spinner and no answer at all.
+
+**Decision.**
+
+- The Dashboard preload exposes `pathForFile(file): string`, wrapping
+  `webUtils.getPathForFile`. It is optional on `CopilotBridge` and absent from
+  the overlay preload: a window that accepts no drops has no reason to resolve
+  a path. It returns an empty string for a drop that is not a file on disk, so
+  one text selection in a multi-item drop does not abandon the whole drop.
+- `CH-125` `doc:pickFiles` runs `dialog.showOpenDialog` in the main process
+  **and** imports what was chosen, in one channel. Returning the paths to the
+  renderer so it could call `doc:import` would put them straight back under
+  renderer control and would close nothing.
+- `doc:import` keeps taking renderer-supplied paths, because drag and drop
+  cannot work any other way. What bounds that path is the extension allowlist
+  in `CMP-06`, **not** `basename`: `basename` decides the name the copy lands
+  under inside `kb/`, it does not decide what may be read. Milestone 2's
+  follow-up said `basename`, which was the wrong reason for a true conclusion
+  and would have misled whoever closed it. A compromised renderer can still ask
+  for any Markdown, PDF or Word file on the disk, which is why the remainder is
+  carried to TASK-050 rather than declared closed.
+- The 10-second deadline sits in the main process, in front of the save, not in
+  the renderer. A renderer timeout cannot stop the in-flight call from saving a
+  key the user has already been told was refused; a deadline in front of the
+  save can, and a validation that does not answer in time saves nothing and
+  reports a named failure.
+
+**Rejected.** A `showOpenDialog`-only channel returning paths: it adds a dialog
+without changing who is trusted. Reading the dropped bytes in the renderer and
+sending them over IPC: it would put document contents on the IPC bus for no
+gain, since the main process already opens the file. A renderer-side validation
+timeout: it can report a failure the main process is about to contradict.
+
+**Consequence.** `docs/02-architecture.md` section 4 carries `CH-125` and the
+preload member. The follow-up Milestone 2 carried about renderer-trusted paths
+is closed for the button path and explicitly left open for drag and drop, which
+is where it is unavoidable. The dialog's file filter is read from
+`SUPPORTED_EXTENSIONS`, re-exported from the `CMP-06` facade: a private copy in
+the handler had already drifted and hid `.markdown` from the picker while drag
+and drop accepted it.
+
+---
+
 ## 3a. Open questions
 
 OQ-001 and OQ-002 were put to the product owner on 2026-09-15 and answered.

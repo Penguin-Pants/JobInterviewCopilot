@@ -59,6 +59,15 @@ export class RetrievalUnavailableError extends Error {
 /** The embedding model's lifecycle, as CH-124 and CH-214 carry it (ADR-011, ADR-026). */
 export type { ModelDownloadState } from './rag/embed.js';
 export { KB_CEILING } from '../shared/defaults.js';
+/**
+ * The file extensions the knowledge base accepts (FR-060).
+ *
+ * Re-exported from the facade because the import dialog in the main process
+ * needs the same list and may not deep-import `rag/convert.ts` (CMP-06). The
+ * dialog had its own copy and it had already drifted: `.markdown` imported by
+ * drag and drop and by a copy into `kb/`, but was greyed out in the picker.
+ */
+export { SUPPORTED_EXTENSIONS } from './rag/convert.js';
 
 /** How a doc type was set. `'auto'` re-runs the guess (FR-079). */
 export type DocTypeAssignment = DocType | 'auto';

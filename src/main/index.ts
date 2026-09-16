@@ -2,11 +2,13 @@ import { join } from 'node:path';
 import {
   app,
   BrowserWindow,
+  dialog,
   globalShortcut,
   ipcMain,
   safeStorage,
   screen,
   session,
+  type OpenDialogOptions,
 } from 'electron';
 import { AudioSupervisor } from './audio.js';
 import {
@@ -26,7 +28,7 @@ import { IpcRouter, push } from './ipc/router.js';
 import { LiveSessionLoop } from './live.js';
 import { getLogger, initLogger } from './logger.js';
 import { OverlayGate, type GatedMessage } from './overlay-gate.js';
-import { RagEngine } from './rag.js';
+import { RagEngine, SUPPORTED_EXTENSIONS } from './rag.js';
 import { SecretVaultStore } from './secrets.js';
 import {
   SessionManager,
@@ -53,6 +55,7 @@ import type {
   Session,
   Settings,
   StreamState,
+  ValidationResult,
 } from '../shared/types.js';
 import { findLlmProvider } from '../shared/registry/llm.js';
 import { findSttModel, findSttProvider } from '../shared/registry/stt.js';
@@ -92,6 +95,58 @@ let live: LiveSessionLoop;
  */
 let recoveryComplete: Promise<void> = Promise.resolve();
 
+/**
+ * Resolves once the profile list is real, which is not the same moment as the
+ * app being interactive (FR-027, FR-028, TASK-042).
+ *
+ * `startKnowledgeBase` is deliberately not awaited by bootstrap, so the
+ * Dashboard's renderer loads alongside it. Its first `profile:list` could
+ * therefore be answered **before** `ensureActiveProfile` had created the
+ * default profile, and it got `[]` with `activeProfileId` still empty. Nothing
+ * pushes a profile list, so that empty answer stood for the whole session: a
+ * fresh install showed "no profile" and an empty Company Profiles section over
+ * a profile that existed.
+ *
+ * `profile:list` waits on this and nothing else. Reconciliation reads every
+ * file in every `kb/` and only changes document *states*, which arrive on
+ * `CH-213`, so making the list wait for it as well would delay the first paint
+ * for no gain.
+ *
+ * Created here at module scope, not inside `bootstrap`. The windows are created
+ * before the knowledge base is started, so a promise assigned in bootstrap was
+ * still the resolved placeholder when the Dashboard's first `profile:list`
+ * arrived: the gate existed and the race went through it anyway.
+ *
+ * The wait is bounded. A gate that is never released turns a degraded start
+ * into an invoke that never settles: the router has no timeout and neither does
+ * the renderer, so Company Profiles would render nothing, forever, with no
+ * error to show. An answer that may be incomplete beats no answer at all, so
+ * the deadline reports what exists rather than waiting on what may not come.
+ */
+let markProfilesReady: () => void = () => undefined;
+const profilesReady: Promise<void> = new Promise<void>((resolve) => {
+  markProfilesReady = resolve;
+});
+
+const PROFILES_READY_DEADLINE_MS = 10_000;
+
+async function profilesReadyWithin(ms: number): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<void>((resolve) => {
+    timer = setTimeout(() => {
+      getLogger().warn('the profile list was requested before the profiles were ready', {
+        waitedMs: ms,
+      });
+      resolve();
+    }, ms);
+  });
+  try {
+    await Promise.race([profilesReady, deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 let dashboardWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
 let overlayInteractive = false;
@@ -110,7 +165,15 @@ if (!app.requestSingleInstanceLock()) {
     // background process.
     void focusOrRecreateDashboard();
   });
-  void bootstrap();
+  // Released on the failure path too. `startKnowledgeBase` is the only caller
+  // of `markProfilesReady`, and it runs on the last line of `bootstrap`, so a
+  // bootstrap that threw earlier left every `profile:list` awaiting a promise
+  // nothing would ever settle. The old behavior on that path was an empty list:
+  // degraded, but the app still rendered.
+  void bootstrap().catch((err) => {
+    getLogger().error('bootstrap failed', err);
+    markProfilesReady();
+  });
 }
 
 async function bootstrap(): Promise<void> {
@@ -346,9 +409,18 @@ async function bootstrap(): Promise<void> {
 async function startKnowledgeBase(): Promise<void> {
   try {
     await ensureActiveProfile();
+    // Released here, not at the end: the list is complete once the profiles
+    // exist, and `rag.start()` reconciles every document behind it.
+    markProfilesReady();
     await rag.start();
   } catch (err) {
     getLogger().error('the knowledge base failed to start', err);
+  } finally {
+    // Released again in case `ensureActiveProfile` itself threw. A Dashboard
+    // waiting on a promise that never settles is worse than one showing an
+    // empty list, because it never renders the section at all. `resolve` is
+    // idempotent, so the common path is unaffected.
+    markProfilesReady();
   }
 
   // Crash recovery (FR-105, FR-108). Any `.ndjson` left on disk means the
@@ -734,6 +806,43 @@ function assertProfile(profileId: string): string {
   return profileId;
 }
 
+/**
+ * `FR-026`: an inline pass or fail within 10 seconds, every time.
+ *
+ * The adapters validate over the network and none of them carries its own
+ * deadline, so a wedged connection left the Dashboard with a spinner and no
+ * answer. A timeout in the renderer could not close that: the call would still
+ * be in flight and could still save a key the user had been told was refused.
+ * The deadline therefore sits here, in front of the save, so a validation that
+ * has not answered in time saves nothing and reports a named failure.
+ */
+const KEY_VALIDATION_DEADLINE_MS = 10_000;
+
+async function validateWithinDeadline(
+  credentialId: CredentialId,
+  key: string,
+): Promise<ValidationResult> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<ValidationResult>((resolve) => {
+    timer = setTimeout(
+      () =>
+        resolve({
+          ok: false,
+          reason:
+            `The ${credentialId} check did not answer within ` +
+            `${KEY_VALIDATION_DEADLINE_MS / 1000} seconds. The key is not saved. ` +
+            'Check the network and try again.',
+        }),
+      KEY_VALIDATION_DEADLINE_MS,
+    );
+  });
+  try {
+    return await Promise.race([validateCredential(credentialId, key), deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function registerIpcHandlers(): void {
   router.handle('config:get', () => config.get());
   router.handle('config:set', async (patch) => {
@@ -761,7 +870,7 @@ function registerIpcHandlers(): void {
 
   router.handle('secrets:status', () => secrets.status());
   router.handle('secrets:set', async ({ provider, key }) => {
-    const result = await secrets.set(provider, key, validateCredential);
+    const result = await secrets.set(provider, key, validateWithinDeadline);
     // A saved, validated key is the only thing that clears CONFIG_REQUIRED for
     // that credential (FR-026, ADR-024). Checked on the result, because a key
     // that failed validation was never saved and changes nothing.
@@ -984,7 +1093,16 @@ function registerIpcHandlers(): void {
 
   /* ---- Profiles and the knowledge base (CMP-06, TASK-020 to TASK-025) ---- */
 
-  router.handle('profile:list', () => rag.listProfiles());
+  /**
+   * The profile list, once there is one to list (FR-027, FR-028).
+   *
+   * Awaits `profilesReady` so a Dashboard that mounted while bootstrap was
+   * still creating the default profile is not answered `[]` forever.
+   */
+  router.handle('profile:list', async () => {
+    await profilesReadyWithin(PROFILES_READY_DEADLINE_MS);
+    return rag.listProfiles();
+  });
 
   router.handle('profile:create', async ({ name }) => rag.createProfile(name));
 
@@ -1033,6 +1151,40 @@ function registerIpcHandlers(): void {
   router.handle('doc:delete', async ({ docId, profileId }) => {
     await rag.deleteDocument(assertProfile(profileId), docId);
     return { ok: true as const };
+  });
+
+  /**
+   * Choose documents in a main-process dialog and import them (`CH-125`,
+   * ADR-037, TASK-042).
+   *
+   * The dialog runs here, so the Add documents button never hands the main
+   * process a path a renderer chose. Drag and drop still reaches `doc:import`,
+   * because a drop is the one case where only the renderer knows what was
+   * dropped. What bounds a renderer-supplied source path there is the extension
+   * allowlist in `CMP-06`, not `basename`: `basename` decides the name the copy
+   * lands under inside `kb/`, it does not decide what may be read.
+   *
+   * A cancelled dialog answers `[]`. It is not an error and the Dashboard must
+   * not render it as one.
+   */
+  router.handle('doc:pickFiles', async ({ profileId }) => {
+    const profile = assertProfile(profileId);
+    const parent = dashboardWindow && !dashboardWindow.isDestroyed() ? dashboardWindow : null;
+    const options: OpenDialogOptions = {
+      title: 'Add documents to this knowledge base',
+      properties: ['openFile', 'multiSelections'],
+      // Read from the engine, never written out here. A private copy had
+      // already drifted: `.markdown` imported by drag and drop and by a copy
+      // into `kb/`, and was greyed out in this picker (FR-060).
+      filters: [
+        { name: 'Documents', extensions: SUPPORTED_EXTENSIONS.map((ext) => ext.replace('.', '')) },
+      ],
+    };
+    const picked = parent
+      ? await dialog.showOpenDialog(parent, options)
+      : await dialog.showOpenDialog(options);
+    if (picked.canceled || picked.filePaths.length === 0) return [];
+    return rag.importDocuments(profile, picked.filePaths);
   });
 
   /**

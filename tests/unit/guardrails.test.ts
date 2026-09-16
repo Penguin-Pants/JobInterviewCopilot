@@ -955,3 +955,81 @@ describe('TASK-044 live loop wiring', () => {
     expect(loop).not.toMatch(/from 'electron'/);
   });
 });
+
+/**
+ * TASK-042. Three main-process behaviours the Dashboard depends on.
+ *
+ * `src/main/index.ts` is excluded from coverage and is not importable from a
+ * unit test, so this file is where its behaviour is pinned. Each of these was a
+ * defect found in review rather than a convention.
+ */
+describe('TASK-042 the main-process half of the Dashboard', () => {
+  const source = (): string => readFileSync(join(process.cwd(), 'src', 'main', 'index.ts'), 'utf8');
+
+  function handlerBody(channel: string): string {
+    const text = source();
+    const start = text.indexOf(`router.handle('${channel}'`);
+    expect(start, `${channel} has no handler`).toBeGreaterThan(-1);
+    const next = text.indexOf('router.handle(', start + 1);
+    return text.slice(start, next === -1 ? undefined : next);
+  }
+
+  /**
+   * The Dashboard's first `profile:list` used to race bootstrap and get `[]`,
+   * which stood for the life of the window because nothing pushes a profile
+   * list. The gate that fixed it must exist before the windows do.
+   */
+  it('creates the profile gate at module scope, not inside bootstrap', () => {
+    const text = source();
+    const gate = text.indexOf('const profilesReady: Promise<void>');
+    const boot = text.indexOf('async function bootstrap(');
+    expect(gate, 'profilesReady is not declared').toBeGreaterThan(-1);
+    expect(gate, 'the gate is created after bootstrap is defined').toBeLessThan(boot);
+    // A promise assigned inside bootstrap is still the placeholder when the
+    // first call arrives, so the gate exists and the race goes through it.
+    expect(text).not.toMatch(/profilesReady = new Promise/);
+  });
+
+  it('waits for the gate in profile:list, and bounds the wait', () => {
+    expect(handlerBody('profile:list')).toContain('profilesReadyWithin');
+    // The router has no timeout and neither does the renderer's bridge, so an
+    // unreleased gate would be an invoke that never settles: Company Profiles
+    // renders nothing, forever, with no error to show.
+    expect(source()).toContain('Promise.race([profilesReady, deadline])');
+  });
+
+  it('releases the gate when bootstrap itself fails', () => {
+    const text = source();
+    const call = text.slice(
+      text.indexOf('void bootstrap()'),
+      text.indexOf('async function bootstrap('),
+    );
+    expect(call, 'a bootstrap failure leaves profile:list awaiting forever').toContain(
+      'markProfilesReady()',
+    );
+  });
+
+  /** FR-026: an inline pass or fail within 10 seconds, every time. */
+  it('bounds key validation in front of the save, not in the renderer', () => {
+    const text = source();
+    expect(handlerBody('secrets:set')).toContain('validateWithinDeadline');
+    expect(text).toContain('KEY_VALIDATION_DEADLINE_MS = 10_000');
+    // A renderer-side timeout cannot stop an in-flight call from saving a key
+    // the user has already been told was refused.
+    expect(text).toMatch(/Promise\.race\(\[validateCredential\(credentialId, key\), deadline\]\)/);
+  });
+
+  /** ADR-037: the dialog runs in main, and it asks the engine what it accepts. */
+  it('picks files in the main process, for a profile it has asserted', () => {
+    const body = handlerBody('doc:pickFiles');
+    expect(body).toContain('assertProfile(profileId)');
+    expect(body).toContain('dialog.showOpenDialog');
+    // A cancel is an answer, not a failure, and the Dashboard must not render
+    // it as one.
+    expect(body).toContain('if (picked.canceled || picked.filePaths.length === 0) return []');
+    // The extension list is read, never repeated: a private copy had already
+    // drifted and hid one supported extension from the picker.
+    expect(body).toContain('SUPPORTED_EXTENSIONS');
+    expect(body).not.toMatch(/extensions: \['/);
+  });
+});

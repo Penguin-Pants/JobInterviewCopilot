@@ -358,6 +358,29 @@ export const invokeChannels = {
     payload: z.void(),
     response: modelDownloadState,
   },
+  /**
+   * Choose documents in a main-process dialog and import them (ADR-037).
+   *
+   * `doc:import` takes an array of absolute paths the renderer supplies, which
+   * is what drag and drop can offer and nothing else. This channel is the path
+   * where the **main** process picks the files, so the Add documents button
+   * never asks a renderer for a path at all. The dialog and the import are one
+   * channel deliberately: returning the paths to the renderer so that it could
+   * call `doc:import` would put them back under renderer control and close
+   * nothing (TASK-042).
+   *
+   * What still bounds `doc:import` is the extension allowlist in `CMP-06`, not
+   * `basename`. `basename` decides the name a copy lands under inside `kb/`; it
+   * does not decide which files may be read.
+   *
+   * An empty array is the answer when the user cancels. A cancel is not an
+   * error and must not render as one.
+   */
+  'doc:pickFiles': {
+    id: 'CH-125',
+    payload: z.object({ profileId: z.string() }),
+    response: z.array(documentRecord),
+  },
 } as const;
 
 /* ------------------------------------------------------------------ *

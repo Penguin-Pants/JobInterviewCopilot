@@ -1,0 +1,218 @@
+/**
+ * Overlay and appearance (FR-009, FR-029, FR-080, FR-085, NFR-012).
+ *
+ * `FR-087` names six sections. This is the seventh and it is deliberate: the
+ * theme, the translucency mode, the opacity level and the overlay font size are
+ * settings `FR-029` and `TASK-043` require to be adjustable from the Dashboard,
+ * and none of the six named sections is their home. Reset Overlay (`FR-009`)
+ * has lived here since Milestone 0.
+ */
+import { useEffect, useRef, useState, type JSX } from 'react';
+import { SETTINGS_LIMITS } from '../../../shared/defaults.js';
+import type { OverlayTranslucency, Settings, ThemeMode } from '../../../shared/types.js';
+import { call } from '../call.js';
+
+const THEME_MODES: ThemeMode[] = ['light', 'dark', 'system'];
+const TRANSLUCENCY: OverlayTranslucency[] = ['opacity', 'acrylic'];
+
+export interface OverlayAppearanceProps {
+  settings: Settings;
+  captureNotice: string | null;
+  onSettingsChanged: () => Promise<void>;
+}
+
+export function OverlayAppearance({
+  settings,
+  captureNotice,
+  onSettingsChanged,
+}: OverlayAppearanceProps): JSX.Element {
+  const [theme, setTheme] = useState(settings.theme);
+  const [resetState, setResetState] = useState<'idle' | 'done' | 'failed'>('idle');
+  const [error, setError] = useState<string | null>(null);
+
+  // Keyed on the value, for the same reason the other sections are: a settings
+  // reload triggered by an unrelated save must not snap a slider the user is
+  // still dragging back to the stored value.
+  const storedTheme = JSON.stringify(settings.theme);
+  useEffect(() => {
+    // Not while an adjustment is uncommitted, or a settings reload caused by
+    // another section would snap a slider out from under the pointer.
+    if (pending.current) return;
+    setTheme(JSON.parse(storedTheme) as Settings['theme']);
+  }, [storedTheme]);
+
+  /**
+   * Write the theme, once, and never from inside a drag.
+   *
+   * A `range` fires `change` on every step, and each write was followed by a
+   * `config:get` that re-seeded the control from the answer. Dragging opacity
+   * across its range issued a dozen unordered write-then-read pairs: the last
+   * *response* won the slider, the last *write* to land won the disk, and the
+   * two need not be the same one. The slider visibly jumped backwards and the
+   * settings file was rewritten once per pointer step.
+   *
+   * So a continuous control updates local state while it moves and commits when
+   * it is released, which is one write for one adjustment. Discrete controls, a
+   * select and the theme mode, commit immediately: there is no intermediate
+   * value to write.
+   */
+  const pending = useRef<Settings['theme'] | null>(null);
+
+  /**
+   * The next value is computed here, not inside the state updater.
+   *
+   * A `setTheme(current => { pending.current = …; })` runs its updater when
+   * React processes the update, which is after this function has returned, so a
+   * discrete control that committed on the next line found `pending` still
+   * empty and wrote nothing at all. An updater is also re-invoked under
+   * StrictMode, which makes it the wrong place for a side effect either way.
+   * One event carries one change, so reading `theme` here cannot be stale.
+   */
+  function editTheme(patch: Partial<Settings['theme']>): Settings['theme'] {
+    const next = { ...theme, ...patch };
+    pending.current = next;
+    setTheme(next);
+    return next;
+  }
+
+  async function commitTheme(): Promise<void> {
+    const next = pending.current;
+    if (!next) return;
+    pending.current = null;
+    setError(null);
+    const result = await call('config:set', { theme: next });
+    if (!result.ok) {
+      setError(result.message);
+      // Put the control back to what is actually stored, rather than leaving a
+      // value on screen that the main process refused.
+      setTheme(settings.theme);
+      return;
+    }
+    await onSettingsChanged();
+  }
+
+  function writeTheme(patch: Partial<Settings['theme']>): void {
+    editTheme(patch);
+    void commitTheme();
+  }
+
+  return (
+    <section data-testid="section-overlay" aria-labelledby="overlay-heading">
+      <h2 id="overlay-heading">Overlay and appearance</h2>
+
+      {captureNotice ? (
+        <p role="status" data-testid="capture-fidelity-notice">
+          {captureNotice}
+        </p>
+      ) : null}
+
+      <label htmlFor="theme-mode">Theme</label>
+      <select
+        id="theme-mode"
+        data-testid="theme-mode"
+        value={theme.mode}
+        onChange={(e) => writeTheme({ mode: e.target.value as ThemeMode })}
+      >
+        {THEME_MODES.map((mode) => (
+          <option key={mode} value={mode}>
+            {mode}
+          </option>
+        ))}
+      </select>
+
+      <label htmlFor="theme-accent">Accent color</label>
+      <input
+        id="theme-accent"
+        data-testid="theme-accent"
+        type="color"
+        value={theme.accent}
+        onChange={(e) => editTheme({ accent: e.target.value })}
+        onBlur={() => void commitTheme()}
+      />
+
+      <label htmlFor="overlay-translucency">Overlay translucency</label>
+      <select
+        id="overlay-translucency"
+        data-testid="overlay-translucency"
+        value={theme.overlayTranslucency}
+        onChange={(e) => writeTheme({ overlayTranslucency: e.target.value as OverlayTranslucency })}
+      >
+        {TRANSLUCENCY.map((mode) => (
+          <option key={mode} value={mode}>
+            {mode}
+          </option>
+        ))}
+      </select>
+      <p data-testid="translucency-note">
+        Acrylic needs Windows 11. Changing this mode rebuilds the overlay window, keeping its
+        position, its monitor and its click-through state.
+      </p>
+
+      <label htmlFor="overlay-opacity">
+        Overlay opacity ({SETTINGS_LIMITS.overlayOpacity.min} to{' '}
+        {SETTINGS_LIMITS.overlayOpacity.max})
+      </label>
+      <input
+        id="overlay-opacity"
+        data-testid="overlay-opacity"
+        type="range"
+        min={SETTINGS_LIMITS.overlayOpacity.min}
+        max={SETTINGS_LIMITS.overlayOpacity.max}
+        step="0.05"
+        value={theme.overlayOpacity}
+        onChange={(e) => editTheme({ overlayOpacity: Number(e.target.value) })}
+        onPointerUp={() => void commitTheme()}
+        onKeyUp={() => void commitTheme()}
+        onBlur={() => void commitTheme()}
+      />
+      <output htmlFor="overlay-opacity" data-testid="overlay-opacity-value">
+        {theme.overlayOpacity.toFixed(2)}
+      </output>
+
+      <label htmlFor="overlay-font-size">
+        Overlay text size in pixels ({SETTINGS_LIMITS.overlayFontSizePx.min} to{' '}
+        {SETTINGS_LIMITS.overlayFontSizePx.max})
+      </label>
+      <input
+        id="overlay-font-size"
+        data-testid="overlay-font-size"
+        type="range"
+        min={SETTINGS_LIMITS.overlayFontSizePx.min}
+        max={SETTINGS_LIMITS.overlayFontSizePx.max}
+        step="1"
+        value={theme.overlayFontSizePx}
+        onChange={(e) => editTheme({ overlayFontSizePx: Number(e.target.value) })}
+        onPointerUp={() => void commitTheme()}
+        onKeyUp={() => void commitTheme()}
+        onBlur={() => void commitTheme()}
+      />
+      <output htmlFor="overlay-font-size" data-testid="overlay-font-size-value">
+        {theme.overlayFontSizePx}
+      </output>
+
+      <button
+        type="button"
+        data-testid="reset-overlay"
+        onClick={() => {
+          // An IPC rejection resolves like any other response, so it has to be
+          // checked. Reporting it as success is how a failed reset looked fine.
+          void call('overlay:reset').then((result) => setResetState(result.ok ? 'done' : 'failed'));
+        }}
+      >
+        Reset Overlay
+      </button>
+      {resetState === 'done' ? <span data-testid="reset-overlay-done">Overlay reset</span> : null}
+      {resetState === 'failed' ? (
+        <span role="alert" data-testid="reset-overlay-failed">
+          Could not reset the overlay. See the log for details.
+        </span>
+      ) : null}
+
+      {error ? (
+        <p role="alert" data-testid="appearance-error">
+          {error}
+        </p>
+      ) : null}
+    </section>
+  );
+}
