@@ -759,6 +759,88 @@ a visible failure rather than a silent one.
 
 ---
 
+### ADR-030 — Document channels name their profile, and the model gate is a state, not a percent
+
+**Decided 2026-09-16 during Milestone 2.** Three gaps found while implementing
+`TASK-020` to `TASK-025`, all closed in the same change as the documents they
+correct (DoD 9).
+
+**Context.** `FR-079` requires two things the IPC contract had no way to express:
+a doc-type override "resettable to `auto`", and a document in `error` that
+"retries from the Dashboard without re-import". `CH-110` typed its payload over
+the closed `DocType` union, which has no value meaning automatic, and no channel
+carried a retry at all, so the only way back from `error` was `doc:import`, which
+would have made the user find the original file again.
+
+Separately, `ADR-026` promises a fresh install with no network an explicit
+"embedding model not downloaded" state with a retry action, and `TC-161` asserts
+it. `CH-214` carried `{ percent, done }`, which can say "not finished" but cannot
+say "failed, here is why, you may retry".
+
+**Decision.**
+- `CH-110` accepts `DocType | 'auto'`. One channel sets the field, in both
+  directions. A second channel for the reset would have given the Dashboard two
+  ways to set one thing.
+- `CH-110`, `CH-111` and the new `CH-123 doc:retry` all carry `profileId` beside
+  `docId`. A document id alone forces the main process to scan every profile to
+  find its owner, and `kb/` being authoritative (`ADR-014`) means a stale id can
+  outlive its record. Naming the profile makes the lookup one directory read and
+  makes `FR-069`'s "exactly one profile" explicit at the boundary.
+- `CH-214` carries a `ModelDownloadState` discriminated union, and the new
+  `CH-124 model:ensure` returns the same type. A push and a request that describe
+  the same model must not be able to disagree.
+- The embedding model gets its own registry, `src/shared/registry/embedding.ts`,
+  separate from the STT and LLM registries. It carries no `credentialId`, because
+  it runs locally, and that is the property `NFR-008` and `ADR-026` rest on.
+
+**Also found and fixed while implementing.**
+- `Profile.createdAt` alone did not order the profile list. Two profiles created
+  in the same millisecond share a timestamp, and the tie-break was a random
+  uuid, so the Dashboard's list reordered itself between launches. `create` now
+  stamps `createdAt` strictly later than every existing profile's.
+- The license gate could not read three of the four new dependencies' licenses.
+  `pako` declares `(MIT AND Zlib)` and the checker only split on `OR`;
+  `flatbuffers` declares `SEE LICENSE IN LICENSE.txt`; `duck` declares a bare
+  `BSD`, which names a family and not a license. The gate now evaluates `AND` as
+  well as `OR` and resolves a file-or-family declaration by reading the package's
+  own license text, rather than being widened to let the three through on trust.
+  `BSD-3-Clause` is matched before `BSD-2-Clause`, because the 3-clause text
+  contains the whole 2-clause text.
+
+**Consequence.** `docs/02-architecture.md` section 2.1a, section 4 and section 11
+are corrected in the same change. `CH-121`, `CH-122` and `CH-215`, which landed
+in Milestone 0, are recorded in section 4's table for the first time.
+
+**Corrected during the pre-push review, same change.** Two of these change what a
+document already says, so they are recorded here rather than only in the task
+notes.
+
+- **`ADR-023`'s cap is enforced by the registry, and lowered by the model.** The
+  first implementation read the limit only from the model's files, which is what
+  `ADR-023` asks for, and it resolved to **512** on every real install.
+  `@xenova/transformers` fetches `tokenizer.json`, `tokenizer_config.json` and
+  `config.json`; it never fetches `sentence_bert_config.json`, which is the
+  Python sentence-transformers artifact holding MiniLM's real 256. The only limit
+  on disk was therefore the BERT backbone's 512, so chunks of up to 510 word
+  pieces were produced and silently truncated at embed time: exactly the failure
+  `ADR-023` exists to prevent. The descriptor's `maxSeqLength` is now a ceiling
+  and a config on disk can only lower it. `ADR-023`'s intent survives, because a
+  model swap carries its own registry limit and a stricter config still wins.
+- **`CH-214` is pushed once at startup.** There is no read-only model-state
+  channel, and `CH-214` only fires on a change, so a fresh install could not
+  render `ADR-026`'s "embedding model not downloaded" state without invoking
+  `model:ensure`, which would begin a 90 MB download unprompted on every launch.
+  The main process pushes the initial state once the Dashboard exists.
+- **A failed model attempt is terminal until the user retries.** Ingestion
+  consults the gate per file, and retrying automatically made an offline import
+  of five documents attempt five full downloads, each waiting out the library's
+  own network timeout with `doc:import` unresolved: the hang `NFR-008` and
+  `ADR-026` forbid. `model:ensure` carries `userInitiated`, and a retry that
+  succeeds also re-processes the documents it unblocked, since nothing else
+  revisits a `pending` document before the next launch.
+
+---
+
 ## 5. Out of scope for v1
 
 Carried forward from product discovery. Do not add without a new decision.

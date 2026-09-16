@@ -160,6 +160,13 @@ export default [
   },
   {
     files: ['tests/**/*.ts', '**/*.test.ts'],
-    rules: { '@typescript-eslint/no-explicit-any': 'off' },
+    rules: {
+      '@typescript-eslint/no-explicit-any': 'off',
+      // The facade rule keeps production code from coupling to the RAG
+      // internals (CMP-06). A unit test of `rag/chunk.ts` has to import
+      // `rag/chunk.ts`; routing it through the facade would test the facade
+      // instead, which is what `tests/integration/rag-*.test.ts` already does.
+      'no-restricted-imports': 'off',
+    },
   },
 ];

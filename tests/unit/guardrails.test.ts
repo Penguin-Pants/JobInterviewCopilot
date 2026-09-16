@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { INVOKE_CHANNEL_NAMES, type InvokeChannel } from '../../src/shared/ipc.js';
 
 /**
  * The lint rules that carry guardrails rather than style.
@@ -247,6 +248,143 @@ describe('FR-082 overlay is actually draggable in interactive mode', () => {
 });
 
 /**
+ * FR-009 / TC-148 regression: `overlayWindow` was assigned from
+ * `await createOverlayWindow(...)`, so it stayed null for the whole of the
+ * overlay's renderer load while the Dashboard was already interactive and the
+ * window was already in `BrowserWindow.getAllWindows()`. `overlay:reset`
+ * arriving in that window failed its `if (overlayWindow)` guard, moved nothing
+ * and returned `ok`, so the Dashboard rendered "Overlay reset" over a window
+ * that had not moved. Reproduced on Linux by delaying that one assignment.
+ */
+describe('FR-009 the overlay is reachable before its renderer finishes loading', () => {
+  it('assigns overlayWindow from the creation callback, not the promise', () => {
+    const source = readFileSync('src/main/index.ts', 'utf8');
+    const bootstrap = source.slice(
+      source.indexOf('async function bootstrap('),
+      source.indexOf('async function startKnowledgeBase('),
+    );
+
+    expect(bootstrap).toContain('await createOverlayWindow(settings, (win) => {');
+    expect(bootstrap).toContain('overlayWindow = win;');
+    // The awaited form is what leaves the variable null across the load.
+    expect(bootstrap).not.toMatch(/overlayWindow = await createOverlayWindow\(settings\);/);
+  });
+
+  it('hands the window over before the renderer load', () => {
+    const source = readFileSync('src/main/windows.ts', 'utf8');
+    const create = source.slice(source.indexOf('export async function createOverlayWindow('));
+    const handOver = create.indexOf('onCreated?.(win)');
+    const load = create.indexOf("loadRenderer(win, 'overlay')");
+
+    expect(handOver).toBeGreaterThan(-1);
+    expect(load).toBeGreaterThan(-1);
+    expect(handOver, 'the window must be handed over before its load is awaited').toBeLessThan(
+      load,
+    );
+  });
+
+  it('overlay:reset fails loudly when there is no overlay rather than reporting ok', () => {
+    const source = readFileSync('src/main/index.ts', 'utf8');
+    const handler = source.slice(source.indexOf("router.handle('overlay:reset'"));
+    const body = handler.slice(0, handler.indexOf("router.handle('overlay:ready'"));
+
+    // Silently skipping the move and still returning ok is what hid TC-148.
+    expect(body).toContain('There is no overlay window to reset.');
+    expect(body).not.toMatch(/if \(overlayWindow && !overlayWindow\.isDestroyed\(\)\) \{/);
+  });
+});
+
+/**
+ * NFR-009 regression: knowledge base startup was awaited inside `bootstrap`
+ * between the windows being created and `window-all-closed` / `will-quit` being
+ * registered. Reconciling a knowledge base reads every file in every profile,
+ * and starting a watcher pulls chokidar in through a dynamic ESM import, so a
+ * slow or wedged knowledge base left the app interactive with no shutdown
+ * wiring at all. It also delayed everything after it, which is the kind of
+ * timing shift TC-148 is sensitive to on Windows.
+ */
+describe('NFR-009 app lifecycle handlers are registered before slow startup work', () => {
+  /** The body of `bootstrap`, which ends where `startKnowledgeBase` begins. */
+  function bootstrapSource(): string {
+    const source = readFileSync('src/main/index.ts', 'utf8');
+    return source.slice(
+      source.indexOf('async function bootstrap('),
+      source.indexOf('async function startKnowledgeBase('),
+    );
+  }
+
+  it('registers window-all-closed and will-quit before starting the knowledge base', () => {
+    const bootstrap = bootstrapSource();
+    const willQuit = bootstrap.indexOf("app.on('will-quit'");
+    const allClosed = bootstrap.indexOf("app.on('window-all-closed'");
+    const kbStart = bootstrap.indexOf('startKnowledgeBase()');
+
+    expect(willQuit).toBeGreaterThan(-1);
+    expect(allClosed).toBeGreaterThan(-1);
+    expect(kbStart).toBeGreaterThan(-1);
+    expect(willQuit, 'will-quit must be registered before the knowledge base starts').toBeLessThan(
+      kbStart,
+    );
+    expect(
+      allClosed,
+      'window-all-closed must be registered before the knowledge base starts',
+    ).toBeLessThan(kbStart);
+  });
+
+  it('does not await the knowledge base inside bootstrap', () => {
+    const bootstrap = bootstrapSource();
+    // `void`, not `await`: awaiting is what put it on the critical path.
+    expect(bootstrap).toContain('void startKnowledgeBase()');
+    expect(bootstrap).not.toContain('await rag.start()');
+    expect(bootstrap).not.toContain('await ensureActiveProfile()');
+  });
+});
+
+/**
+ * FR-086 regression: `doc:retry` (CH-123) and `model:ensure` (CH-124) were
+ * declared in the contract and handled in main, but never added to the
+ * Dashboard preload's allowlist, so FR-079's retry and ADR-026's
+ * "model not downloaded, retry" action did not exist end to end. Nothing
+ * failed: the allowlist is a plain array, so an omission is invisible.
+ */
+describe('FR-086 the preload allowlists account for every invoke channel', () => {
+  /** Channels that belong to a window other than the Dashboard, named on purpose. */
+  const NOT_DASHBOARD: InvokeChannel[] = [
+    'overlay:savePosition',
+    'overlay:ready',
+    'consent:dismiss',
+  ];
+
+  it('the Dashboard may invoke every channel not explicitly reserved to another window', () => {
+    const source = readFileSync('src/preload/dashboard.ts', 'utf8');
+    const list = source.slice(
+      source.indexOf('const ALLOWED_INVOKE'),
+      source.indexOf('const ALLOWED_PUSH'),
+    );
+
+    const missing = INVOKE_CHANNEL_NAMES.filter(
+      (name) => !NOT_DASHBOARD.includes(name) && !list.includes(`'${name}'`),
+    );
+    expect(
+      missing,
+      `declared and handled but not exposed to the Dashboard: ${missing.join(', ')}`,
+    ).toEqual([]);
+  });
+
+  it('every channel the Dashboard lists is a real channel', () => {
+    const source = readFileSync('src/preload/dashboard.ts', 'utf8');
+    const list = source.slice(
+      source.indexOf('const ALLOWED_INVOKE'),
+      source.indexOf('const ALLOWED_PUSH'),
+    );
+    const listed = [...list.matchAll(/'([a-z]+:[a-zA-Z]+)'/g)].map((m) => m[1]!);
+
+    expect(listed.length).toBeGreaterThan(0);
+    for (const name of listed) expect(INVOKE_CHANNEL_NAMES).toContain(name);
+  });
+});
+
+/**
  * FR-085 / ADR-015 regression: config:set persisted a theme change but never
  * applied it, and the recreation helper was exported and tested yet never
  * called, so the running overlay kept its old appearance until restart.
@@ -254,8 +392,13 @@ describe('FR-082 overlay is actually draggable in interactive mode', () => {
 describe('FR-085 theme changes reach the running overlay', () => {
   it('config:set applies the change rather than only persisting it', () => {
     const source = readFileSync('src/main/index.ts', 'utf8');
-    const handler = source.slice(source.indexOf("router.handle('config:set'"));
-    expect(handler.slice(0, 300)).toContain('applyThemeChange');
+    const start = source.indexOf("router.handle('config:set'");
+    expect(start).toBeGreaterThan(-1);
+    // Bounded by the next handler rather than by a character count. A fixed
+    // window failed the moment a comment was added inside this handler, which
+    // says nothing about whether the theme change is applied.
+    const next = source.indexOf('router.handle(', start + 1);
+    expect(source.slice(start, next === -1 ? undefined : next)).toContain('applyThemeChange');
   });
 
   it('a translucency mode change recreates the overlay', () => {

@@ -5,7 +5,10 @@ cues during a live video interview, drawn from their own resume, company
 research and notes. The purpose is accessibility support, for example ADHD or
 memory recall under stress. It is not a scripting tool.
 
-**Status: specification complete, implementation not started.**
+**Status: Milestones 0, 1 and 2 complete.** Foundations, audio and
+transcription, and the knowledge base are implemented and verified. Milestone 3
+(trigger and suggestions) is next. See `docs/03-tasks.md` for what each milestone
+covers and what it deferred.
 
 ---
 

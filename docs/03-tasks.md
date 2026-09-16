@@ -548,7 +548,106 @@ Two process lessons, both fixed rather than noted:
 
 ## Milestone 2 — Knowledge base
 
-### TASK-020 Document import and conversion
+**Status: COMPLETE, 2026-09-16.** All six tasks implemented and verified.
+`npm run typecheck`, `npm run lint`, `npm run format:check`, `npm run licenses`,
+`npm run build`, `npm run smoke:main`, `python3 scripts/traceability.py` and 536
+unit and integration tests all pass, and every CI job is green on Windows,
+including `Electron E2E` and `Windows installer`. Line coverage over `src/main/rag/**` is
+96.9 percent against an 80 percent floor; every file in the milestone clears the
+floor on its own.
+
+Four new runtime dependencies, each already in the dependency table in
+`02-architecture.md` section 8: `pdf-parse`, `mammoth`, `@xenova/transformers`
+and `chokidar`. `npm ls electron --omit=dev` is still empty.
+
+Spec gaps found and closed in the same change, recorded as **ADR-030**: `CH-110`
+gains `'auto'`, `CH-110`/`CH-111`/`CH-123` carry `profileId`, `CH-123 doc:retry`
+and `CH-124 model:ensure` are new, and `CH-214` carries a state rather than a
+percent.
+
+**Not verifiable in the development container, deferred to the Windows runner:**
+
+| Item | Why not here | Where it is proven |
+|---|---|---|
+| `electron-builder` accepts the `asarUnpack` entries and still produces the installer | Wine is not installed, so electron-builder cannot emit NSIS on Linux | **Verified:** `package` job on `windows-latest`, green on this branch |
+| The unpacked modules actually **load** from the packaged app: `onnxruntime-node`'s `.node` binary and ESM-only `chokidar` | Nothing installs and runs the packaged app. The `package` job builds the installer and checks it exists; it never launches it, so a wrong `asarUnpack` path would still produce a green build | **Still open.** No manual check covers it either, so it is carried to TASK-051 below rather than treated as proven |
+| A real MiniLM tokenizer and a real 384-dimension vector | The model is a 90 MB download from Hugging Face. CI must not depend on it, and `TC-068` measures this app's normalization, not the model's output | MW-12, and the `TC-071` E2E half below |
+
+**Defects found by the pre-push review and fixed in this change.** Each one is
+pinned by a test that was checked to fail without its fix:
+
+| Defect | Why it mattered | Requirement |
+|---|---|---|
+| The chunk cap resolved to **512, not 256**, on every real install. `readMaxSeqLength` read `sentence_bert_config.json`, which `@xenova/transformers` never downloads: it fetches `tokenizer.json`, `tokenizer_config.json` and `config.json` only. The only limit on disk was the BERT backbone's 512, so chunks up to 510 word pieces were built and silently truncated at embed time | The exact failure `ADR-023` exists to prevent, and invisible: nothing errors. Every test covering this had hand-seeded the file that production never has | FR-062, ADR-023 |
+| `doc:retry` and `model:ensure` were declared and handled but never added to the Dashboard preload allowlist | `FR-079`'s retry and `ADR-026`'s "model not downloaded, retry" did not exist end to end, and a fresh install could never obtain a model at all | FR-079, ADR-026, FR-086 |
+| Two `renameSync` calls are not one atomic write. A crash between them left a new `chunks.json` beside the old `vectors.bin`; when the edit preserved the chunk count, the row-count guard saw nothing and retrieval ranked new text by old vectors forever | The pair now carries a `pairId` in both files, so identity and not only size is checked | FR-078, ADR-014 |
+| A vector carrying `NaN` was stored unnormalized. Its dot product is `NaN`, `NaN` makes the comparator falsy, so the sort fell through to the id tie-break and **one bad chunk took the whole top 3 for every question in that profile** | `l2Normalize` zeroes a non-finite vector and `topK` drops a non-finite score | FR-065 |
+| `splitOversizeWord` restarted its halving window per piece. A 2 MB whitespace-free word, which a pasted base64 data URI is, handed 5.8 billion characters to the tokenizer and froze the main process; the token memo then retained every giant slice for the life of the process | The window is carried forward, and the memo takes words only | NFR-009 |
+| The same function sliced by UTF-16 code unit, splitting surrogate pairs and destroying emoji and CJK Extension B characters | Splits on code points now | FR-062 |
+| `ensureHeadings` tested `#{1,6}` while the splitter honours `#{1,3}` outside fences, so three ordinary documents got `headerPath: []`: one whose headings all start at `####`, one whose only `#` is inside a code fence, and one saved with a byte-order mark | It now uses the splitter's own rule and its own fence tracking, and strips the mark | FR-063 |
+| An ingest finishing after its profile was deleted recreated `profiles/<id>/derived/` and wrote the document's full text and vectors there, invisible to every UI | The store refuses a write for a profile with no index | FR-069 |
+| An ingest published from a snapshot taken before three awaits, so a doc-type override set during a slow PDF reverted to the guess, and a document deleted mid-ingest reappeared as `ready` with no file behind it | The record is re-read before the final publish | FR-064, FR-077 |
+| `setDocType` read the record, awaited, then wrote the stale copy back, sending a document that had just finished embedding back to `state: 'embedding'` with `chunkCount: 0` | Re-reads after the await | FR-079 |
+| One unreadable entry in `kb/`, a dangling symlink being the common case, rejected out of `reconcile` and `start`, and bootstrap awaits `start` before registering `window-all-closed` and `will-quit` | One bad file left the app with no watchers, no shutdown cleanup and a zombie process holding the single-instance lock | FR-068, NFR-009 |
+| `ingest` claimed never to throw; `publish`, `writeDerivedMarkdown` and the embed `catch` all sit outside their own try. An ENOSPC on the second of three files abandoned the third with no record at all | TASK-020's acceptance criterion and TC-063 | FR-060 |
+| The chunk-set cache was invalidated only on success, so after a failed re-embed `query` kept answering from content the Dashboard showed as failed and which no longer existed on disk | Invalidated on every failure path | FR-065 |
+| `KnowledgeBaseWatcher` kept a profile in `stopped` after a rejected factory call, so the next `watch` opened a watcher, closed it and reported success, leaving `kb/` silently unwatched. `closeAll` also missed a watcher whose start was in flight | FR-068, and a leaked chokidar instance past `stop()` | FR-068 |
+| `readChunkSet` validated that the parsed value was an array but not that its rows were chunks, so a hand-edited file threw a `TypeError` out of `query`, past its try, onto the live-session IPC path | Rows are validated | FR-078 |
+| The model gate retried per file: an offline import of five documents made five full download attempts with `doc:import` unresolved through all of them, and flapped `CH-214` five times | A failure is terminal until the user retries, and that retry also re-processes the documents it unblocked | NFR-008, ADR-026 |
+| `query` called `embed`, which loads on demand, so a cleared model cache meant the **first question of a live interview started a 90 MB download** inside the question-to-suggestion budget | ADR-011 blocks ingestion on the model, never a session | ADR-011, NFR-001 |
+| `config:set` accepts a whole `Settings` object and `activeProfileId` is a plain string, so a Dashboard replaying cached settings could restore a deleted profile as the active one | Only `profile:activate` may move it, and only to a profile that exists | FR-028 |
+| `isModelCached` accepted `model.onnx` while `loadOnce` requests the quantized build, reporting a model ready that then failed to load | Offline that is a "ready" model the user can never use | ADR-026 |
+| `copyFile` without `COPYFILE_EXCL` let two concurrent imports of one filename overwrite each other, the outcome `uniqueKbPath` exists to prevent | | FR-060 |
+| Retry on a row whose file was never written deleted the row and returned a generic IPC error | The row now explains itself | FR-079 |
+| A `profile.json` with no `documents` array made every later `.find` throw out of `reconcile`; one bad profile emptied the whole Dashboard list | `kb/` is the authority, so an empty index is rebuilt, not fatal | ADR-014 |
+| The determinate download bar hit 99 percent on the 700 KB tokenizer and snapped back to 3 percent when the 90 MB weights announced themselves | Monotonic now | FR-066 |
+| `CH-215` shipped in Milestone 0 and was never written into the IPC table. The contract test only checked documented-implies-implemented | The test now asserts both directions | DoD 9 |
+| **The overlay was unreachable while its renderer loaded.** `overlayWindow` was assigned from `await createOverlayWindow(...)`, so it stayed null for the whole of that load, while the Dashboard was already interactive and the window was already in `BrowserWindow.getAllWindows()` | `overlay:reset` arriving in that window failed its `if (overlayWindow)` guard, moved nothing and **returned `ok`**, so the Dashboard rendered "Overlay reset" over a window that had not moved. Found by `TC-148` failing identically on two heads on the Windows runner, where the overlay's renderer is the slower of the two to load; reproduced on Linux by delaying that one assignment, and the fix verified against a deliberately slow overlay load. The window is now handed over through a callback before the load, and the handler throws rather than reporting success with nothing done. A Milestone 0 bug this milestone's timing made reproducible | FR-009 |
+| Knowledge base startup was **awaited inside `bootstrap`**, between the windows being created and `window-all-closed` and `will-quit` being registered. Reconciling reads every file in every profile's `kb/`, and starting a watcher pulls chokidar in through a dynamic ESM import | A slow or wedged knowledge base left the app interactive with no shutdown wiring at all, and delayed everything after it. Found by `TC-148` failing on the Windows runner, which is sensitive to that timing: the overlay is created `show: false` and Windows re-applies the placement of a never-shown window when it is finally shown. Startup is now background work, registered last and not awaited, with the lifecycle handlers ahead of it | NFR-009 |
+
+**Defects found by the Codex review on the pull request, all eight verified and
+fixed.** Three were regressions introduced by fixes earlier in this same branch,
+which is the part worth remembering: a fix is not free, and each one needs its
+own adversarial pass.
+
+| Defect | Why it mattered | Requirement |
+|---|---|---|
+| A document deleted during its **first** ingest came back. The cancel was gated on the snapshot taken before the pipeline started, which is null for a new document, so the check could never fire on a first ingest | The document republished as `ready` with its `kb/` file already gone and its chunks queryable. The earlier fix only ever covered re-ingests | FR-077 |
+| Reconciliation trusted a `ready` document because its chunk pair merely **loaded**, never comparing the bytes | A file edited while the app was shut down served its pre-edit chunks forever, because the watcher starts with `ignoreInitial` and no change event arrives. It also defeated ADR-012 entirely: bumping the chunker version or the model no longer invalidated anything on relaunch | FR-067, ADR-012 |
+| An entry `stat` could not answer for was treated as deleted, dropping its record, chunks, vectors and derived Markdown. **A regression from this branch's own bootstrap-crash fix** | An EACCES file or an antivirus lock is not a deletion, and `ignoreInitial` meant a file that was still there might never come back. Only `ENOENT` counts as gone now | FR-077 |
+| A profile whose `profile.json` was unreadable vanished from `list` entirely | Its `kb/` was never scanned or watched, `ensureActiveProfile` quietly selected another, and every document in it became invisible. This directly contradicted ADR-014, which this milestone's own comments quote: `profile.json` is derived, `kb/` is the authority. It is rebuilt from the folder now | ADR-014, FR-077 |
+| The determinate download bar parked at 99 percent for the entire real download. **A regression from this branch's own monotonic-progress fix** | The tokenizer loads before the 90 MB weights, so one shared byte ratio hit 99 on a few hundred kilobytes and the monotonic clamp then suppressed every honest update from the weights. Each phase gets its own slice of the range now | FR-066 |
+| Prose before a document's first heading produced `headerPath: []` | `hasSplittingHeading` was true, so no synthetic wrapper was added, and the preamble flushed with an empty stack. The milestone's own "every chunk has a header path" test had no preamble shape in it | FR-063 |
+| A fenced block closed on any delimiter, so a ``` block ended at an inner `~~~` and a ```` block at an inner ``` | The `#` lines after the false close were read as headings, corrupting every following `headerPath`. CommonMark closes only on the same character, at least as long | FR-062, FR-063 |
+| The license gate identified BSD-4-Clause as BSD-3-Clause | A BSD-4-Clause text contains the whole three-clause text including the non-endorsement sentence the gate matched on, so a dependency declaring the ambiguous bare `BSD` resolved to an allowed license and passed. The advertising clause is checked first now | NFR-015 |
+
+**Found while fixing TC-148, deliberately not fixed here.** `wireOverlayWindow`
+registers a `did-finish-load` listener, and it used to run *after*
+`createOverlayWindow` had already awaited that load, so on first launch the
+listener was attached to an event that had already fired and the overlay's theme
+and consent text were never pushed. Moving the wiring into the creation callback
+puts the listener in place before the load, which fixes it as a side effect. It
+is called out here rather than left silent because it changes Milestone 0
+behavior: `FR-008`'s consent text now actually reaches the overlay on first
+launch. `TASK-043` owns proving that end to end, since no overlay UI exists yet
+to assert against.
+
+**Follow-up work carried out of Milestone 2**, each with an owner rather than a
+vague intention:
+
+| Item | Why it is not done here | Owner |
+|---|---|---|
+| `TC-071`'s "`session:start` still succeeds during the download" half | `session:start` does not exist yet. The ingestion-blocking half and the determinate-progress half are covered now, in `tests/integration/rag-model-gate.test.ts` | TASK-040 |
+| Calling `RagEngine.query` from the prompt builder | The trigger and the prompt do not exist yet. `query(profileId, text, k=3)` is the contract they will call | TASK-031 |
+| The Dashboard's document manager: the best-effort hover, the doc-type picker, the error retry button, the "model not downloaded" state, and the `2 MB / 200 chunks` ceiling text `FR-068` requires on screen | No renderer exists. `KB_CEILING`, `withinReembedCeiling`, `CH-123` and `CH-124` are the API it consumes | TASK-042 |
+| Prove the unpacked modules load from the **installed** app, not just that the installer builds | The `package` job builds the installer and asserts the `.exe` exists, which it does with or without a correct `asarUnpack` path: nothing launches the packaged app. A `.node` binary cannot be `dlopen`ed from inside an asar and Electron's asar shim does not cover Node's ESM loader, so both failures appear only at runtime. Needs either a packaged smoke launch in the `package` job or a new manual check; `MW-01` to `MW-13` cover none of it | TASK-051 |
+| `readChunkSet` reads one `readFloatLE` per value | Measured at 19 ms for a full 5000-chunk profile against a 2500 ms `NFR-001` p50, loaded once per profile per process and then cached. A typed-array copy is 4.2 ms but adds an endianness branch. Not a defect, so not fixed under a "fix now" heading | TASK-050 |
+| `reconcile` rewrites `profile.json` once per removed record | O(N) writes when a user deletes many files at once. Correct, just wasteful | TASK-050 |
+| A document's bytes are read twice and hashed twice per ingest, and a PDF is held in memory three times over | `rag.ts` reads the file, `convert.ts` reads it again, and `new Uint8Array(buffer)` copies it a third time. Correct, and a 200 MB PDF costs about 600 MB of RSS before pdfjs allocates anything | TASK-050 |
+| `doc:import` takes an unbounded array of renderer-supplied absolute paths | There is no main-process `showOpenDialog` yet, so file selection is renderer-trusted. `basename` already stops the target escaping `kb/`; what is missing is the main-process dialog that should be choosing the paths | TASK-042 |
+| The `RULES` table in `autotag.ts` gives each doc type exactly one filename pattern, so the `break` guarding a second match is unreachable | Harmless, and the guard is correct if a second pattern is ever added | TASK-050 |
+
+### TASK-020 Document import and conversion — COMPLETE
 **Traces** FR-060, FR-061, FR-069
 **Depends on** TASK-003
 **Acceptance criteria**
@@ -568,9 +667,37 @@ Two process lessons, both fixed rather than noted:
   content survives anywhere under `userData` (FR-069).
 - A delete interrupted partway must not leave content on disk with the profile
   record gone. The record is removed last.
+- **Result: complete.** `src/main/rag/convert.ts` maps the extension to a format,
+  reads `.md` as-is and writes `derived/<docId>.md` for `.pdf` and `.docx`.
+  `src/main/rag/store.ts` owns `profiles/<id>/{profile.json,kb,derived,sessions}`
+  and the cascade delete. `src/main/rag.ts` orchestrates import and ingest.
+- `ensureHeadings` lives in `chunk.ts` and is applied to every format, not only
+  to converted ones: a hand-written `.md` with no heading has the same problem,
+  one unlabeled chunk with an empty `headerPath`. The original file is never
+  rewritten, so `.md` is still ingested as-is (`TC-061`).
+- **Found while implementing: `pdf-parse` v2 is a different library.** The
+  dependency table names `pdf-parse`, and v1's `pdfParse(buffer)` function no
+  longer exists; v2 ships a `PDFParse` class that owns a pdfjs worker and must be
+  destroyed, or the worker keeps the process alive after the user closes the app.
+- **Found while implementing: `TextResult.text` carries page chrome.** v2 appends
+  `-- 1 of 3 --` separators to the concatenated string but not to a page's own
+  text. Embedding those would put the separator in a vector and in a chunk the
+  user reads, so per-page text is preferred and `stripPageSeparators` guards the
+  fallback.
+- **Found while implementing: a PDF has no blank lines to lose.** A blank line
+  draws no glyphs, so pdfjs never reports one, and the chunker's soft split on
+  paragraph breaks had nothing to split on. `pdfTextToMarkdown` rejoins hard
+  wraps and treats a line that ends a sentence as ending a paragraph.
+- **Bug found in review: a heading absorbed the line under it.** The rejoin
+  treated a heading as an open line, so `# Experience` swallowed `Acme Corp` and
+  the section boundary the chunker splits on was destroyed. Fixed and pinned by a
+  case in `tests/unit/convert.test.ts`.
+- **Deferred to TASK-042:** the Dashboard row that shows `extractionQuality:
+  'best-effort'` with its hover explanation. The record carries the field and
+  `TC-062` asserts it; no renderer exists yet.
 **Verified by** TC-060, TC-061, TC-062, TC-063, TC-160
 
-### TASK-021 Chunking
+### TASK-021 Chunking — COMPLETE
 **Traces** FR-062, FR-063, ASM-001
 **Depends on** TASK-020
 **Acceptance criteria**
@@ -588,9 +715,28 @@ Two process lessons, both fixed rather than noted:
 - Chunking is pure and deterministic: the same input bytes always produce the
   same chunk array. A `chunkerVersion` constant is exported and included in the
   cache key.
+- **Result: complete.** `src/main/rag/chunk.ts` is pure: no clock, no filesystem,
+  no random source, which is what lets `CHUNKER_VERSION` participate in the cache
+  key at all. If chunking were not a function of its input, a cache hit would not
+  mean the chunks are the ones the vectors were built from.
+- The cap is a parameter, sourced from the downloaded model's config by
+  `readMaxSeqLength`, never a literal. `TC-066` drives three different caps
+  through the same input and asserts no chunk exceeds any of them, so the "not
+  hard-coded" half of `ADR-023` is proven rather than asserted in prose.
+- **Design decision found during implementation: the token counter is per word,
+  not per string.** A BERT-family tokenizer pre-tokenizes on whitespace and
+  punctuation and then runs WordPiece inside each piece, so a text's count is the
+  sum of its words' counts. A per-string counter would re-tokenize the whole
+  accumulated candidate once per added word, making a 2 MB document quadratic.
+  Counts are memoized per distinct word on top of that.
+- A single word that alone exceeds the cap, which a long URL or a base64 blob can
+  be, is split by characters rather than emitted over the cap. Emitting it would
+  put a silently truncated chunk back in the store, which is the whole point of
+  `ADR-023`.
+- A heading inside a fenced code block does not open a section.
 **Verified by** TC-064, TC-065, TC-066, TC-067
 
-### TASK-022 Local embeddings and cache
+### TASK-022 Local embeddings and cache — COMPLETE
 **Traces** FR-066, FR-067, ADR-011, ADR-012
 **Depends on** TASK-021
 **Acceptance criteria**
@@ -606,9 +752,40 @@ Two process lessons, both fixed rather than noted:
 - The cache key is `sha256(fileBytes):chunkerVersion:embeddingModelId`. An
   unchanged file is not re-embedded on relaunch.
 - Changing `chunkerVersion` invalidates the cache with no manual purge.
+- **Result: complete.** `src/main/rag/embed.ts` holds `l2Normalize`,
+  `embeddingKeyFor`, `readMaxSeqLength`, `isModelCached` and `XenovaEmbedder`.
+  Vectors are L2-normalized by this app rather than by asking the library for
+  normalized output, because the normalization is what makes retrieval a plain
+  dot product and it is worth owning and testing (`TC-068`).
+- **Design decision found during implementation: the library is injected.** The
+  adapter takes a `loadLibrary` function, exactly as the STT adapters take a
+  socket factory. Without it the whole class was unreachable from a test without
+  a 90 MB download, and coverage over `embed.ts` sat at 56 percent. It is 93
+  percent now, and only the one `import()` that reaches the real package is out
+  of a unit test's reach.
+- **Design decision found during implementation: `max_seq_length` has two
+  sources and they disagree.** `sentence_bert_config.json` carries the
+  sentence-transformers limit, 256 for MiniLM, while `tokenizer_config.json`
+  carries the backbone's 512. The smaller wins, because exceeding either one
+  truncates. A sentinel such as `1e30`, which means "no limit set", is ignored.
+- **Design decision found during implementation: the model gate is on the
+  `Embedder` interface, not an `instanceof` check.** `isReady()` and
+  `ensureReady()` let the engine have one path and let a test drive the
+  `unavailable` branch with no network (`TC-161`).
+- Determinate progress sums bytes across every file rather than reporting the
+  current file's percent, and caps byte-driven progress at 99 so the bar cannot
+  finish before loading does.
+- **Partly deferred:** the `asarUnpack` entry for `onnxruntime-node`. A `.node`
+  binary cannot be loaded from inside an asar archive. The entry is in
+  `electron-builder.yml` and the `package` job proves the installer still builds
+  with it, but nothing launches the packaged app, so that the binary really loads
+  from the unpacked path is unproven and carried to TASK-051.
+- **Deferred to TASK-042:** the "embedding model not downloaded" UI and its retry
+  button. `CH-124` and `CH-214` carry what it needs and `TC-161` asserts the
+  states.
 **Verified by** TC-068, TC-069, TC-070, TC-071, TC-161
 
-### TASK-023 Auto-tagging and user override
+### TASK-023 Auto-tagging and user override — COMPLETE
 **Traces** FR-064, FR-079
 **Depends on** TASK-020
 **Acceptance criteria**
@@ -619,9 +796,23 @@ Two process lessons, both fixed rather than noted:
 - An override updates chunk metadata in place without re-embedding.
 - An override can be reset to `auto`, which re-runs the guess.
 - A document in `error` retries from the Dashboard without re-import (FR-079).
+- **Result: complete.** `src/main/rag/autotag.ts` is a documented, deterministic
+  scoring rule set: filename 10, heading 4, body 1 each capped at 6, ties broken
+  in `TIE_BREAK_ORDER`. Not first-match: a file named `notes.md` whose body is
+  plainly a resume should not be tagged from its uninformative name.
+- `company-notes` heads the tie-break because it is the catch-all of the three. A
+  miscategorized note costs a retrieval the user fixes with one override, while
+  defaulting to `resume` would put arbitrary text where the prompt expects the
+  candidate's own history.
+- An override rewrites `chunks.json` and leaves `vectors.bin` untouched, because
+  `docType` is metadata carried alongside the vector and not an input to it.
+  `TC-074` asserts zero embedding calls and byte-equal vectors.
+- **Spec gap closed (ADR-030):** `FR-079` requires the override to be resettable
+  to automatic and `CH-110` was typed over the closed `DocType` union, which has
+  no value that says so.
 **Verified by** TC-072, TC-073, TC-074, TC-149
 
-### TASK-024 Retrieval
+### TASK-024 Retrieval — COMPLETE
 **Traces** FR-065, ASM-006
 **Depends on** TASK-022
 **Acceptance criteria**
@@ -631,9 +822,34 @@ Two process lessons, both fixed rather than noted:
   equal similarity and different doc types tie.
 - A profile with no ready documents returns an empty array without throwing.
 - A profile with 5000 chunks returns in under 50 ms.
+- **Result: complete.** `topK` in `src/main/rag/store.ts` is a brute-force dot
+  product over L2-normalized vectors. `RagEngine.query` reads only the requested
+  profile's directory, so scoping is by construction rather than by a predicate
+  that could be forgotten (`TC-075`).
+- No doc-type weighting exists (`ASM-006`). Equal similarity ties, and the
+  tie-break is chunk id, so the order is stable across runs rather than depending
+  on directory iteration order.
+- `TC-078` measures 5000 chunks at 384 dimensions against a 50 ms budget. It
+  asserts the **fastest of five** readings, not one. A single wall-clock reading
+  on a shared runner is the intermittent failure the test strategy's determinism
+  rule calls a defect in the test: the scan costs 2 to 3 ms, and one CI reading
+  came back at 54.9 ms, which measured the runner being descheduled rather than
+  the code. A second case pins the property the budget is really about, that the
+  scan is linear in the corpus, and it was checked to fail on a deliberately
+  quadratic scan.
+- `TC-078`'s budget is met with roughly twenty times the headroom, so the
+  score-then-sort implementation stands. A bounded top-k selection was written
+  and measured at about 20 percent faster, then discarded: it returned a
+  different result, because its tie-break disagreed with the documented one. Chunk
+  sets are memoized per profile and invalidated on every ingest, so reading 5000
+  chunks off disk is not inside the question-to-suggestion budget (`NFR-001`).
+- `query` returns `[]` rather than throwing for an empty question, an unknown
+  profile, a profile with no ready documents, and a failed query embedding. A
+  live session is allowed to run with no model, and an empty chunk set is the
+  documented behavior (`ADR-011`).
 **Verified by** TC-075, TC-076, TC-077, TC-078
 
-### TASK-025 Knowledge base watcher
+### TASK-025 Knowledge base watcher — COMPLETE
 **Traces** FR-068, FR-077, FR-078
 **Depends on** TASK-022
 **Acceptance criteria**
@@ -652,6 +868,41 @@ Two process lessons, both fixed rather than noted:
   in `pending`, `converting` or `embedding` to `pending` (FR-078).
 - `chunks.json` and `vectors.bin` are written write-to-temp then rename. A row
   count mismatch at load discards both and re-embeds (FR-078).
+- **Result: complete.** `src/main/rag/watch.ts` holds `IngestQueue` and
+  `KnowledgeBaseWatcher`; `RagEngine.reconcile` and `RagEngine.start` own the
+  startup pass and the ordering.
+- **Design decision found during implementation: the debounce and the coalescing
+  are ours, not chokidar's.** `awaitWriteFinish` collapses the write events of
+  one save, but it does not stop a second save arriving while the first is still
+  embedding, and that is the case "five rapid writes cause exactly one re-embed"
+  actually turns on. Owning the queue also makes the timing testable with fake
+  timers, which a dependency's internal polling is not.
+- **Found while implementing: chokidar 5 is ESM-only.** The main process bundles
+  to CommonJS, so it is reachable only through a dynamic `import()`, and it must
+  be unpacked from the asar archive because Electron's asar integration patches
+  CommonJS `require` and not Node's ESM loader.
+- **Bug found in review: two concurrent ingests of one path made two records.**
+  `importDocuments` and `reconcile` call `processFile` directly and bypass the
+  queue, so a large PDF whose parse outlasts the watcher's 500 ms debounce
+  produced two `DocumentRecord`s for one file, and `query` returned every chunk
+  twice. Reproduced, fixed with an in-flight map keyed by path, and pinned by
+  three cases in `tests/integration/rag-watcher.test.ts`.
+- **Bug found in review: a path spelled differently read as a different file.**
+  `reconcile` compares `originalPath` against `readdir`, and the watcher reports
+  a third spelling. On Windows those can differ in case and in separators while
+  naming the same file, and a false mismatch is not a small bug there: reconcile
+  reads it as "the file is gone" and re-embeds the whole knowledge base on every
+  launch. `normalizePath` now folds all three, case-folding only on win32.
+- **Bug found in review: a fallback profile was never watched.** Deleting the
+  last profile created a replacement through `store.create`, which makes the
+  record without starting a watcher, so a file dropped into its `kb/` was never
+  adopted (`FR-077`). It now goes through `RagEngine.createProfile`.
+- **Bug found in review: `dispose` could hang an awaited `drain`.** The promise
+  settles only at the end of a run, which dispose guarantees will never start.
+- The `TC-079` timing half is driven through an injected watcher rather than real
+  chokidar: what the case asserts is what the engine does with an event, and the
+  debounce and coalescing are unit-tested with fake timers, as the test
+  strategy's determinism rule requires.
 **Verified by** TC-079, TC-140, TC-141, TC-163
 
 ---

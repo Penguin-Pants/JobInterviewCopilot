@@ -94,4 +94,26 @@ describe('IPC contract matches the architecture document', () => {
     const missing = [...documented].filter((id) => !implemented.has(id));
     expect(missing, `documented but not implemented: ${missing.join(', ')}`).toEqual([]);
   });
+
+  it('documents every CH- id it implements', () => {
+    const doc = readFileSync('docs/02-architecture.md', 'utf8');
+    const section = doc.slice(
+      doc.indexOf('## 4. IPC contract'),
+      doc.indexOf('## 5. Critical sequences'),
+    );
+    const documented = new Set<string>(section.match(/CH-\d{3}/g) ?? []);
+
+    const implemented = [
+      ...Object.values(invokeChannels).map((s) => s.id),
+      ...Object.values(pushChannels).map((s) => s.id),
+      ...Object.values(audioWorkerChannels).map((s) => s.id),
+    ];
+
+    // The other direction. Checking only "documented implies implemented" let a
+    // channel be added in code and never written down, which is exactly the
+    // drift DoD 9 exists to prevent: CH-121 and CH-122 shipped in Milestone 0
+    // and were undocumented until Milestone 2 noticed.
+    const undocumented = implemented.filter((id) => !documented.has(id));
+    expect(undocumented, `implemented but not documented: ${undocumented.join(', ')}`).toEqual([]);
+  });
 });

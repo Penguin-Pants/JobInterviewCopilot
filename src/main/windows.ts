@@ -202,7 +202,10 @@ export function resolveOverlayPosition(
  * in captures rather than true exclusion, which the Dashboard warns about once
  * per session (NFR-012).
  */
-export async function createOverlayWindow(settings: Settings): Promise<BrowserWindow> {
+export async function createOverlayWindow(
+  settings: Settings,
+  onCreated?: (win: BrowserWindow) => void,
+): Promise<BrowserWindow> {
   const options = overlayWindowOptions(settings, preloadPath('overlay'));
   const win = new BrowserWindow(options);
 
@@ -219,6 +222,15 @@ export async function createOverlayWindow(settings: Settings): Promise<BrowserWi
   const displays = screen.getAllDisplays().map((d) => ({ id: d.id, bounds: d.bounds }));
   const pos = resolveOverlayPosition(settings, displays, screen.getPrimaryDisplay().id);
   win.setPosition(pos.x, pos.y);
+
+  // Hand the window over before the renderer load, not after. The window is
+  // fully configured by this point, and it is already visible to
+  // `BrowserWindow.getAllWindows()`, so a caller that only learns about it from
+  // the returned promise holds null for the whole load while the rest of the app
+  // can already be asked to act on it (TC-148). Registering listeners here also
+  // means a `did-finish-load` handler is in place before the load below, which
+  // a caller running after the await cannot achieve.
+  onCreated?.(win);
 
   await loadRenderer(win, 'overlay');
   return win;
