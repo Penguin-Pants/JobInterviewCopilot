@@ -347,6 +347,7 @@ interface UsageRecord {
   llmOutputTokens: number;
   estimatedUsd: number;
   priceTableVersion: string;
+  estimateIncomplete: boolean;           // a model consumed had no price row (ADR-033)
   warningsIssued: ('cost' | 'time')[];   // at most one of each (FR-103)
 }
 ```
@@ -950,8 +951,41 @@ Selection is restricted to priced models: the Dashboard only offers models that
 exist in a registry, and `TC-156` fails the build if a registry model has no
 price row. There is therefore no unknown-model path at runtime. If a price row is
 ever missing anyway, the meter counts the tokens, contributes zero dollars for
-that model, and the Dashboard labels the estimate "incomplete" rather than
-showing a number that silently understates spend.
+that model, and sets `estimateIncomplete` so the Dashboard labels the estimate
+rather than showing a number that silently understates spend (ADR-033).
+
+**Accounting is per model, and LLM usage is keyed per generation** (ADR-033).
+Audio seconds and tokens are accumulated against the model that produced them,
+never as one session total, because a failover moves a stream to a model at a
+different price and a total recomputed at the end would bill the whole session
+at the last model's rate. LLM usage is stored by `generationId` and a second
+report for one id **replaces** the first: a provider can send an interim usage
+frame and then a terminal one, and a cancelled generation's outcome can carry a
+smaller figure than the interim already charged. That is the decrease `FR-109`
+names, and the warning guard is membership in a fired list, so no decrease can
+re-arm a threshold.
+
+A generation cancelled before the provider reported any usage accounts zero
+tokens. The meter has no token counter of its own and does not estimate one from
+the text received: a number we invented would be presented as a measurement
+(ADR-033).
+
+A usage report carrying a non-finite value is **refused** at the meter's
+boundary and sets `estimateIncomplete`. The adapters cast provider JSON onto
+`TokenUsage` without validating it, so a malformed frame can arrive as
+`Infinity` or `NaN`; recorded, it makes `estimatedUsd` non-finite, which the
+`CH-204` schema rejects and which `JSON.stringify` writes into the session file
+as `null`, and that file then fails `sessionSchema` on read. One bad frame would
+cost the user the whole interview, which is the failure ADR-032 exists to
+prevent.
+
+The meter counts, and `CMP-08` writes (ADR-018). `CMP-09` imports no filesystem
+module, holds no path, and has no way to stop a session: `FR-103` is explicit
+that a threshold is reported and never acted on. `CH-204` is pushed once per
+second and once more at stop, so the final figures on screen are the figures
+that went into the transcript. The session timer runs on a monotonic clock, not
+on the wall clock, because a clock adjustment mid-interview would fire the time
+warning early and `FR-109` gives no way to take a warning back.
 
 `estimatedUsd = sum(llm token cost) + sum(stt minutes * rate)` across both
 streams. The UI labels it "estimate" and shows the price table version. The

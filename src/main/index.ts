@@ -20,6 +20,7 @@ import { registerAllSttProviders } from './ai/stt/index.js';
 import { TriggerMachine, type TriggerConfig } from './ai/trigger.js';
 import { validateCredential } from './ai/validate.js';
 import { ConfigStore } from './config.js';
+import { CostMeter } from './cost.js';
 import { HotkeyManager } from './hotkeys.js';
 import { IpcRouter, push } from './ipc/router.js';
 import { getLogger, initLogger } from './logger.js';
@@ -69,6 +70,7 @@ let rag: RagEngine;
 let trigger: TriggerMachine;
 let overlayGate: OverlayGate;
 let sessions: SessionManager;
+let cost: CostMeter;
 
 /**
  * Resolves when crash recovery has finished (`FR-105`, `FR-108`).
@@ -167,6 +169,26 @@ async function bootstrap(): Promise<void> {
     onError: (message, detail) => getLogger().warn(message, detail),
   });
 
+  // The Cost Meter (CMP-09, TASK-041). It holds usage in memory and hands it to
+  // the Session Manager on every tick, which is why the hand-over and CH-204
+  // share one callback: the number the Dashboard shows and the number that
+  // reaches the transcript are then the same number by construction, not by two
+  // code paths agreeing (ADR-018, FR-103).
+  cost = new CostMeter({
+    thresholds: config.get().thresholds,
+    onUsage: (snapshot) => {
+      const { elapsedSeconds, ...record } = snapshot;
+      sessions.noteUsage(record);
+      push(dashboardWindow?.webContents, 'state:usage', { ...record, elapsedSeconds });
+    },
+    onWarning: (warning) => {
+      // A warning is told, never acted on. Nothing here stops the session
+      // (FR-103); the user decides what a threshold means mid-interview.
+      getLogger().info('usage threshold crossed', warning);
+      push(dashboardWindow?.webContents, 'usage:warning', warning);
+    },
+  });
+
   // The trigger (CMP-05, TASK-030). Created here so the pause hotkey has
   // something real to toggle; it stays in IDLE until `session:start` exists
   // (TASK-040), and a firing turn is answered by the generation loop that task
@@ -252,6 +274,10 @@ async function bootstrap(): Promise<void> {
     // A quit during a live session compacts rather than abandoning the
     // transcript. Not awaited, because `will-quit` cannot hold the app open;
     // the recovery pass covers what does not finish (FR-105).
+    // The meter is stopped first: it clears its interval and hands over the
+    // final record, so a quit during a session compacts with the usage it
+    // accounted rather than with the last tick's, or with none at all.
+    sessions.noteUsage(cost.stop());
     void sessions.stop();
     trigger.dispose();
     health.dispose();
@@ -687,6 +713,9 @@ function registerIpcHandlers(): void {
     // change has to reach it. Applying at the next armed timer rather than
     // rewriting one in flight is the machine's own rule (FR-050).
     trigger.setConfig(triggerConfigFrom(after));
+    // The meter holds its own copy too. A threshold already crossed stays
+    // crossed for the session whatever the new value is (FR-109).
+    cost.setThresholds(after.thresholds);
     return after;
   });
 
@@ -812,6 +841,9 @@ function registerIpcHandlers(): void {
       // is listening to a stream that does not exist; it fires nothing until it
       // does, rather than being stubbed into looking live.
       trigger.start();
+      // Started after the manager accepted, so a refused start leaves no meter
+      // running and no timer counting a session that does not exist.
+      cost.start();
       pushSessionState();
       return { sessionId: active.id };
     } catch (err) {
@@ -835,7 +867,14 @@ function registerIpcHandlers(): void {
     // The trigger stops first, so an in-flight generation is aborted before the
     // writer closes and cannot append to a handle that has gone.
     trigger.stop();
+    // The final record is handed over before compaction, so the session file
+    // carries it rather than the last tick's. The meter itself is stopped only
+    // once the manager really ended the session: `sessions.stop()` can throw on
+    // a compaction failure and leaves the session live, and a meter already
+    // stopped would have left that live session with a frozen timer.
+    sessions.noteUsage(cost.record());
     await sessions.stop();
+    cost.stop();
     pushSessionState();
     return { sessionId: active.id };
   });
