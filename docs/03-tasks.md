@@ -1049,7 +1049,10 @@ vague intention:
 
 ## Milestone 4 — Sessions, cost, UI
 
-### TASK-040 Session manager and transcript
+**Status: IN PROGRESS.** `TASK-040` is complete. `TASK-041`, `TASK-042` and
+`TASK-043` are not started.
+
+### TASK-040 Session manager and transcript — COMPLETE
 **Traces** FR-088, FR-101, FR-105, FR-106, FR-107, FR-108, ADR-003, ADR-013, ADR-018
 **Depends on** TASK-011, TASK-032
 **Acceptance criteria**
@@ -1077,6 +1080,61 @@ vague intention:
 - A `session.lock` file enforces one session across restarts and a stale lock is
   cleared by the recovery pass (FR-108).
 **Verified by** TC-104, TC-105, TC-106, TC-107, TC-134, TC-135
+
+**Completed 2026-09-16.** `src/main/session.ts` (`CMP-08`), 38 new tests, and
+the five session channels wired into bootstrap. `npm run typecheck`,
+`npm run lint`, `npm run format:check`, `npm run build`, `npm run smoke:main`,
+`python3 scripts/traceability.py` and 696 unit and integration tests all pass.
+
+**Design decisions worth recording:**
+
+| Decision | Why |
+|---|---|
+| **An append is awaitable and writes immediately**, rather than being queued for a flush timer | `FR-105` asks for an entry on disk within 2 seconds, and `FR-106` requires the LLM layer to *await* the cancelled generation's append before its replacement starts. A timer satisfies neither cleanly: it can be outlived by the very crash it exists for, and it gives the caller nothing to await. Writing now makes "within 2 s" trivially true |
+| **Every append goes on one promise chain** | Two callers can append concurrently, which is exactly what a cancelled generation racing its replacement does. The chain makes disk order equal `seq` order without a lock (`FR-106`, TC-134) |
+| **The compacted `.json` is written to a temporary file and renamed** | A crash between writing the `.json` and deleting the `.ndjson` would otherwise leave a half-written `.json` whose source had already gone. The rename is atomic, so one of the two files is always complete |
+| **Only the *final* line of an `.ndjson` may be discarded** | A torn tail is the crash signature. A malformed line anywhere else means the writer did not write whole lines, which is a defect rather than a crash, so it throws instead of being silently dropped (`FR-107`) |
+| **`start` never clears a lock; only `recover` does** | A lock held by a live process must refuse the start. Clearing it on the start path would silently overwrite a running session's transcript. Recovery runs when no session of ours exists, so any lock it finds is from a process that is gone (`FR-108`) |
+
+**Spec gap found and closed, recorded in the architecture document (DoD 9).**
+`ADR-018` places `session.lock` "next to the sessions folder", and there is one
+such folder per profile, which would permit one concurrent session **per
+profile**. `FR-108` and `ADR-013` both say one session, full stop. The lock is
+at the `userData` root.
+
+**Not done here, and deliberately.** `session:start` does not yet start audio
+capture or open the STT sessions, so the trigger listens to a stream that does
+not exist and fires nothing. Wiring the capture path, the `RagEngine.query` call
+and `runGeneration` into a live loop is the rest of this milestone's integration
+and is carried below rather than half-built here.
+
+**Defects found by the Codex review on the pull request, all ten verified and
+fixed.** Five were rated P1. The pattern across them is one mistake made in
+several places: a failure path that quietly produced a *plausible* value
+instead of stopping.
+
+| Defect | Why it mattered | Requirement |
+|---|---|---|
+| **Crash recovery raced `session:start`.** Recovery runs in the background so a slow knowledge base cannot delay the windows, but the IPC handlers are registered before it finishes | A session started in that window had its **live** `.ndjson` treated as an orphan: compacted, deleted, and its lock removed from under the open handle. `session:start` now awaits recovery | FR-105, FR-108 |
+| **`readNdjson` treated every read failure as an empty transcript.** Only `ENOENT` may mean that | A transient `EACCES` or `EIO` made compaction write an empty `.json` and then delete the `.ndjson` that still held every entry. Permanent loss from a temporary fault. Anything but `ENOENT` now aborts and preserves the source | FR-101, FR-105 |
+| **One failed write poisoned the append chain.** Each write was attached to the *success* branch of its predecessor | After a single `ENOSPC`, every later append skipped its callback, so the rest of the interview, and every later session in the process, wrote nothing even once the disk recovered. The chain continues from a *settled* predecessor now, while the caller still sees its own write's failure | FR-105, FR-106 |
+| **A session id from a renderer went straight into a path.** `CH-115` and `CH-116` take it as an arbitrary string, and it also comes from the user-editable `id` field of a file on disk | Deleting a session whose id is `../../../settings` would have removed `settings.json` at the `userData` root. Ids are validated against a pattern with no dot and no separator, so no sequence of components can leave the sessions folder | NFR-003 |
+| **The bound profile could be deleted mid-session.** `profile:delete` removes the folder the live `.ndjson` lives in | The open transcript was unlinked, the lock left behind, and a clean stop made impossible, losing the session being recorded at that moment. Refused while a session is bound to it | FR-101, ADR-013 |
+| **A failed compaction wedged the app.** `stop` cleared its active state before compaction succeeded | `stop` then saw no session and refused to retry, while `start` was refused by the lock the failure had left, so neither worked until a restart. State clears only after compaction succeeds, and the handle is re-opened for append so a retry can still add to the transcript | FR-107 |
+| **Every crash-recovered session had a blank profile label.** The transcript carries entries and nothing else, so the bound profile, its name at the time and the real start time are nowhere in it | Session History showed recovered sessions unlabeled and ordered by whenever the first turn happened to be spoken, or by the recovery itself for a session that crashed before anyone said anything. A `<sessionId>.meta.json` sidecar is written at start and deleted on a clean stop | FR-101 |
+| **A merely parseable `.json` took out the whole profile's history.** `readJsonSession` cast rather than validated | A hand-edited or half-written `{}` reached `listSessions`, where reading `entries.length` threw and lost every valid session in that profile alongside it. Parsed against the session schema now, and an invalid file is skipped | FR-101 |
+| **The named start refusal never reached the renderer.** The router replaces every thrown handler error with one generic message | All four of `TC-104`'s cases were identical at the boundary, so the acceptance criterion held only inside the Session Manager. A refusal is an answer rather than a failure, so `CH-112` returns it. Recorded in the architecture document | FR-088, TC-104 |
+| **`CH-201` was pushed only on a transition.** A Dashboard reopened mid-session, or an overlay rebuilt for a translucency change, missed every earlier push and has no channel to ask | Either would render the session as inactive until the next start, stop or pause. Both renderers are sent the current state when they load | FR-088, ADR-015 |
+
+**Follow-up work carried out of TASK-040:**
+
+| Item | Why it is not done here | Owner |
+|---|---|---|
+| Start audio capture and the STT sessions on `session:start`, feed `CH-206` into the trigger, and answer `onFire` with `RagEngine.query` plus `runGeneration` through the overlay gate | The Session Manager is the file writer, not the orchestrator. The loop needs the Cost Meter to exist for `CH-204` and the Dashboard to drive it, so it lands with them | TASK-041, TASK-042 |
+| `TC-071`'s "`session:start` still succeeds during the model download" half, carried out of Milestone 2 | `session:start` exists now, but the assertion belongs with the live-session harness rather than with a manager that has no audio behind it | TASK-041 |
+| Usage is an in-memory snapshot the Session Manager stores and writes at compaction. Nothing sets it yet | `noteUsage` is the contract the Cost Meter calls | TASK-041 |
+| `session:read` and `session:delete` scan every profile to find a session by id | The channels name a session but not its profile. One directory read per profile is correct and bounded; carrying `profileId` on the payload would be the faster fix and is a contract change | TASK-042 |
+| Profile switching is not yet disabled in the Dashboard during a live session | `ADR-013` binds the profile at start and the main process already snapshots it, so the transcript is safe. The control that must be disabled is a renderer that does not exist | TASK-042 |
 
 ### TASK-041 Cost meter
 **Traces** FR-103, FR-109, ASM-011
