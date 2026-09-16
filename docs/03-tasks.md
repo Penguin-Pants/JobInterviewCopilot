@@ -979,7 +979,7 @@ vague intention:
 | Item | Why it is not done here | Owner |
 |---|---|---|
 | Drive the trigger from the live STT sessions, answer `onFire` with `RagEngine.query` plus `runGeneration`, and push `CH-207`/`CH-208`/`CH-209` through the overlay gate | `session:start` does not exist. `TurnFired` and `runGeneration` are the contract it will call | TASK-040 |
-| Report a cancelled generation's token usage | An adapter that is aborted returns without yielding its terminal usage record, so a cancelled generation currently accounts zero tokens although the provider streamed some. The Cost Meter is where that decision belongs | TASK-041 |
+| ~~Report a cancelled generation's token usage~~ **Answered in TASK-041.** The meter records what the provider reported and invents nothing, so a generation cancelled before any usage frame accounts zero (ADR-033) | An adapter that is aborted returns without yielding its terminal usage record, so a cancelled generation currently accounts zero tokens although the provider streamed some. The Cost Meter is where that decision belongs | TASK-041 |
 | `triggerConfigFrom` reads `supportsEndpointing` off the STT **primary**, even when health has failed over to the backup | The two models can disagree about native endpointing. Harmless today because nothing fails over yet: the trigger is never fed. The rebind belongs with the session that owns the failover boundary | TASK-040 |
 | Prove the overlay renders the idle card while paused, and that a suggestion buffered before `overlay:ready` reaches it | There is no overlay UI to assert against. `TC-087`'s integration half proves the main-process side; the renderer half needs `Overlay.tsx` | TASK-043 |
 | `CH-215 notice:captureFidelity` is documented as targeting the overlay, is pushed to the Dashboard, and is not in the overlay preload's allowlist | A Milestone 0 inconsistency, found by this milestone's `TC-096` test while enumerating the overlay surface. Not this milestone's to change: `NFR-012` decides which window should show it | TASK-043 |
@@ -1049,7 +1049,7 @@ vague intention:
 
 ## Milestone 4 — Sessions, cost, UI
 
-**Status: IN PROGRESS.** `TASK-040` is complete. `TASK-041`, `TASK-042` and
+**Status: IN PROGRESS.** `TASK-040` and `TASK-041` are complete. `TASK-042` and
 `TASK-043` are not started.
 
 ### TASK-040 Session manager and transcript — COMPLETE
@@ -1131,12 +1131,12 @@ instead of stopping.
 | Item | Why it is not done here | Owner |
 |---|---|---|
 | Start audio capture and the STT sessions on `session:start`, feed `CH-206` into the trigger, and answer `onFire` with `RagEngine.query` plus `runGeneration` through the overlay gate | The Session Manager is the file writer, not the orchestrator. The loop needs the Cost Meter to exist for `CH-204` and the Dashboard to drive it, so it lands with them | TASK-041, TASK-042 |
-| `TC-071`'s "`session:start` still succeeds during the model download" half, carried out of Milestone 2 | `session:start` exists now, but the assertion belongs with the live-session harness rather than with a manager that has no audio behind it | TASK-041 |
-| Usage is an in-memory snapshot the Session Manager stores and writes at compaction. Nothing sets it yet | `noteUsage` is the contract the Cost Meter calls | TASK-041 |
+| `TC-071`'s "`session:start` still succeeds during the model download" half, carried out of Milestone 2 | `session:start` exists now, but the assertion belongs with the live-session harness rather than with a manager that has no audio behind it. Re-carried by TASK-041 for the same reason | TASK-042 |
+| ~~Usage is an in-memory snapshot the Session Manager stores and writes at compaction. Nothing sets it yet~~ **Done in TASK-041.** `CMP-09` calls `noteUsage` on every tick and once more at stop | `noteUsage` is the contract the Cost Meter calls | TASK-041 |
 | `session:read` and `session:delete` scan every profile to find a session by id | The channels name a session but not its profile. One directory read per profile is correct and bounded; carrying `profileId` on the payload would be the faster fix and is a contract change | TASK-042 |
 | Profile switching is not yet disabled in the Dashboard during a live session | `ADR-013` binds the profile at start and the main process already snapshots it, so the transcript is safe. The control that must be disabled is a renderer that does not exist | TASK-042 |
 
-### TASK-041 Cost meter
+### TASK-041 Cost meter — COMPLETE
 **Traces** FR-103, FR-109, ASM-011
 **Depends on** TASK-040
 **Acceptance criteria**
@@ -1154,6 +1154,51 @@ instead of stopping.
 - The Cost Meter never writes to disk. It hands usage to the Session Manager
   (ADR-018).
 **Verified by** TC-108, TC-109, TC-145
+
+**What landed.** `src/main/cost.ts` is `CMP-09`: one class, a clock and an
+interval injected, no Electron import and no filesystem import. It accumulates
+audio seconds and tokens, prices them from the bundled table, pushes `CH-204`
+once per second, and raises `CH-205` at most once per threshold per session.
+`src/main/index.ts` starts it on `session:start`, rebinds its thresholds on
+`config:set`, and hands its record to `CMP-08` on `session:stop` and on quit.
+`UsageRecord` gains `estimateIncomplete`.
+
+Covered by `tests/unit/cost.test.ts` (31 cases), `tests/integration/cost-session.test.ts`
+(6 cases, the meter joined to a real Session Manager and a real temporary
+`userData`) and four guardrails in `tests/unit/guardrails.test.ts`.
+
+**Design decisions taken here, with the alternatives rejected:**
+
+| Decision | Alternative rejected | Why |
+|---|---|---|
+| LLM usage is keyed by `generationId` and a second report **replaces** the first | Summing token counts by model | A provider can report usage twice for one generation, and summing bills the same tokens twice. Replacing also makes `FR-109`'s decreasing-estimate case real rather than hypothetical. Recorded as ADR-033 |
+| A generation cancelled before the provider reported anything accounts **zero** tokens | Estimating from the text received | The meter would present a number it invented as a measurement. This resolves TASK-040's carried follow-up by answering it, not by deferring it again (ADR-033) |
+| Audio seconds and tokens are accumulated **per model** | One session total priced at the chosen model | A failover moves a stream to a model at a different rate, and a total recomputed at the end bills the whole session at the last one |
+| A missing price row sets `estimateIncomplete` and contributes zero dollars | Dropping the model, or guessing a rate | `TC-156` makes this unreachable in a shipped build, and "should be unreachable" is not "is". A labelled under-estimate beats an unlabelled one |
+| The session timer runs on `performance.now()` | `Date.now()` | An NTP correction mid-interview would fire the time warning early, and `FR-109` gives no way to take a warning back. Pinned by a guardrail |
+| Dollars are rounded to six decimals before being reported **and** before being compared to the threshold | Rounding only the displayed value | An unrounded comparison against a rounded display warns at a number the Dashboard is not showing yet |
+| A threshold of zero or less is "not set" | Treating every threshold as live | Zero would otherwise fire on the first tick of every session |
+| `start()` throws on an already-running meter | Restarting silently | A silent restart discards the running session's spend, which is the fabricated-value failure ADR-032 names |
+| `CH-205` is logged and pushed, and nothing else | Any automatic stop or throttle | `FR-103` is explicit. A guardrail asserts `cost.ts` calls `.stop(` on nothing |
+
+**Defects found in the local review of this task and fixed before pushing:**
+
+| Defect | Consequence | Fix |
+|---|---|---|
+| **The meter was stopped before compaction.** `session:stop` called `cost.stop()` and passed the result to `noteUsage`, then awaited `sessions.stop()` | `sessions.stop()` can throw on a compaction failure and deliberately leaves the session live and retryable (ADR-032). The meter was already stopped, so that live session had a frozen timer and no `CH-204` | The record is handed over before compaction and the meter is stopped only after the manager confirms the session ended. Pinned by an ordering guardrail |
+| **No `CH-204` at stop.** The panel froze on the last tick | The final figures on screen could disagree with the figures written to the session file by up to a second of spend | `stop()` pushes one last snapshot, and a test asserts it equals the record `stop()` returns |
+| **The session timer read the wall clock** | A clock adjustment mid-interview moves the timer and can fire the time warning early, which `FR-109` makes permanent | Monotonic by default, pinned by a guardrail that also bans `Date.now` from the file |
+| `CostMeterOptions` had no TSDoc | DoD 8 | Documented |
+
+**Follow-up work carried out of TASK-041:**
+
+| Item | Why it is not done here | Owner |
+|---|---|---|
+| Nothing calls `noteAudio` or `noteGeneration` yet: the meter is wired to the session lifecycle but not to a live loop, so a real session accounts zero | The feed is audio capture, the STT sessions and the generation loop, which is the live-loop work TASK-040 carried and which needs the Dashboard to drive and show it | TASK-042 |
+| `TC-071`'s "`session:start` still succeeds during the model download" half, carried from Milestone 2 and then from TASK-040 | Still the same reason: the assertion belongs with a live-session harness, and there is still no audio behind `session:start` | TASK-042 |
+| The Dashboard's Cost and Usage panel: the live timer, the spend estimate, the price table version beside it and the `estimateIncomplete` label | No renderer exists. `CH-204`, `CH-205` and `estimateIncomplete` are the API it consumes | TASK-042 |
+| Usage accounted after `cost.stop()` and before the next `start()` is kept in the maps rather than refused | Harmless: `start()` clears every accumulator, and the only caller that could do it is an in-flight generation the trigger has already aborted. Refusing it would silently lose a late report instead | TASK-050 |
+| `estimate()` is recomputed up to three times per tick | O(models consumed), which is at most four, once a second. Measurably free, and caching it adds an invalidation rule to get wrong | TASK-050 |
 
 ### TASK-042 Dashboard UI
 **Traces** FR-023, FR-024, FR-025, FR-026, FR-027, FR-028, FR-029, FR-030, FR-031, FR-032, FR-038, FR-080, FR-087, FR-088, FR-110, NFR-010, NFR-014

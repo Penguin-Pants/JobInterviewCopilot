@@ -747,6 +747,52 @@ paths, losing data must be louder than failing.**
 **Consequence.** `docs/02-architecture.md` sections 2 and 2.5 and section 4's
 `CH-112` row are corrected in the same change.
 
+### ADR-033 — LLM usage is keyed by generation and replaced, and a missing price is labelled rather than guessed
+
+**Decided 2026-09-16 during TASK-041.** Two decisions about what the Cost Meter
+is allowed to make up, recorded here because both change what a document already
+says (DoD 9).
+
+**Context 1.** `FR-109` requires the cost warning to be edge-triggered upward
+only, "including when the estimate decreases after a cancelled generation". A
+meter that sums token counts by model has no decreasing case at all, so the
+requirement's own example could not be built, let alone tested. Meanwhile
+`TASK-040` carried a follow-up asking what a cancelled generation costs: an
+aborted adapter returns without its terminal usage record, so the generation
+accounts zero although the provider streamed.
+
+**Decision 1.** Usage is accumulated per **generation id**, and a second report
+for one id **replaces** the first rather than adding to it. One generation can
+report usage more than once: a provider that sends an interim usage frame and
+then a terminal one, and a cancelled generation whose outcome carries the
+smaller figure the provider settled on. Summed, the same tokens would be billed
+twice; replaced, a cancellation lowers the estimate, which is exactly the case
+`FR-109` names. The warning guard is membership in a fired list, never a
+comparison against a previous value, so no decrease can re-arm anything.
+
+The follow-up's remaining half is answered by refusing it: a generation
+cancelled before the provider reported anything accounts **zero** tokens. The
+alternative is a local estimate from the text we received, and the meter would
+then present a number we invented as a measurement. Under-accounting that is
+labelled is better than over-confidence that is not, which is ADR-032's rule
+applied to a number rather than to a file.
+
+**Context 2.** `TC-156` fails the build when a registry model has no price row,
+so there should be no unpriced model at runtime. "Should be" is not "is": a
+hand-edited settings file can name one, and the meter would then quietly return
+a dollar figure that understates the session.
+
+**Decision 2.** `UsageRecord` gains `estimateIncomplete`. An unpriced model
+still has its tokens and its seconds counted, contributes zero dollars, and sets
+the flag; the Dashboard labels the estimate incomplete rather than showing a
+bare number. The field is defaulted in the schema rather than required, so a
+session written before the Cost Meter existed still parses.
+
+**Consequence.** `docs/02-architecture.md` sections 2 and 7 carry the field and
+the accounting rule.
+
+---
+
 ---
 
 ## 3a. Open questions
