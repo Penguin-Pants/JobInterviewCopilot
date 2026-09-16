@@ -492,6 +492,31 @@ USING_PRIMARY (at next clean boundary)
        boundary with no audio in flight. An STT provider switch never
        happens mid-utterance.
 
+**Whether a backup exists is a property of the capability binding, not of the
+credential.** One OpenAI key can be the LLM primary with no backup and the STT
+backup at the same time, so the two capabilities disagree about whether there is
+anywhere to fail over to. The machine is therefore told per request, and a
+capability never falls to a backup that belongs to the other one. Clarified
+during `TASK-014`, where the shared-credential case otherwise had two answers.
+
+**`CONFIG_REQUIRED` is terminal for the credential, not for one capability.** A
+revoked key stays revoked even where another capability routes around it, so
+nothing but a newly saved, validated key moves the machine out of that state.
+
+**Projecting credential health onto `CH-202`.** The state machine is keyed by
+credential; `CH-202` is keyed by capability. A capability reports the worst
+state among every credential it depends on, its backup included. `TC-143` is the
+reason: there OpenAI is the STT *backup* and the LLM primary, so reading the
+primary alone would leave STT looking healthy while the key it would fail over
+to is revoked. Both capabilities report the same `config-required` naming the
+same `credentialId`, and the Dashboard groups by that id to render one badge
+naming both capabilities rather than two badges saying the same thing.
+
+**A clean boundary for STT requires no audio in flight.** The switch-back takes
+the live chunk count and refuses while it is above zero, so `TC-144` is enforced
+by the code rather than by the caller remembering. The pending switch is held,
+not cancelled.
+
 If no backup is configured, the path splits on `retryable` (ADR-024):
 
 DEGRADED         -- retryable failure (network, timeout, server, rate-limit).

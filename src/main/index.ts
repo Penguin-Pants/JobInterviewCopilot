@@ -14,6 +14,7 @@ import {
   installLoopbackHandler,
   installPermissionHandler,
 } from './audio-host.js';
+import { ProviderHealthRegistry } from './ai/health.js';
 import { registerAllSttProviders } from './ai/stt/index.js';
 import { validateCredential } from './ai/validate.js';
 import { ConfigStore } from './config.js';
@@ -32,7 +33,9 @@ import {
   translucencyChangeNeedsRecreate,
   windowsBuildNumber,
 } from './windows.js';
-import type { Settings } from '../shared/types.js';
+import type { CredentialId, Settings } from '../shared/types.js';
+import { findLlmProvider } from '../shared/registry/llm.js';
+import { findSttProvider } from '../shared/registry/stt.js';
 
 /**
  * Application bootstrap (CMP-01).
@@ -50,6 +53,7 @@ let router: IpcRouter;
 
 let audioHost: ElectronAudioWorkerHost;
 let audio: AudioSupervisor;
+let health: ProviderHealthRegistry;
 
 let dashboardWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
@@ -117,6 +121,18 @@ async function bootstrap(): Promise<void> {
   // session is opened. Registration is pure; it opens no socket.
   registerAllSttProviders();
 
+  // Health is keyed by credential, so one revoked key is one badge however many
+  // capabilities it serves (ADR-017). Bound from settings here and rebound when
+  // the user changes a provider, because the binding is what says which
+  // credential serves which capability.
+  health = new ProviderHealthRegistry(
+    (state) => {
+      push(dashboardWindow?.webContents, 'state:providers', state);
+    },
+    (credentialId) => () => probeCredential(credentialId),
+  );
+  bindHealthFromSettings(config.get());
+
   installLoopbackHandler();
   installPermissionHandler((contents) => audioHost.owns(contents));
 
@@ -144,6 +160,7 @@ async function bootstrap(): Promise<void> {
   });
   app.on('window-all-closed', () => app.quit());
   app.on('will-quit', () => {
+    health.dispose();
     void audio.stop();
     hotkeys.disposeAll();
     router.dispose();
@@ -317,19 +334,69 @@ function reportCaptureFidelity(): void {
   push(dashboardWindow?.webContents, 'notice:captureFidelity', { windowsBuild: build, message });
 }
 
+/**
+ * Maps the chosen providers onto credentials. The registry never reads settings
+ * itself, so a provider swap is a rebind rather than a restart.
+ */
+function bindHealthFromSettings(settings: Settings): void {
+  health.bind({
+    capability: 'stt',
+    primary: credentialFor(settings.providers.stt.primary.providerId),
+    backup: settings.providers.stt.backup
+      ? credentialFor(settings.providers.stt.backup.providerId)
+      : null,
+  });
+  health.bind({
+    capability: 'llm',
+    primary: credentialFor(settings.providers.llm.primary.providerId),
+    backup: settings.providers.llm.backup
+      ? credentialFor(settings.providers.llm.backup.providerId)
+      : null,
+  });
+}
+
+/**
+ * Which vault key a provider uses, read from the registries rather than from a
+ * table here, so a new provider needs no edit in this file (FR-037).
+ */
+function credentialFor(providerId: string): CredentialId {
+  const descriptor = findSttProvider(providerId) ?? findLlmProvider(providerId);
+  if (!descriptor) {
+    throw new Error(`"${providerId}" is not in either provider registry.`);
+  }
+  return descriptor.credentialId;
+}
+
+/**
+ * The recovery probe: re-validate the credential against its provider. A key
+ * that validates is a provider that answered, which is what the probe asks.
+ */
+async function probeCredential(credentialId: CredentialId): Promise<boolean> {
+  const key = secrets.peek(credentialId);
+  if (key === undefined) return false;
+  const result = await validateCredential(credentialId, key);
+  return result.ok;
+}
+
 function registerIpcHandlers(): void {
   router.handle('config:get', () => config.get());
   router.handle('config:set', async (patch) => {
     const before = config.get();
     const after = config.set(patch);
     await applyThemeChange(before, after);
+    bindHealthFromSettings(after);
     return after;
   });
 
   router.handle('secrets:status', () => secrets.status());
-  router.handle('secrets:set', async ({ provider, key }) =>
-    secrets.set(provider, key, validateCredential),
-  );
+  router.handle('secrets:set', async ({ provider, key }) => {
+    const result = await secrets.set(provider, key, validateCredential);
+    // A saved, validated key is the only thing that clears CONFIG_REQUIRED for
+    // that credential (FR-026, ADR-024). Checked on the result, because a key
+    // that failed validation was never saved and changes nothing.
+    if (!('error' in result)) health.noteKeySaved(provider);
+    return result;
+  });
 
   router.handle('hotkey:rebind', ({ action, accelerator }) => {
     const result = hotkeys.rebind(action, accelerator);

@@ -433,7 +433,7 @@ Follow-up work found during implementation:
   transports and two copies would drift (ADR-017).
 **Verified by** TC-055, TC-057, TC-150
 
-### TASK-014 Provider health and failover
+### TASK-014 Provider health and failover — COMPLETE
 **Traces** FR-100, FR-104, ADR-009, ADR-010, ADR-017
 **Depends on** TASK-012
 **Acceptance criteria**
@@ -459,6 +459,32 @@ Follow-up work found during implementation:
   `CONFIG_REQUIRED` clears when the user saves a new key for that credential.
   The overlay is never touched in either state.
 - `CH-202 state:providers` reflects every transition.
+- **Result: complete.** `src/main/ai/health.ts` holds `CredentialHealth` (one
+  machine per credential) and `ProviderHealthRegistry` (binding, projection,
+  probes). `main/index.ts` binds it from settings, rebinds on a provider change,
+  pushes `CH-202` on every transition and clears `CONFIG_REQUIRED` when a key is
+  saved and validated.
+- **Spec gaps found and closed in the same change** (DoD 9):
+  - `hasBackup` was modeled as a property of the credential. It is a property of
+    the capability binding: one OpenAI key can be the LLM primary with no backup
+    and the STT backup at once, and the first version failed the LLM over to a
+    backup that existed only for STT. Now passed per request.
+  - `CONFIG_REQUIRED` is terminal for the credential, not for one capability. A
+    revoked key stays flagged even where another capability routes around it.
+  - `CH-202` is capability-shaped while the machine is credential-shaped. A
+    capability now reports the worst state among every credential it depends on,
+    including its backup. Without this `TC-143`'s own scenario (OpenAI as STT
+    backup and LLM primary) left STT reading healthy.
+  - "No audio in flight" is enforced: `noteCleanBoundary` takes the live chunk
+    count and refuses above zero, holding the pending switch rather than
+    cancelling it. `TC-144` was otherwise a convention.
+- An unclassified failure is treated as retryable. Ending an interview on an
+  error we could not classify is worse than one more attempt.
+- **Deferred to TASK-040:** calling `noteCleanBoundary` at real turn boundaries,
+  and routing live STT and LLM requests through `runFor`. The session manager
+  owns both; the contract and its guards are in place and tested.
+- **Deferred to TASK-042:** the Dashboard badge that groups by `credentialId`.
+  The payload carries what it needs.
 **Verified by** TC-100, TC-101, TC-102, TC-103, TC-143, TC-144, TC-162
 
 ---
