@@ -115,7 +115,7 @@ describe('permission handler', () => {
   it('grants media to the audio worker', () => {
     const fake = fakeSession();
     const worker = { id: 'worker' };
-    installPermissionHandler((c) => c === worker, fake.session);
+    installPermissionHandler((c) => (c as unknown) === worker, fake.session);
 
     const decide = vi.fn();
     fake.permission()(worker, 'media', decide);
@@ -136,7 +136,7 @@ describe('permission handler', () => {
   it('denies every permission other than media, even to the worker', () => {
     const fake = fakeSession();
     const worker = { id: 'worker' };
-    installPermissionHandler((c) => c === worker, fake.session);
+    installPermissionHandler((c) => (c as unknown) === worker, fake.session);
 
     for (const permission of ['geolocation', 'notifications', 'clipboard-read', 'midi']) {
       const decide = vi.fn();
