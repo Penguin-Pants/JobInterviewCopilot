@@ -472,6 +472,32 @@ describe('TC-054 socket reconnect', () => {
     expect(sockets[1]!.binaryFrames).toHaveLength(MAX_QUEUED_CHUNKS);
   });
 
+  /**
+   * ADR-036. The Cost Meter bills audio "actually sent to a provider", and the
+   * queue drops the oldest chunks during an outage rather than growing without
+   * bound (ADR-027). Counted at the caller, an outage longer than the queue was
+   * billed as though every second of it had been transcribed.
+   */
+  it('counts only the bytes it put on the wire, never the chunks it dropped', async () => {
+    const { s, sockets } = session();
+    s.connect();
+    sockets[0]!.opened();
+
+    s.push(chunk(0));
+    expect(s.sentBytes).toBe(32000);
+
+    sockets[0]!.dropped();
+    await Promise.resolve();
+
+    // Five more than the queue holds, so five are dropped and never sent.
+    for (let i = 0; i < MAX_QUEUED_CHUNKS + 5; i += 1) s.push(chunk(i));
+    expect(s.sentBytes).toBe(32000);
+
+    // The ones that survived the queue are billed when they are finally flushed.
+    sockets[1]!.opened();
+    expect(s.sentBytes).toBe(32000 * (1 + MAX_QUEUED_CHUNKS));
+  });
+
   it('gives up after the ladder and reports a retryable error', async () => {
     const { s, sockets } = session();
     const errors: ProviderError[] = [];

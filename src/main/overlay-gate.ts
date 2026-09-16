@@ -97,6 +97,19 @@ export class OverlayGate {
     if (this.card) this.card.delivered = 0;
   }
 
+  /**
+   * A session boundary: forget the card entirely (ADR-036).
+   *
+   * `noteClosed` deliberately **keeps** the card, because a window rebuilt for a
+   * translucency change mid-generation has to be sent the whole of what it
+   * missed. Across a session boundary that is exactly wrong: the card outlives
+   * the interview, and the next overlay rebuild replays the previous
+   * interview's suggestion to a session that has not produced one yet.
+   */
+  reset(): void {
+    this.card = null;
+  }
+
   send(message: GatedMessage): void {
     if (message.channel === 'suggestion:begin') {
       // A new card replaces the old one wholesale. Interleaving two cards'

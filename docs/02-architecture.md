@@ -25,6 +25,7 @@ Electron gives three process kinds. This app uses four window contexts.
 |  CMP-10 IPC Router          ipc/router.ts                     |
 |  CMP-11 Hotkey Manager      hotkeys.ts                        |
 |  CMP-12 Provider Health     health.ts                         |
+|  CMP-15 Live Session Loop   live.ts                           |
 +-------------------------------------------------------------+
         |                 |                  |
    preload bridge    preload bridge     preload bridge
@@ -54,6 +55,7 @@ Electron gives three process kinds. This app uses four window contexts.
 | CMP-10 | IPC Router | Channel registration and payload validation | Hold session or business state, or redact (redaction lives in the logger alone, FR-034) |
 | CMP-11 | Hotkey Manager | Global shortcut registration, rebinding, conflict reporting | Interpret app state |
 | CMP-12 | Provider Health | Failover state keyed by **credential**, backoff, background re-probe | Be keyed by capability (ADR-017) |
+| CMP-15 | Live Session Loop | Joining capture, transcription, the trigger, retrieval, generation, the overlay gate, the transcript writer and the Cost Meter for the length of one session | Own a policy of its own, write a file, create a window, or import Electron (TASK-044, ADR-035) |
 | CMP-13 | Dashboard renderer | All configuration and history UI | Hold authoritative state |
 | CMP-14 | Overlay renderer | Idle card, suggestion stack, consent reminder, font control | Fetch from any network |
 
@@ -437,6 +439,7 @@ interface SttSession {
   readonly source: 'interviewer' | 'candidate';
   readonly choice: ProviderChoice;
   push(chunk: AudioChunk): void;
+  readonly sentBytes?: number;                 // PCM actually put on the wire
   close(): Promise<void>;
   on(e: 'transcript', h: (t: TranscriptEvent) => void): void;
   on(e: 'endpoint', h: () => void): void;      // provider-native turn end
@@ -472,6 +475,27 @@ All three v1 streaming providers take the gap as a parameter, so all three are
 | `elevenlabs:scribe-v2-realtime` | `min_silence_duration_ms`, VAD commit strategy |
 
 `openai:whisper-1` has no turn signal at all and is `false`.
+
+**Two properties of this interface, added in TASK-044 and recorded as ADR-036.**
+
+`open` resolving does **not** mean the provider accepted the connection. Every
+streaming adapter asks its socket to connect and returns; a refused, revoked or
+dropped connection arrives later on the `error` event, after the adapter's own
+reconnect ladder. The caller must therefore treat that event as the provider
+failing, not as a line for the log: `CMP-15` raises it into `CMP-12` and
+re-opens the pair on whatever the machine then serves. Without that, a dead
+primary never failed over, because the open had already been recorded a success.
+
+`sentBytes` is what the session has actually put on the wire, and it is optional.
+`SocketSttSession` drops queued chunks during an outage rather than buffering
+without bound (ADR-027), so only the adapter knows what really went; the Cost
+Meter's "audio actually sent to a provider" is read from here. An adapter that
+sends everything it is handed has nothing to correct and omits it, and the
+caller bills the chunk it handed over.
+
+`close` on a **batch** adapter posts its remaining buffer and answers from it,
+so a caller must stay routable until `close` resolves. Clearing the route first
+discarded the last thing said before Stop.
 
 Adapter notes:
 - `deepgram`: WebSocket with `encoding=linear16`, `sample_rate=16000`,
@@ -575,6 +599,19 @@ interface RetrievedChunk { chunk: Chunk; score: number; }
 Cosine similarity over L2-normalized vectors, so a dot product. Brute force over
 the profile's vectors. At an expected ceiling of 5000 chunks per profile a brute
 force scan is under 5 ms. No vector index in v1.
+
+**Empty and failed are different answers** (ADR-036, corrected in TASK-044).
+`[]` means the notes were searched and nothing matched, or there was nothing to
+search: an empty question, an unknown profile, a profile with no ready document.
+A failure to *reach* notes that do exist throws `RetrievalUnavailableError`:
+the embedding model is gone although ready documents were embedded with it, or
+the question could not be embedded.
+
+`TASK-024` collapsed both onto `[]`, so that a failure could not throw into a
+session. It reached `CMP-15` as "no relevant notes", and the loop then built a
+suggestion the overlay renders identically to a grounded one. The loop abandons
+the turn on the throw, which is neither a crash nor a fabricated answer
+(ADR-032, ADR-035).
 
 ### 3.5 Provider health and failover (`CMP-12`, ADR-009, ADR-010)
 
@@ -783,13 +820,24 @@ CMP-08     validates: a profile is active, no session is running,
 CMP-08     creates sessionId, opens <id>.ndjson
 CMP-01     shows overlay, setContentProtection(true) already applied
 CMP-14     receives CH-210 overlay:consent, renders the reminder card
-CMP-03a    creates the Audio Worker, sends CH-301
-CMP-03b    acquires loopback + mic, builds two 16 kHz contexts
-CMP-04     opens one SttSession per stream
-CMP-05     enters LISTENING
 CMP-09     starts the timer, begins accounting
+CMP-15     CMP-03a creates the Audio Worker, sends CH-301
+CMP-03b    acquires loopback + mic, builds two 16 kHz contexts
+CMP-15     CMP-04 opens one SttSession per stream, under CMP-12
+CMP-05     enters LISTENING
 Dashboard  receives CH-201 state:session { active: true }
 ```
+
+**Correction, made in TASK-044.** `CMP-09` starts **before** capture, not last.
+The Cost Meter clears every accumulator in `start()`, so a second of audio
+handed to it before it is running is discarded rather than counted, and the loop
+begins sending audio the moment capture comes up. The two lines are swapped
+above rather than left to be rediscovered.
+
+**`CMP-15` is the caller of all of this.** The lines above name the component
+doing the work; the component asking for it is the live session loop, added by
+TASK-044 and recorded as ADR-035. `CMP-01` starts and stops it and owns nothing
+else about a session.
 
 If the consent card has not been dismissed when the first suggestion is ready,
 the suggestion still renders. The reminder is non-blocking (ADR-002). What is
@@ -815,13 +863,29 @@ CMP-05   final received -> start turnEndGapMs timer
          Deepgram endpoint event -> fire immediately
 CMP-05   timer elapses -> guard FR-051 (>=3 words, >=12 chars)
          if a generation is in flight -> abort it, CH-209 status 'cancelled'
-CMP-06   query(activeProfileId, questionText, 3)
+CMP-15   onFire -> CMP-06 query(boundProfileId, questionText, 3)
 CMP-07   build prompt, call provider, CH-207 suggestion:begin
 CMP-07   buffer deltas, flush per line -> CH-208 suggestion:line (xN)
 CMP-07   stream ends -> CH-209 suggestion:end 'complete'
 CMP-08   append the suggestion TranscriptEntry
 CMP-09   add token usage, recompute spend, maybe CH-205 usage:warning
 ```
+
+Three rules `CMP-15` adds to that sequence, each from a case the diagram does
+not show. All three are asserted by `TC-164` and the cases beside it.
+
+- **The profile is the one bound at start**, never `settings.activeProfileId`
+  read again at turn time (ADR-013). A profile switch mid-session would
+  otherwise answer this interview out of another interview's notes.
+- **A failed retrieval abandons the turn.** Generating from no notes produces a
+  suggestion the overlay renders identically to a grounded one, which is the
+  plausible value ADR-032 forbids. An unanswered turn is silence, and `FR-102`
+  says silence is not an error.
+- **The replacement of a cancelled generation awaits its predecessor.** The
+  trigger aborts the old generation before firing the new one, and the new one
+  waits for the old one's transcript entry before appending its own, which is
+  what makes `FR-106`'s ordering a mechanism rather than a race that usually
+  goes the right way.
 
 ### 5.3 Trigger state machine (`CMP-05`)
 
@@ -965,6 +1029,19 @@ smaller figure than the interim already charged. That is the decrease `FR-109`
 names, and the warning guard is membership in a fired list, so no decrease can
 re-arm a threshold.
 
+**One generation can be several billable requests** (ADR-036, TASK-044). A retry
+or a failover sends the question again, and both requests are billable, possibly
+at different rates. Replacement by `generationId` is right *within* one request
+and wrong across two, so `CMP-15` accounts each attempt under `<generationId>#n`
+and every attempt is summed. The transcript still records the outcome the
+overlay showed, which is the last attempt's.
+
+**Audio seconds are read from the adapter, not from the chunk handed to it**
+(ADR-036). `SocketSttSession` drops queued chunks during an outage rather than
+buffering without bound (ADR-027), so billing the chunk the supervisor passed on
+would charge an outage as though it had been transcribed. `SttSession.sentBytes`
+is the measurement.
+
 A generation cancelled before the provider reported any usage accounts zero
 tokens. The meter has no token counter of its own and does not estimate one from
 the text received: a number we invented would be presented as a measurement
@@ -1053,7 +1130,7 @@ The remaining concentrations of risk:
 | Keys never in plaintext on disk | `safeStorage` DPAPI, separate file, refuse to save if unavailable | TC-021, TC-022 |
 | Keys never reach a renderer | `secrets:status` returns booleans only. No channel returns a key | TC-023, code review |
 | Keys never in logs | A redaction function runs on every log argument and every serialized error | TC-024 |
-| No audio on disk | The only `ArrayBuffer` is transferred, never passed to `fs`. The lint rule covers the whole reachable audio path: `src/renderer/audio-worker/**`, `src/main/audio.ts`, `src/main/ai/stt.ts` and `src/main/ai/stt/**`. A runtime filesystem write monitor covers what lint cannot | TC-041, TC-042, TC-137 |
+| No audio on disk | The only `ArrayBuffer` is copied in memory, never passed to `fs` (ADR-027). The lint rule covers the whole reachable audio path: `src/renderer/audio-worker/**`, `src/main/audio.ts`, `src/main/audio-host.ts`, `src/main/live.ts`, `src/main/ai/stt.ts` and `src/main/ai/stt/**`. A runtime filesystem write monitor covers what lint cannot | TC-041, TC-042, TC-137 |
 | Renderer isolation | `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`, preload allowlist | TC-086 |
 | No remote code in renderers | CSP without `unsafe-eval`, `will-navigate` and `setWindowOpenHandler` both deny | TC-087 |
 | Overlay hidden from capture | `setContentProtection(true)` at creation, never disabled | TC-005, manual MW-01 |
@@ -1070,6 +1147,9 @@ The remaining concentrations of risk:
 | STT provider failure | Dashboard badge only | Overlay unchanged |
 | LLM provider failure | Dashboard badge only | Overlay unchanged |
 | Loopback device missing | Dashboard error badge, session start refused | No |
+| STT session cannot be opened | Dashboard badge, session runs with no transcription | Overlay unchanged |
+| An open STT socket fails terminally | Raised into `CMP-12`: retry, failover, and the pair re-opened on whichever target it then serves | Overlay unchanged |
+| Retrieval fails on a turn | Logged, the turn is left unanswered. Never answered from no notes (ADR-035, ADR-036) | Overlay unchanged |
 | Mic device missing | Dashboard warning badge, session continues | No |
 | RAG document conversion failure | Document row shows `error` with the message | No |
 | Embedding model download failure | Dashboard error, retry button, session still startable | No |
@@ -1080,6 +1160,13 @@ The remaining concentrations of risk:
 The overlay has exactly two states, idle and suggestions. It has no error state.
 This is a hard rule from `FR-076` and it is why every row above resolves to the
 Dashboard.
+
+**One row is not yet implemented.** "Loopback device missing, session start
+refused" needs a fifth named refusal on `CH-112`, and capture only starts
+*inside* `session:start`, after `CMP-08` has already created the transcript and
+taken the lock. Today a dead interviewer stream shows on the `CH-203` badge and
+the session runs. Carried by TASK-044 to TASK-050 rather than half-built, and
+`AudioSupervisor.canStartSession` is the verdict it will read.
 
 ---
 
@@ -1094,6 +1181,7 @@ src/
     audio.ts           CMP-03a
     session.ts         CMP-08
     cost.ts            CMP-09
+    live.ts            CMP-15, TASK-044, the live session loop
     health.ts          CMP-12
     hotkeys.ts         CMP-11
     pricing.json

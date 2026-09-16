@@ -55,7 +55,7 @@ is broken. A test that merely runs nearby code does not count.
 | FR-044 | TC-043 |
 | FR-045 | TC-044 |
 | FR-046 | TC-045 |
-| FR-047 | TC-050, TC-051, TC-052, TC-152, TC-153 |
+| FR-047 | TC-050, TC-051, TC-052, TC-152, TC-153, TC-164 |
 | FR-048 | TC-050 |
 | FR-049 | TC-055, TC-056, TC-057 |
 | FR-050 | TC-033, TC-053, TC-080, TC-081, TC-082, TC-159 |
@@ -100,12 +100,12 @@ is broken. A test that merely runs nearby code does not count.
 | FR-093 | TC-113, TC-114 |
 | FR-094 | TC-116, TC-146 |
 | FR-100 | TC-054, TC-100, TC-101, TC-103, TC-143, TC-144, TC-162, MW-09 |
-| FR-101 | TC-105, TC-106, TC-107, TC-123 |
+| FR-101 | TC-105, TC-106, TC-107, TC-123, TC-164 |
 | FR-102 | TC-110 |
-| FR-103 | TC-108, TC-109, TC-125 |
+| FR-103 | TC-108, TC-109, TC-125, TC-164 |
 | FR-104 | TC-101, TC-143 |
 | FR-105 | TC-105, TC-106, MW-10 |
-| FR-106 | TC-134 |
+| FR-106 | TC-134, TC-164 |
 | FR-107 | TC-135, MW-10 |
 | FR-108 | TC-135, MW-10 |
 | FR-109 | TC-145 |

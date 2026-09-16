@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { RagEngine } from '../../src/main/rag.js';
+import { RagEngine, RetrievalUnavailableError } from '../../src/main/rag.js';
 import { modelDirectoryFor, XenovaEmbedder } from '../../src/main/rag/embed.js';
 import { EMBEDDING_MODEL } from '../../src/shared/registry/embedding.js';
 import { FakeEmbedder } from '../fakes/embedder.js';
@@ -196,7 +196,12 @@ describe('TC-071 ingestion is blocked until the model is ready', () => {
     h.embedder.reset();
     const loadsBefore = h.embedder.ensureReadyCalls;
 
-    expect(await h.engine.query(profile.id, 'Acme Corp', 3)).toEqual([]);
+    // It throws rather than answering `[]`: these documents are ready, so their
+    // notes exist and cannot be reached, which is a failure and not an empty
+    // result. The live loop abandons the turn on it (ADR-036).
+    await expect(h.engine.query(profile.id, 'Acme Corp', 3)).rejects.toThrow(
+      RetrievalUnavailableError,
+    );
     // No embed call, so no load, so no 90 MB download inside the
     // question-to-suggestion budget.
     expect(h.embedder.calls).toEqual([]);

@@ -170,6 +170,53 @@ describe('TC-055 non-streaming buffering', () => {
     expect(s.bufferedChunks).toBe(0);
   });
 
+  /**
+   * ADR-036. `close` used to set `closed` before the tail's request came back,
+   * and `transcribe` discards its response when the session is closed, so the
+   * last thing said before Stop was posted, paid for, answered and thrown away.
+   * The tail is the whole reason `close` flushes at all.
+   */
+  it('emits the tail transcript rather than discarding its own final request', async () => {
+    const s = session();
+    const heard: TranscriptEvent[] = [];
+    s.on('transcript', (e) => heard.push(e));
+
+    s.push(chunk(0));
+    s.push(chunk(1));
+
+    await s.close();
+
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(heard.map((e) => e.text)).toEqual(['a buffered sentence']);
+    expect(heard[0]?.isFinal).toBe(true);
+  });
+
+  it('waits for a request already in flight before closing', async () => {
+    let release = (): void => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    post = vi.fn().mockImplementation(async () => {
+      await held;
+      return { ok: true, status: 200, text: 'the last window' };
+    });
+
+    const s = session();
+    const heard: TranscriptEvent[] = [];
+    s.on('transcript', (e) => heard.push(e));
+
+    // A full window, so the request is posted by `push` rather than by `close`.
+    for (let i = 0; i < WHISPER_BUFFER_CHUNKS; i += 1) s.push(chunk(i));
+    expect(s.requestsInFlight).toBe(1);
+
+    const closing = s.close();
+    release();
+    await closing;
+
+    expect(heard.map((e) => e.text)).toEqual(['the last window']);
+    expect(s.requestsInFlight).toBe(0);
+  });
+
   it('drops a push after close and posts nothing more', async () => {
     const s = session();
     await s.close();

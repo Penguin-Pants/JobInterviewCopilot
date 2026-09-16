@@ -793,6 +793,177 @@ the accounting rule.
 
 ---
 
+### ADR-034 — The live session loop is its own task, not a section of the Dashboard task
+
+**Decided 2026-09-16, before TASK-044.** A planning decision, recorded here
+because restructuring the build plan is a DoD 9 event.
+
+**Context.** `TASK-042` had grown to six Dashboard sections, eight acceptance
+criteria of its own, **and** the whole live loop: starting capture, opening the
+STT sessions, feeding the trigger, answering `onFire` with retrieval and
+generation, and feeding the Cost Meter. The loop had arrived there by being
+carried rather than by being chosen. `TASK-040` handed it on because the Session
+Manager is the transcript's writer and not an orchestrator, and `TASK-041`
+handed it on again because the Cost Meter counts and does not drive. Each hand-on
+was right on its own and the effect of all of them was that the one piece of work
+every other Milestone 4 task depends on had no task of its own and no acceptance
+criteria of its own.
+
+Two consequences followed. The loop would have been reviewed as a part of a
+renderer task, against criteria written about renderer sections. And the first
+end-to-end suggestion, question in, bullets out, would not have been provable
+until a Dashboard existed to press Start, which puts the riskiest integration in
+the project behind the largest untested surface in it.
+
+**Decision.** The loop becomes `TASK-044 Live session loop`, depending on
+`TASK-013`, `TASK-030`, `TASK-032`, `TASK-040` and `TASK-041`, and blocking
+`TASK-042`. The three follow-ups parked on `TASK-042` that are really the loop
+move with it, `TC-071`'s remaining half included, and `TASK-030`'s
+`triggerConfigFrom` failover rebind joins them because the session is the
+component that owns the failover boundary.
+
+It is numbered **044** rather than inserted as a renumbered `042`. Renumbering
+would rewrite task ids across `03-tasks.md`, `05-traceability.md`,
+`06-verification-map.md`, the architecture and this log, and every one of those
+edits is a chance to break a trace that currently holds. A gap-free numbering is
+worth nothing; a trace that still points at the right task is worth a great deal.
+
+**Consequence.** The loop is driven by a test harness rather than by a renderer,
+so it is provable before `TASK-042` starts, and `TASK-042` shrinks back to the
+Dashboard. `TC-164` is added as its end-to-end case. `docs/03-tasks.md`,
+`docs/04-test-strategy.md` and `docs/06-verification-map.md` change in the same
+commit, and `docs/05-traceability.md` regenerates from them.
+
+---
+
+### ADR-035 — The live loop is a component, and a failed retrieval abandons the turn
+
+**Decided 2026-09-16 during TASK-044.** Three decisions the loop forced,
+recorded here because each changes what a document already says (DoD 9).
+
+**Context 1.** The loop has no component in the map. `CMP-01` is the only
+candidate, and its own row forbids it: "must not contain business logic". The
+work is real and has state of its own: the streams that are open, the model that
+is serving, and the generation in flight.
+
+**Decision 1.** `CMP-15 Live Session Loop`, `src/main/live.ts`. It owns no policy
+of its own, writes no file and creates no window, and it imports neither Electron
+nor `node:fs`, which is asserted rather than intended. Every collaborator is
+injected, so the whole loop runs in a test with no Electron, no socket and no
+model. `CMP-01` starts and stops it and owns nothing else about a session.
+
+Audio bytes now pass through it, so it joins the reachable audio path in the
+`NFR-002` lint ban and in section 9 of the architecture.
+
+**Context 2.** `RagEngine.query` can fail: a torn `vectors.bin`, a transient
+read error. The loop then has a question, no notes, and a working language
+model. Generating anyway produces a card the overlay renders exactly like a
+grounded one, and the user has no way to tell which they are reading during an
+interview.
+
+**Decision 2.** A failed retrieval **abandons the turn**. The failure is logged,
+the trigger is told the generation settled so the machine is free for the next
+question, and nothing reaches the overlay. This is ADR-032 applied to a
+suggestion: an unanswered turn looks like silence, which `FR-102` says is not an
+error, while an ungrounded suggestion is the plausible value that rule forbids.
+`FR-076` leaves no third option, because the overlay has no error state.
+
+**Context 3.** A model that is not in the registry, a credential with no key and
+a missing adapter are **configuration** faults. Routed through `CMP-12`, each
+arrives as a non-retryable `client` error, which sends the credential to
+`CONFIG_REQUIRED` and blames a key that is perfectly good. That is the failure
+`requireLlmProvider` already guards against inside the LLM facade, and it comes
+straight back if the loop resolves a provider inside `runFor`.
+
+**Decision 3.** Both the STT target and the LLM target are resolved **outside**
+the health machine. `runFor` sees only what a provider actually did. The other
+half of the same boundary: `runGeneration` returns a provider failure rather
+than throwing it, because the overlay has no error state, so the loop rethrows
+that failure inside `runFor` and keeps the salvaged outcome. Without the rethrow
+a dead key would never fail over; without keeping the outcome, `FR-076`'s
+salvage would be thrown away on the way past.
+
+**Consequence.** `docs/02-architecture.md` sections 1, 5.1, 5.2, 9, 10 and 11
+change in the same pull request. Section 5.1's ordering is corrected: `CMP-09`
+starts before capture, because a meter that is not running discards the audio
+handed to it.
+
+### ADR-036 — Eight boundaries the live loop got wrong, and what each one is now
+
+**Decided 2026-09-16 during TASK-044**, from the Codex review on the pull
+request. All eight findings were real. They are recorded together because they
+are one mistake with eight faces: **the loop trusted what a collaborator's
+signature implied rather than what the collaborator actually does.**
+
+**1. A resolved `open` is not a connected socket.** Every streaming adapter asks
+its socket to connect and returns; a refused or revoked connection arrives later
+on the `error` event, after the adapter's own reconnect ladder. `runFor` had
+therefore already recorded the open as a success, so an unavailable primary
+never retried and never failed over, and the session simply transcribed nothing
+for the rest of the interview. That event is now raised **into** the health
+machine and the pair is re-opened on whatever the machine then serves. This also
+answers the follow-up TASK-044 was going to carry, that a socket dying
+mid-session was logged and never reopened.
+
+**2. `[]` from retrieval is not "nothing matched".** `RagEngine.query` returned
+`[]` when the embedding model was gone and when embedding threw, which TASK-024
+chose so that a failure could not throw into a session. ADR-035 had just decided
+that a failed retrieval must abandon the turn, and the two cannot both hold: the
+failure arrived as "no relevant notes" and the loop generated from them, which
+is the ungrounded suggestion ADR-035 exists to prevent. `query` now throws
+`RetrievalUnavailableError` when notes that exist cannot be reached, and still
+answers `[]` when there is genuinely nothing to search. Neither a crash nor a
+fabricated answer.
+
+**3. A live session is not a state machine with one thread.** `session:start`
+tells the renderers the session is live before awaiting the loop, so Stop can
+arrive while capture or a socket is still coming up. The teardown ran, and the
+start's own continuation then opened the pair again and started the trigger,
+leaving sockets live against a transcript the Session Manager had compacted.
+`stop` now waits for the bring-up it interrupts rather than tearing it down
+from underneath.
+
+**4. `close` on a batch adapter is where its last answer comes from.** Whisper
+posts its remaining buffer inside `close`. The loop cleared its stream map first,
+so that answer was dropped; and `close` set `closed` before the request came
+back, so `transcribe` discarded the response as well. The last thing said before
+Stop was posted, paid for, answered, and thrown away, on every session recorded
+with a batch model. The streams stay routable until `close` resolves, and
+`close` waits for its own requests. A separate `closing` flag keeps *chunks* out
+of a socket that is going away, which is what the early clear was really for.
+
+**5. A configured backup is not a usable backup.** The health machine's binding
+says a backup exists; whether it can be used (a key, a registry entry, an
+adapter) is the loop's question, and it can answer no. Falling back to the
+primary there re-ran the provider that had just failed while the machine
+recorded `using-backup`, so the Dashboard named a backup that never answered a
+request. An unusable backup now fails the backup attempt explicitly.
+
+**6. A chunk handed to an adapter is not a chunk sent.** `SocketSttSession`
+drops queued chunks during an outage rather than buffering without bound
+(ADR-027). Billing what the supervisor passed on charged an outage as though it
+had been transcribed, which contradicts the meter's own "actually sent to a
+provider" rule. `SttSession` gains an optional `sentBytes`, counted at the one
+place a chunk reaches the socket, and the meter reads that.
+
+**7. One generation is not one billable request.** A retry or a failover sends
+the question again. ADR-033's replacement by `generationId` is right within one
+request, which can report usage twice, and wrong across two, which are both
+billable and possibly at different rates. Each attempt is accounted under
+`<generationId>#n`.
+
+**8. A card the gate holds is not scoped to a session.** `noteClosed` keeps the
+card on purpose, so a generation streaming through a translucency rebuild is
+replayed in full to the new renderer (ADR-016). Across a session boundary that
+is exactly wrong: the card outlived the interview, and the next rebuild replayed
+the previous interview's suggestion to a session that had not produced one. The
+gate is cleared at both ends of a session.
+
+**Consequence.** `docs/02-architecture.md` sections 3.1, 3.4, 7 and 10 carry the
+corrected contracts. One of TASK-044's declared follow-ups is closed by finding
+1 and another by finding 6; both are struck through in `03-tasks.md`. Every fix
+is pinned by a test checked to fail without it.
+
 ---
 
 ## 3a. Open questions

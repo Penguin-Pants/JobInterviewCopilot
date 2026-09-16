@@ -1,4 +1,5 @@
 import { writeFileSync } from 'node:fs';
+import { RetrievalUnavailableError } from '../../src/main/rag.js';
 import { describe, expect, it } from 'vitest';
 import { makeHarness, NOTES_MD, RESUME_MD } from '../fakes/rag-harness.js';
 
@@ -94,13 +95,21 @@ describe('TC-077 empty and degenerate queries', () => {
     expect(results.every((r) => r.chunk.sourceFile === 'good.md')).toBe(true);
   });
 
-  it('a failing query embedding returns [] rather than throwing into the session', async () => {
+  /**
+   * Changed in TASK-044 and recorded as ADR-036. This case used to assert `[]`,
+   * so that a failure could not throw into a session. It reached the live loop
+   * as "no relevant notes", and the loop then built a suggestion the overlay
+   * renders identically to a grounded one, which is the plausible value ADR-032
+   * forbids. Empty and failed are different answers now; the loop abandons the
+   * turn on the throw, which is neither a crash nor a fabricated answer.
+   */
+  it('a failing query embedding throws rather than reporting an empty result', async () => {
     const h = makeHarness();
     const profile = await h.engine.createProfile('Acme');
     await h.engine.importDocuments(profile.id, [h.writeSourceFile('resume.md', RESUME_MD)]);
 
     h.embedder.failNext = new Error('ONNX session crashed');
-    await expect(h.engine.query(profile.id, 'anything')).resolves.toEqual([]);
+    await expect(h.engine.query(profile.id, 'anything')).rejects.toThrow(RetrievalUnavailableError);
   });
 });
 

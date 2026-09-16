@@ -105,6 +105,18 @@ export class SocketSttSession implements SttSession {
   /** Bounded by MAX_QUEUED_CHUNKS. Cleared as soon as the socket is writable. */
   private readonly queue: AudioChunk[] = [];
 
+  /**
+   * PCM bytes this session has actually put on the wire (`FR-103`).
+   *
+   * The Cost Meter bills audio "actually sent to a provider", and during an
+   * outage `push` drops the oldest queued chunks rather than growing without
+   * bound (ADR-027). Counting at the caller would therefore bill an outage
+   * longer than the queue as though it had been transcribed. Counted here, at
+   * the one place a chunk reaches the socket, a dropped chunk costs nothing and
+   * a chunk that waits in the queue is billed when it is finally flushed.
+   */
+  private sent = 0;
+
   private readonly handlers: Handlers = { transcript: [], endpoint: [], error: [] };
 
   constructor(opts: {
@@ -130,6 +142,11 @@ export class SocketSttSession implements SttSession {
 
   get isOpen(): boolean {
     return this.open;
+  }
+
+  /** PCM bytes put on the wire, for the Cost Meter (`FR-103`, ADR-036). */
+  get sentBytes(): number {
+    return this.sent;
   }
 
   connect(): void {
@@ -230,6 +247,7 @@ export class SocketSttSession implements SttSession {
     if (this.closing) return;
     if (this.open && this.socket) {
       this.socket.send(this.spec.encode(chunk));
+      this.sent += chunk.pcm.byteLength;
       return;
     }
     // Socket is down. Hold at most MAX_QUEUED_CHUNKS, dropping the oldest, so a
@@ -244,6 +262,7 @@ export class SocketSttSession implements SttSession {
     // splice empties the array in place, so no chunk is retained past the send.
     for (const chunk of this.queue.splice(0, this.queue.length)) {
       socket.send(this.spec.encode(chunk));
+      this.sent += chunk.pcm.byteLength;
     }
   }
 

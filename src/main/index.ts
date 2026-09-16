@@ -23,6 +23,7 @@ import { ConfigStore } from './config.js';
 import { CostMeter } from './cost.js';
 import { HotkeyManager } from './hotkeys.js';
 import { IpcRouter, push } from './ipc/router.js';
+import { LiveSessionLoop } from './live.js';
 import { getLogger, initLogger } from './logger.js';
 import { OverlayGate, type GatedMessage } from './overlay-gate.js';
 import { RagEngine } from './rag.js';
@@ -45,7 +46,14 @@ import {
   translucencyChangeNeedsRecreate,
   windowsBuildNumber,
 } from './windows.js';
-import type { CredentialId, Profile, Session, Settings, StreamState } from '../shared/types.js';
+import type {
+  CredentialId,
+  Profile,
+  ProviderChoice,
+  Session,
+  Settings,
+  StreamState,
+} from '../shared/types.js';
 import { findLlmProvider } from '../shared/registry/llm.js';
 import { findSttModel, findSttProvider } from '../shared/registry/stt.js';
 
@@ -71,6 +79,7 @@ let trigger: TriggerMachine;
 let overlayGate: OverlayGate;
 let sessions: SessionManager;
 let cost: CostMeter;
+let live: LiveSessionLoop;
 
 /**
  * Resolves when crash recovery has finished (`FR-105`, `FR-108`).
@@ -142,10 +151,11 @@ async function bootstrap(): Promise<void> {
 
   audio = new AudioSupervisor({
     worker: audioHost,
-    // The chunk goes straight to the STT layer once TASK-012 lands. Until then
-    // it is dropped here rather than queued: a queue with no consumer is the
-    // unbounded retention ADR-027 exists to prevent.
-    onChunk: () => {},
+    // Straight to the live loop, which pushes it to its stream's provider
+    // session and releases it in the same turn. Outside a session the loop
+    // holds no stream and drops the chunk rather than queueing it: a queue with
+    // no consumer is the unbounded retention ADR-027 exists to prevent.
+    onChunk: (chunk) => live.handleChunk(chunk),
   });
 
   // The STT adapters must be registered before any key is validated or any
@@ -195,15 +205,10 @@ async function bootstrap(): Promise<void> {
   // owns. Nothing here opens a socket or reads a document.
   trigger = new TriggerMachine({
     config: triggerConfigFrom(config.get()),
-    onFire: (turn) => {
-      // TASK-040 replaces this with the query, prompt and generation loop. It
-      // logs rather than silently discarding, so a turn detected with no
-      // consumer is visible instead of looking like a trigger that never fired.
-      getLogger().info('turn fired with no session consumer yet (TASK-040)', {
-        generationId: turn.generationId,
-        words: turn.question.split(/\s+/).length,
-      });
-    },
+    // Answered by the live loop (CMP-15, TASK-044): retrieval, then generation,
+    // then the overlay gate. Routed through a closure because the loop is
+    // constructed after the machine it drives.
+    onFire: (turn) => live.onFire(turn),
     // Entering PAUSED shows the idle card (FR-053). Resuming is pushed by the
     // hotkey handler, so each direction sends exactly one CH-212.
     onOverlayIdle: () => pushOverlayMode(),
@@ -233,6 +238,32 @@ async function bootstrap(): Promise<void> {
       push(dashboardWindow?.webContents, 'rag:progress', { docId, state, percent }),
     onModelState: (state) => push(dashboardWindow?.webContents, 'model:download', state),
     onError: (message, detail) => getLogger().warn(message, detail),
+  });
+
+  // The live session loop (CMP-15, TASK-044, ADR-035). Everything it drives
+  // already exists; this is the join, and it is the last thing constructed
+  // because it holds a reference to all of them. No Electron reaches it: the
+  // two windows it affects are addressed through the callbacks below.
+  live = new LiveSessionLoop({
+    audio,
+    trigger,
+    sessions,
+    cost,
+    health,
+    settings: () => config.get(),
+    retrieve: (profileId, question, k) => rag.query(profileId, question, k),
+    keyFor: (providerId) => secrets.peek(credentialFor(providerId)),
+    onTranscript: (event) => push(dashboardWindow?.webContents, 'transcript:live', event),
+    // Through the gate, never straight at the window: the first suggestion of a
+    // session is the one an overlay that has not painted its consent card would
+    // otherwise drop (FR-008, ADR-016).
+    onSuggestion: (message) => overlayGate.send(message),
+    // The model that is actually serving decides the trigger's endpointing and
+    // batch window, because health can put the session on the backup and the
+    // two models can disagree about both.
+    onSttChoice: (choice) => trigger.setConfig(triggerConfigFrom(config.get(), choice)),
+    onError: (message, detail) => getLogger().error(message, detail),
+    onInfo: (message, detail) => getLogger().info(message, detail),
   });
 
   hotkeys = new HotkeyManager(globalShortcut);
@@ -277,6 +308,10 @@ async function bootstrap(): Promise<void> {
     // The meter is stopped first: it clears its interval and hands over the
     // final record, so a quit during a session compacts with the usage it
     // accounted rather than with the last tick's, or with none at all.
+    // The loop is released first, for the same reason the stop handler releases
+    // it first: it is what can still append. `dispose` rather than `stop`,
+    // because `will-quit` cannot hold the app open to await a teardown.
+    live.dispose();
     sessions.noteUsage(cost.stop());
     void sessions.stop();
     trigger.dispose();
@@ -575,8 +610,13 @@ function reportCaptureFidelity(): void {
  * endpoint as far as the trigger is concerned, which falls back to the local
  * timer rather than trusting a signal nothing described (TC-159).
  */
-function triggerConfigFrom(settings: Settings): TriggerConfig {
-  const model = findSttModel(settings.providers.stt.primary);
+function triggerConfigFrom(settings: Settings, serving?: ProviderChoice | null): TriggerConfig {
+  // The model that is **serving**, not the configured primary. Health can move
+  // a session to the backup, and the two models can disagree about native
+  // endpointing and about the batch window, so reading the primary would give
+  // the trigger a capability the open socket does not have (TASK-030 follow-up,
+  // closed by TASK-044).
+  const model = findSttModel(serving ?? settings.providers.stt.primary);
   return {
     ...settings.trigger,
     supportsEndpointing: model?.supportsEndpointing ?? false,
@@ -712,7 +752,7 @@ function registerIpcHandlers(): void {
     // The trigger holds its own copy of the gap and the guard, so a settings
     // change has to reach it. Applying at the next armed timer rather than
     // rewriting one in flight is the machine's own rule (FR-050).
-    trigger.setConfig(triggerConfigFrom(after));
+    trigger.setConfig(triggerConfigFrom(after, live.activeSttChoice));
     // The meter holds its own copy too. A threshold already crossed stays
     // crossed for the session whatever the new value is (FR-109).
     cost.setThresholds(after.thresholds);
@@ -836,15 +876,42 @@ function registerIpcHandlers(): void {
         llmKeyPresent: keys[credentialFor(settings.providers.llm.primary.providerId)],
       });
 
-      // The trigger leaves IDLE only here. Audio capture and the STT sessions
-      // are TASK-040's remaining half and are not started yet, so the machine
-      // is listening to a stream that does not exist; it fires nothing until it
-      // does, rather than being stubbed into looking live.
-      trigger.start();
+      // The gate forgets the previous interview's card. It deliberately keeps
+      // one across a window rebuild, so a generation streaming through a
+      // translucency change is replayed in full (ADR-016); across a session
+      // boundary that same card would be replayed to the next interview
+      // before it had produced anything of its own (ADR-036).
+      overlayGate.reset();
+
+      // The overlay is created hidden and shown for the session, as section
+      // 5.1 sequences it. `showInactive` so the interviewer's window keeps
+      // focus: the overlay is a teleprompter, never a window to work in.
+      if (overlayWindow && !overlayWindow.isDestroyed() && !overlayWindow.isVisible()) {
+        overlayWindow.showInactive();
+      }
+
       // Started after the manager accepted, so a refused start leaves no meter
       // running and no timer counting a session that does not exist.
+      //
+      // And started *before* the loop, which section 5.1 lists last. The meter
+      // clears every accumulator in `start()`, so a second of audio handed over
+      // before it runs is discarded rather than counted, and the loop begins
+      // sending audio the moment capture comes up. Recorded in section 5.1.
       cost.start();
+
+      // The loop starts capture, opens one SttSession per stream, rebinds the
+      // trigger to whichever model is serving, and leaves the machine in
+      // LISTENING (CMP-15, TASK-044). It never throws: a capture or socket
+      // failure belongs on the Dashboard badge, not on a session that has
+      // already been created on disk (section 10, TC-132).
+      //
+      // The state is pushed **before** the loop comes up. The session is live
+      // the moment the manager accepted it, and bringing capture and two
+      // sockets up takes long enough that a Dashboard told afterwards would
+      // render the session as inactive for the whole of it (FR-088).
       pushSessionState();
+      await live.start(active.profileId);
+
       return { sessionId: active.id };
     } catch (err) {
       // A refusal is an answer, not a failure. Thrown, it would reach the
@@ -864,9 +931,12 @@ function registerIpcHandlers(): void {
     const active = sessions.current;
     if (!active) throw new Error('No session is running.');
 
-    // The trigger stops first, so an in-flight generation is aborted before the
-    // writer closes and cannot append to a handle that has gone.
-    trigger.stop();
+    // The loop stops first and is awaited. It stops the trigger, which aborts
+    // the in-flight generation, waits for that generation's cancelled entry to
+    // reach the transcript, closes both STT sessions and stops capture. Nothing
+    // below may run while an append is still possible, or the last entry of the
+    // interview would land on a handle that has gone (FR-046, FR-107).
+    await live.stop();
     // The final record is handed over before compaction, so the session file
     // carries it rather than the last tick's. The meter itself is stopped only
     // once the manager really ended the session: `sessions.stop()` can throw on
@@ -875,6 +945,13 @@ function registerIpcHandlers(): void {
     sessions.noteUsage(cost.record());
     await sessions.stop();
     cost.stop();
+
+    // Hidden again: an always-on-top window with no session behind it has
+    // nothing to say and sits over whatever the user does next. The gate is
+    // cleared with it, so the card cannot outlive the interview it belongs to.
+    overlayGate.reset();
+    if (overlayWindow && !overlayWindow.isDestroyed()) overlayWindow.hide();
+
     pushSessionState();
     return { sessionId: active.id };
   });

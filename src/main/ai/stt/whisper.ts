@@ -58,6 +58,16 @@ export class WhisperSttSession implements SttSession {
   private closed = false;
   private inFlight = 0;
 
+  /**
+   * Every request still in flight, so `close` can wait for the tail.
+   *
+   * A batch model answers once per window, so the last thing said before Stop
+   * is sitting in a request that has not come back yet. Closing without waiting
+   * discarded it, and the final spoken segment of every interview went missing
+   * (ADR-036).
+   */
+  private readonly pending = new Set<Promise<void>>();
+
   private readonly handlers: Handlers = { transcript: [], error: [] };
 
   constructor(opts: {
@@ -99,9 +109,11 @@ export class WhisperSttSession implements SttSession {
     if (this.buffer.length === 0) return;
     // Hand the array off and replace it, so the request holds the only
     // reference and the session retains nothing.
-    const pending = this.buffer;
+    const buffered = this.buffer;
     this.buffer = [];
-    void this.transcribe(encodeWav(pending));
+    const request = this.transcribe(encodeWav(buffered));
+    this.pending.add(request);
+    void request.finally(() => this.pending.delete(request));
   }
 
   private async transcribe(wav: Uint8Array): Promise<void> {
@@ -142,12 +154,20 @@ export class WhisperSttSession implements SttSession {
     for (const h of this.handlers.error) h(err);
   }
 
-  close(): Promise<void> {
+  /**
+   * Post the tail, wait for every request to answer, then close (ADR-036).
+   *
+   * `closed` is set **after** the wait, not before it. Set first, it made
+   * `transcribe` discard the very response this flush exists to collect, so the
+   * last thing the interviewer said before Stop was posted, paid for, answered,
+   * and thrown away.
+   */
+  async close(): Promise<void> {
     // The tail of the last turn is worth one more request, not worth dropping.
     this.flush();
+    await Promise.allSettled([...this.pending]);
     this.closed = true;
     this.buffer = [];
-    return Promise.resolve();
   }
 
   on(e: 'transcript', h: (t: TranscriptEvent) => void): void;
