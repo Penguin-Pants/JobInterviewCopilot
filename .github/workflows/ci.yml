@@ -167,8 +167,16 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run package
+      - name: Build the installer
+        shell: bash
+        run: npm run package 2>&1 | tee package.log
       - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: windows-package-log
+          path: package.log
+      - uses: actions/upload-artifact@v4
+        if: success()
         with:
           name: windows-installer
           path: release/*.exe

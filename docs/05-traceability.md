@@ -133,7 +133,7 @@ Coverage: 107 requirements, 26 tasks, 130 automated test cases, 13 manual checks
 | TASK-004 | Secret vault | FR-021, FR-022, FR-026, FR-034, NFR-003 | TC-020, TC-021, TC-022, TC-023, TC-024, TC-025, TC-139 |
 | TASK-005 | Window orchestrator and content protection | FR-002, FR-005, FR-009, FR-080, FR-081, FR-082, FR-083, FR-089, NFR-012 | TC-004, TC-005, TC-009, TC-036, TC-142, TC-148 |
 | TASK-006 | Hotkey manager | FR-030, FR-053, FR-084 | TC-034, TC-035 |
-| TASK-010 | Audio Worker spike | FR-040 | MW-02 |
+| TASK-010 | Audio Worker spike — COMPLETE | FR-040 | MW-02 |
 | TASK-011 | Dual-stream capture | FR-040, FR-041, FR-042, FR-043, FR-044, FR-045, FR-046, NFR-002 | TC-040, TC-041, TC-042, TC-043, TC-044, TC-045, TC-136 |
 | TASK-012 | STT registry and the streaming adapters | FR-023, FR-037, FR-038, FR-047, FR-048, FR-100, NFR-001 | TC-050, TC-051, TC-052, TC-053, TC-054, TC-056, TC-151, TC-152, TC-153, TC-155, TC-156, TC-159 |
 | TASK-013 | Non-streaming STT class and the Whisper adapter | FR-047, FR-049, NFR-017 | TC-055, TC-057, TC-150 |

@@ -16,6 +16,7 @@ import tsPlugin from '@typescript-eslint/eslint-plugin';
 const AUDIO_PATH_FILES = [
   'src/renderer/audio-worker/**/*.ts',
   'src/main/audio.ts',
+  'src/main/audio-host.ts',
   'src/main/ai/stt.ts',
   'src/main/ai/stt/**/*.ts',
 ];

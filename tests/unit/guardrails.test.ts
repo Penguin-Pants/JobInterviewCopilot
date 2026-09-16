@@ -49,6 +49,7 @@ describe('TC-042 no filesystem on the audio path', () => {
     for (const p of [
       'src/renderer/audio-worker/**/*.ts',
       'src/main/audio.ts',
+      'src/main/audio-host.ts',
       'src/main/ai/stt.ts',
       'src/main/ai/stt/**/*.ts',
     ]) {
@@ -325,5 +326,93 @@ describe('electron stays out of production dependencies', () => {
       production,
       `these production dependencies pull electron into the packaged app: ${production.join(', ')}`,
     ).toEqual([]);
+  });
+});
+
+/**
+ * ADR-028 regression: the two details the loopback spike found the hard way.
+ *
+ * Both are the kind of mistake that produces no error at all. A missing
+ * callback leaves getDisplayMedia pending forever, and microphone processing
+ * left on degrades the interviewer audio before the transcriber sees it, so the
+ * symptom is bad suggestions rather than anything that looks like an audio bug.
+ */
+describe('ADR-028 loopback acquisition details', () => {
+  it('the display-media handler disables the system picker', () => {
+    const source = readFileSync('src/main/audio-host.ts', 'utf8');
+    expect(source).toContain('useSystemPicker: false');
+  });
+
+  it('the handler calls its callback on every path, including failures', () => {
+    const source = readFileSync('src/main/audio-host.ts', 'utf8');
+    const handler = source.slice(
+      source.indexOf('export function installLoopbackHandler'),
+      source.indexOf('export function installPermissionHandler'),
+    );
+    // One for the no-source path, one for the error path, one for success.
+    expect((handler.match(/callback\(/g) ?? []).length).toBeGreaterThanOrEqual(3);
+    expect(handler).toContain('callback({})');
+  });
+
+  it('both streams request microphone processing off', () => {
+    const source = readFileSync('src/renderer/audio-worker/capture.ts', 'utf8');
+    for (const setting of ['autoGainControl', 'echoCancellation', 'noiseSuppression']) {
+      expect(source, `${setting} must be requested off`).toMatch(
+        new RegExp(`${setting}:\\s*false`),
+      );
+    }
+    // Applied to the loopback stream and the microphone alike.
+    expect((source.match(/RAW_AUDIO_CONSTRAINTS/g) ?? []).length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('the video track is dropped immediately after acquisition', () => {
+    // The video is only the vehicle Chromium requires for a display stream.
+    // Holding a screen capture in this app would be indefensible.
+    const source = readFileSync('src/renderer/audio-worker/capture.ts', 'utf8');
+    expect(source).toContain('getVideoTracks()');
+    expect(source).toContain('removeTrack(track)');
+  });
+
+  it('media permission is granted only to the audio worker', () => {
+    const source = readFileSync('src/main/audio-host.ts', 'utf8');
+    expect(source).toMatch(/permission === 'media' && isAudioWorker\(contents\)/);
+  });
+
+  it('electron-audio-loopback is not imported anywhere', () => {
+    const files = execSync('git ls-files src spike', { encoding: 'utf8' })
+      .trim()
+      .split('\n')
+      .filter(Boolean);
+    const importers = files.filter((f) =>
+      readFileSync(f, 'utf8').includes('electron-audio-loopback'),
+    );
+    // The spike harness may mention it in a comment; an import is the problem.
+    const realImports = importers.filter((f) =>
+      /(?:import|require)\s*\(?\s*['"]electron-audio-loopback/.test(readFileSync(f, 'utf8')),
+    );
+    expect(realImports).toEqual([]);
+  });
+});
+
+/**
+ * Regression: CI must never publish a release.
+ *
+ * electron-builder detects CI and triggers an implicit GitHub Release publish.
+ * With no GH_TOKEN it fails, and the installer job goes red *after* building
+ * the installer successfully, which reads as a packaging failure and is not
+ * one. Its own warning asks for an explicit --publish, and v27 removes the
+ * implicit behaviour, so stating it is right regardless.
+ */
+describe('packaging never publishes from CI', () => {
+  it('the package script passes --publish never', () => {
+    const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as {
+      scripts: Record<string, string>;
+    };
+    expect(pkg.scripts.package).toContain('--publish never');
+  });
+
+  it('declares an author, which electron-builder warns about and shows as publisher', () => {
+    const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as { author?: string };
+    expect(pkg.author).toBeTruthy();
   });
 });

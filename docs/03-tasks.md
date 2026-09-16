@@ -268,7 +268,7 @@ Follow-up work found during implementation:
 
 ## Milestone 1 — Audio and transcription
 
-### TASK-010 Audio Worker spike
+### TASK-010 Audio Worker spike — COMPLETE
 **Traces** FR-040, ADR-005
 **Depends on** TASK-001
 **Acceptance criteria**
@@ -278,13 +278,13 @@ Follow-up work found during implementation:
   or as a new ADR selecting the replacement approach if it fails.
 - If the package fails, the fallback is already designed in ADR-005 and is
   selected here rather than invented.
-- **Result: ADR-028.** The package is not needed. A sandboxed,
-  context-isolated renderer acquires the loopback stream through
-  `getDisplayMedia` alone, with main owning
-  `setDisplayMediaRequestHandler({ useSystemPicker: false })`. Verified on
-  Linux by `spike/loopback/`; Windows confirmation runs in the
-  `loopback-spike` CI job.
-- This task gates TASK-011. Do not start TASK-011 before it closes.
+- **Result: ADR-028. CLOSED, confirmed on Windows.** The package is not needed
+  and is removed. A sandboxed, context-isolated renderer acquires the loopback
+  stream through `getDisplayMedia` alone, with main owning
+  `setDisplayMediaRequestHandler({ useSystemPicker: false })`. The
+  `loopback-spike` job on `windows-latest` returns `works-with-audio`, with a
+  real audio track, non-silent samples and the context forced to 16 kHz.
+- This task gates TASK-011, and the gate is now open.
 **Verified by** MW-02
 
 ### TASK-011 Dual-stream capture

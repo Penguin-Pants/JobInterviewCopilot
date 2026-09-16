@@ -558,9 +558,7 @@ declared. An unbounded accumulation is not.
 
 ### ADR-028 — Acquire loopback with the platform API, not a third-party package
 
-**TASK-010 spike result.** Linux evidence recorded 2026-09-15; Windows
-confirmation pending the `loopback-spike` CI job, which is what `TASK-011`
-actually gates on.
+**TASK-010 spike result. Confirmed on Windows 2026-09-15; the gate is closed.**
 
 **What the spike asked.** `electron-audio-loopback` was the project's
 highest-risk dependency: one maintainer, 19.5 kB, last published a year ago, and
@@ -582,13 +580,19 @@ weakening the sandbox on the one window that handles raw audio.
 `navigator.mediaDevices.getDisplayMedia`, with main owning the handler for the
 session:
 
-| Observation | Result |
-|---|---|
-| Stream acquired in a sandboxed renderer | yes |
-| Audio tracks | 1, labelled `System audio`, `deviceId: loopback` |
-| Native track format | 48 kHz, mono, 16-bit |
-| `AudioContext({ sampleRate: 16000 })` | reported 16000, confirming ADR-006 |
-| Non-silent samples within 3 s | yes |
+| Observation | Linux | Windows |
+|---|---|---|
+| Stream acquired in a sandboxed renderer | yes | yes |
+| Audio track present | 1, `System audio`, `deviceId: loopback` | yes |
+| `AudioContext({ sampleRate: 16000 })` | reported 16000 | reported 16000 |
+| Non-silent samples within 3 s | yes | yes |
+| Microphone processing defaults on | yes | yes |
+| Verdict | works-with-audio | **works-with-audio** |
+
+Windows is the target platform (`NFR-011`), so that column is the one that
+closes the gate. The findings are published as step names and conclusions on the
+`loopback-spike` job, because job logs and artifacts need authentication and a
+spike whose answer cannot be read without signing in is not an answer.
 
 **Decision.** Acquire loopback through the platform API directly. Main owns
 `setDisplayMediaRequestHandler` for the life of a session and answers with
@@ -613,29 +617,31 @@ the package implements, so nothing is being invented here.
    `TASK-011` must request them off explicitly. This is a transcription-quality
    bug that would have been extremely hard to diagnose from bad suggestions.
 
-**A third cost the spike exposed, after the fact.** Declaring the package as a
-production dependency broke the Windows installer build. It lists `electron` as
-a peer dependency, npm auto-installs peers, and so `electron` became reachable
-in the production dependency tree. electron-builder hard-errors on `electron`
-outside `devDependencies`, and the only symptom was `npm run package` failing on
-the Windows runner with nothing in the diff that looked like it concerned
-packaging.
+**A third cost, found while removing it.** Declaring the package as a production
+dependency pulled `electron` into the production dependency tree: it lists
+`electron` as a peer dependency and npm auto-installs peers. electron-builder
+treats `electron` outside `devDependencies` as an error, so this was a real cost
+of the package independent of its maintenance risk.
 
-That is a real cost of the package independent of its maintenance risk, and it
-is now a test: `npm ls electron --omit=dev` must report an empty production
-tree. The test was verified by reinstalling the package and watching it fail,
-naming the offender.
+It is now a test: `npm ls electron --omit=dev` must report an empty production
+tree, verified by reinstalling the package and watching the test fail naming the
+offender.
 
-**Status.** The package is removed. The spike's own harness never imported it,
-so its result is unaffected. Windows confirmation runs in the `loopback-spike`
-job, whose findings are published as step names and conclusions rather than
-buried in logs: job logs and artifacts need authentication, and a spike whose
-answer cannot be read is not an answer.
+**Correction.** This was first written up as the cause of the Windows installer
+failure. It was not. Removing the package did not fix that job, and the real
+cause turned out to be unrelated (see the note under `package` in the CI
+workflow: electron-builder was attempting an implicit GitHub Release publish).
+The peer-dependency problem is genuine and worth guarding against, but it was
+diagnosed from a plausible story rather than from the log, and the story was
+wrong.
 
-**Fallback if Windows contradicts the Linux result.** Reinstate the package,
-accept a non-sandboxed audio worker, record the deviation from `FR-086`, and
-move `electron` handling so the production tree stays clean. That is three
-costs, which is the measure of how much the direct path is worth.
+**Status.** Confirmed on Windows and closed. The package is removed, and the
+spike's own harness never imported it, so its result stands on its own.
+
+Had Windows contradicted the Linux result, the fallback was to reinstate the
+package, accept a non-sandboxed audio worker, record the deviation from
+`FR-086`, and rework the dependency so the production tree stayed clean. Three
+costs avoided, which is the measure of what the direct path was worth.
 
 ---
 
