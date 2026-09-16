@@ -736,3 +736,86 @@ describe('TC-057 no renderer names a model', () => {
     expect(files).toEqual([]);
   });
 });
+
+/**
+ * ADR-018 splits two jobs that a single "cost and transcript" component would
+ * merge: the Cost Meter counts, the Session Manager writes. The split is only
+ * real if the meter has no way to write, so it is asserted rather than trusted.
+ */
+describe('ADR-018 the Cost Meter neither writes nor stops', () => {
+  const source = readFileSync(join(process.cwd(), 'src', 'main', 'cost.ts'), 'utf8');
+
+  it('imports no filesystem module and no Electron', () => {
+    expect(source).not.toMatch(/from '(node:)?fs/);
+    expect(source).not.toMatch(/from 'electron'/);
+    expect(source).not.toMatch(/from '\.\/session\.js'/);
+  });
+
+  /**
+   * The session timer must not move when the system clock does. A wall-clock
+   * default would fire the time warning early on an NTP correction, and
+   * `FR-109` gives no way to take that warning back.
+   */
+  it('measures elapsed time on a monotonic clock', () => {
+    expect(source).not.toContain('Date.now');
+    expect(source).toContain('performance.now()');
+  });
+
+  it('holds no path and opens no handle', () => {
+    for (const forbidden of ['writeFile', 'appendFile', 'open(', 'userDataDir', 'join(']) {
+      expect(source).not.toContain(forbidden);
+    }
+  });
+
+  /**
+   * `FR-103` is explicit that the session is never stopped automatically. The
+   * meter's own `stop` ends its accounting and returns a record; nothing in it
+   * may reach for anything else's.
+   */
+  it('stops nothing but itself', () => {
+    const calls = source.match(/\w+\.stop\(/g) ?? [];
+    expect(calls).toEqual([]);
+  });
+});
+
+/**
+ * `FR-109` is a rule about a missing capability: there must be no way to
+ * re-arm a threshold that has fired. A comparison against a previous value
+ * would be one, so the meter's guard must stay membership in the fired list.
+ */
+describe('FR-109 warnings cannot re-arm', () => {
+  it('guards each warning on the fired list, not on a previous value', () => {
+    const source = readFileSync(join(process.cwd(), 'src', 'main', 'cost.ts'), 'utf8');
+    expect(source).toContain("!this.warned.includes('cost')");
+    expect(source).toContain("!this.warned.includes('time')");
+    // Nothing removes a fired threshold. `length = 0` in `start` is a new
+    // session, which is the one place the list is allowed to shrink.
+    const shrinks = source.match(/warned\.(pop|shift|splice|filter|delete)\(/g) ?? [];
+    expect(shrinks).toEqual([]);
+  });
+});
+
+/**
+ * `session:stop` compacts, and compaction can fail. The order the handler uses
+ * is load-bearing: the meter's final record reaches the Session Manager before
+ * it writes, and the meter itself keeps running until the manager confirms the
+ * session really ended. Stopping the meter first left a failed stop with a live
+ * session and a frozen timer (FR-103, ADR-018).
+ */
+describe('FR-103 the cost meter outlives a failed session stop', () => {
+  it('hands over the record before compaction and stops the meter after it', () => {
+    const source = readFileSync('src/main/index.ts', 'utf8');
+    const handler = source.slice(
+      source.indexOf("router.handle('session:stop'"),
+      source.indexOf("router.handle('session:list'"),
+    );
+    expect(handler).toContain('sessions.noteUsage(cost.record())');
+
+    const handOver = handler.indexOf('cost.record()');
+    const compact = handler.indexOf('await sessions.stop()');
+    const meterStop = handler.indexOf('cost.stop()');
+    expect(handOver).toBeGreaterThan(-1);
+    expect(compact).toBeGreaterThan(handOver);
+    expect(meterStop).toBeGreaterThan(compact);
+  });
+});

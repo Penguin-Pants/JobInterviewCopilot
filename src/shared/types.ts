@@ -187,6 +187,12 @@ export interface UsageRecord {
   llmOutputTokens: number;
   estimatedUsd: number;
   priceTableVersion: string;
+  /**
+   * A model consumed during the session had no price row, so `estimatedUsd`
+   * understates spend and the Dashboard must label it incomplete rather than
+   * show a bare number (ASM-011).
+   */
+  estimateIncomplete: boolean;
   /** At most one of each per session (FR-103, FR-109). */
   warningsIssued: ('cost' | 'time')[];
 }

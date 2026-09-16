@@ -45,6 +45,7 @@ export function emptyUsage(priceTableVersion = ''): UsageRecord {
     llmOutputTokens: 0,
     estimatedUsd: 0,
     priceTableVersion,
+    estimateIncomplete: false,
     warningsIssued: [],
   };
 }

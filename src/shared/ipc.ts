@@ -101,6 +101,9 @@ const usageRecord = z.object({
   llmOutputTokens: z.number(),
   estimatedUsd: z.number(),
   priceTableVersion: z.string(),
+  // Defaulted rather than required, so a session written before the Cost Meter
+  // existed still parses instead of taking the whole transcript down with it.
+  estimateIncomplete: z.boolean().default(false),
   warningsIssued: z.array(z.enum(['cost', 'time'])),
 });
 
