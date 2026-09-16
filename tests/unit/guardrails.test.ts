@@ -404,8 +404,33 @@ describe('FR-085 theme changes reach the running overlay', () => {
   it('a translucency mode change recreates the overlay', () => {
     const source = readFileSync('src/main/index.ts', 'utf8');
     expect(source).toContain('translucencyChangeNeedsRecreate(');
-    const apply = source.slice(source.indexOf('async function applyThemeChange'));
-    expect(apply.slice(0, 900)).toContain('createOverlayWindow(after)');
+    // Bounded by the next declaration rather than by a character count, for the
+    // same reason as the test above: a fixed window fails when a comment is
+    // added, which says nothing about whether the overlay is recreated.
+    const start = source.indexOf('async function applyThemeChange');
+    expect(start).toBeGreaterThan(-1);
+    const next = source.indexOf('\nfunction ', start);
+    const apply = source.slice(start, next === -1 ? undefined : next);
+    expect(apply).toContain('createOverlayWindow(after,');
+  });
+
+  /**
+   * TASK-032 regression: every path that creates the overlay must hand the
+   * window over through `onCreated`, before its renderer loads.
+   *
+   * Assigning from the returned promise leaves `overlayWindow` null for the
+   * whole of that load, so the `did-finish-load` listener fires against a null
+   * window and the theme, the consent text and the mode are all dropped.
+   * Milestone 2 fixed this in `bootstrap` and left the two recreate paths
+   * behind, where it was invisible until something pushed to them.
+   */
+  it('no overlay is created by assigning from the returned promise', () => {
+    const source = readFileSync('src/main/index.ts', 'utf8');
+    const calls = [...source.matchAll(/createOverlayWindow\(([^,)]+)(,?)/g)];
+    expect(calls.length).toBeGreaterThan(2);
+    for (const call of calls) {
+      expect(call[2], `createOverlayWindow(${call[1] ?? ''}) has no onCreated callback`).toBe(',');
+    }
   });
 });
 
@@ -580,6 +605,10 @@ describe('TC-151 no provider id outside the registry and its adapters', () => {
   const ALLOWED = [
     'src/shared/registry/',
     'src/main/ai/stt/',
+    // The LLM adapters, for the same reason as the STT ones: an adapter file is
+    // where a provider id is allowed to appear, because that file *is* the
+    // provider (TASK-032).
+    'src/main/ai/llm/',
     // Credential plumbing: these name a vault key, not a provider to branch on.
     'src/shared/types.ts',
     'src/shared/ipc.ts',
