@@ -168,18 +168,6 @@ async function bootstrap(): Promise<void> {
   registerHotkeys();
   reportCaptureFidelity();
 
-  // The Dashboard has no read-only model channel, and CH-214 only fires on a
-  // change, so without this first push a fresh install could not render the
-  // "embedding model not downloaded" state TC-161 requires without invoking
-  // `model:ensure`, which would start a 90 MB download unprompted on launch.
-  push(dashboardWindow.webContents, 'model:download', rag.getModelState());
-
-  // Reconciliation must finish before the watcher starts (FR-078, ADR-014), and
-  // both run after the Dashboard exists so its CH-213 rows are not pushed at a
-  // window that has not been created yet.
-  await ensureActiveProfile();
-  await rag.start();
-
   // Re-open windows, never re-run bootstrap. A second bootstrap would build a
   // second ConfigStore and re-register every IPC channel, which throws.
   app.on('activate', () => {
@@ -195,6 +183,37 @@ async function bootstrap(): Promise<void> {
     router.dispose();
     getLogger().close();
   });
+
+  // Started last and deliberately not awaited. Reconciling a knowledge base
+  // reads every file in every profile's `kb/`, and starting a watcher pulls
+  // chokidar in through a dynamic ESM import; neither has anything to do with
+  // the windows being ready. Awaiting it here put that work between the windows
+  // appearing and the handlers above being registered, so a slow or wedged
+  // knowledge base delayed shutdown cleanup and left the app interactive with no
+  // `window-all-closed` handler at all.
+  void startKnowledgeBase();
+}
+
+/**
+ * Bring the knowledge base up (CMP-06, FR-077, FR-078, ADR-014).
+ *
+ * Reconciliation finishes before any watcher starts, which is `rag.start`'s own
+ * contract: a watcher running alongside the pass would race it over the same
+ * files. Nothing here is allowed to escape, because the caller cannot await it.
+ */
+async function startKnowledgeBase(): Promise<void> {
+  try {
+    await ensureActiveProfile();
+    await rag.start();
+  } catch (err) {
+    getLogger().error('the knowledge base failed to start', err);
+  }
+
+  // The Dashboard has no read-only model channel, and CH-214 only fires on a
+  // change, so without this first push a fresh install could not render the
+  // "embedding model not downloaded" state TC-161 requires without invoking
+  // `model:ensure`, which would start a 90 MB download unprompted on launch.
+  push(dashboardWindow?.webContents, 'model:download', rag.getModelState());
 }
 
 /** Bring the Dashboard forward, creating it again when it has been closed. */

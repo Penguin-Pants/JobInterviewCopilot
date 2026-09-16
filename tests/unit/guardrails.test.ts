@@ -248,6 +248,52 @@ describe('FR-082 overlay is actually draggable in interactive mode', () => {
 });
 
 /**
+ * NFR-009 regression: knowledge base startup was awaited inside `bootstrap`
+ * between the windows being created and `window-all-closed` / `will-quit` being
+ * registered. Reconciling a knowledge base reads every file in every profile,
+ * and starting a watcher pulls chokidar in through a dynamic ESM import, so a
+ * slow or wedged knowledge base left the app interactive with no shutdown
+ * wiring at all. It also delayed everything after it, which is the kind of
+ * timing shift TC-148 is sensitive to on Windows.
+ */
+describe('NFR-009 app lifecycle handlers are registered before slow startup work', () => {
+  /** The body of `bootstrap`, which ends where `startKnowledgeBase` begins. */
+  function bootstrapSource(): string {
+    const source = readFileSync('src/main/index.ts', 'utf8');
+    return source.slice(
+      source.indexOf('async function bootstrap('),
+      source.indexOf('async function startKnowledgeBase('),
+    );
+  }
+
+  it('registers window-all-closed and will-quit before starting the knowledge base', () => {
+    const bootstrap = bootstrapSource();
+    const willQuit = bootstrap.indexOf("app.on('will-quit'");
+    const allClosed = bootstrap.indexOf("app.on('window-all-closed'");
+    const kbStart = bootstrap.indexOf('startKnowledgeBase()');
+
+    expect(willQuit).toBeGreaterThan(-1);
+    expect(allClosed).toBeGreaterThan(-1);
+    expect(kbStart).toBeGreaterThan(-1);
+    expect(willQuit, 'will-quit must be registered before the knowledge base starts').toBeLessThan(
+      kbStart,
+    );
+    expect(
+      allClosed,
+      'window-all-closed must be registered before the knowledge base starts',
+    ).toBeLessThan(kbStart);
+  });
+
+  it('does not await the knowledge base inside bootstrap', () => {
+    const bootstrap = bootstrapSource();
+    // `void`, not `await`: awaiting is what put it on the critical path.
+    expect(bootstrap).toContain('void startKnowledgeBase()');
+    expect(bootstrap).not.toContain('await rag.start()');
+    expect(bootstrap).not.toContain('await ensureActiveProfile()');
+  });
+});
+
+/**
  * FR-086 regression: `doc:retry` (CH-123) and `model:ensure` (CH-124) were
  * declared in the contract and handled in main, but never added to the
  * Dashboard preload's allowlist, so FR-079's retry and ADR-026's

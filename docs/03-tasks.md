@@ -600,6 +600,7 @@ pinned by a test that was checked to fail without its fix:
 | A `profile.json` with no `documents` array made every later `.find` throw out of `reconcile`; one bad profile emptied the whole Dashboard list | `kb/` is the authority, so an empty index is rebuilt, not fatal | ADR-014 |
 | The determinate download bar hit 99 percent on the 700 KB tokenizer and snapped back to 3 percent when the 90 MB weights announced themselves | Monotonic now | FR-066 |
 | `CH-215` shipped in Milestone 0 and was never written into the IPC table. The contract test only checked documented-implies-implemented | The test now asserts both directions | DoD 9 |
+| Knowledge base startup was **awaited inside `bootstrap`**, between the windows being created and `window-all-closed` and `will-quit` being registered. Reconciling reads every file in every profile's `kb/`, and starting a watcher pulls chokidar in through a dynamic ESM import | A slow or wedged knowledge base left the app interactive with no shutdown wiring at all, and delayed everything after it. Found by `TC-148` failing on the Windows runner, which is sensitive to that timing: the overlay is created `show: false` and Windows re-applies the placement of a never-shown window when it is finally shown. Startup is now background work, registered last and not awaited, with the lifecycle handlers ahead of it | NFR-009 |
 
 **Follow-up work carried out of Milestone 2**, each with an owner rather than a
 vague intention:
