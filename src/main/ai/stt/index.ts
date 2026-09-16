@@ -11,9 +11,25 @@ import { createDeepgramProvider } from './deepgram.js';
 import { createElevenLabsProvider } from './elevenlabs.js';
 import { createOpenAiRealtimeProvider } from './openai-realtime.js';
 import { createWebSocket } from './ws-factory.js';
+import { createWhisperProvider } from './whisper.js';
+import type { PostWav } from './whisper.js';
 
 export function registerStreamingSttProviders(factory: SocketFactory = createWebSocket): void {
   registerSttProvider(createDeepgramProvider(factory));
   registerSttProvider(createOpenAiRealtimeProvider(factory));
   registerSttProvider(createElevenLabsProvider(factory));
+}
+
+/**
+ * The batch table. `openai` appears in both tables: the streaming realtime
+ * socket and `whisper-1` are different transports behind one provider id, and
+ * the facade picks between them from the model's `streaming` flag.
+ */
+export function registerBatchSttProviders(post?: PostWav): void {
+  registerSttProvider(createWhisperProvider(post), 'batch');
+}
+
+export function registerAllSttProviders(): void {
+  registerStreamingSttProviders();
+  registerBatchSttProviders();
 }

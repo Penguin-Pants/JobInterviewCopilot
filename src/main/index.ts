@@ -14,7 +14,7 @@ import {
   installLoopbackHandler,
   installPermissionHandler,
 } from './audio-host.js';
-import { registerStreamingSttProviders } from './ai/stt/index.js';
+import { registerAllSttProviders } from './ai/stt/index.js';
 import { validateCredential } from './ai/validate.js';
 import { ConfigStore } from './config.js';
 import { HotkeyManager } from './hotkeys.js';
@@ -115,7 +115,7 @@ async function bootstrap(): Promise<void> {
 
   // The STT adapters must be registered before any key is validated or any
   // session is opened. Registration is pure; it opens no socket.
-  registerStreamingSttProviders();
+  registerAllSttProviders();
 
   installLoopbackHandler();
   installPermissionHandler((contents) => audioHost.owns(contents));

@@ -394,7 +394,7 @@ Follow-up work found during implementation:
   Selection is registry-driven at the model layer; no renderer exists yet.
 **Verified by** TC-050, TC-051, TC-052, TC-053, TC-054, TC-056, TC-151, TC-152, TC-153, TC-155, TC-156, TC-159
 
-### TASK-013 Non-streaming STT class and the Whisper adapter
+### TASK-013 Non-streaming STT class and the Whisper adapter — COMPLETE
 **Traces** FR-047, FR-049, NFR-017, ADR-022
 **Depends on** TASK-012
 **Acceptance criteria**
@@ -412,6 +412,25 @@ Follow-up work found during implementation:
 - The WAV header is written by hand in `src/main/ai/stt/wav.ts`. The body is
   built in memory. No file stream and no path is ever passed to the HTTP client
   (ADR-019).
+- **Result: complete.** `src/main/ai/stt/wav.ts` writes the 44-byte RIFF/WAVE
+  header by hand and `whisper.ts` buffers `WHISPER_BUFFER_CHUNKS` (four 1000 ms
+  chunks), posts each buffer as an in-memory `Blob` and emits `isFinal: true`
+  only. `on('endpoint')` is accepted and never called. No path and no stream
+  reaches the HTTP client (ADR-019, NFR-002).
+- `latencyBudgetFor(model)` in the STT registry returns `NFR-001` or `NFR-017`
+  from the entry's `streaming` flag, so which budget applies is computed, not
+  looked up by provider name.
+- The badge text now names both penalties, as `NFR-017` requires. It previously
+  named only the latency cost.
+- `TC-057`'s "no renderer names Whisper" half is enforced as a real `git grep`,
+  verified by planting a violation in a renderer and watching it fail. Its
+  Dashboard half waits on TASK-042, which builds the first model picker.
+- `TC-150`'s registry half is covered here. The end-to-end latency harness
+  needs the trigger and the LLM, so it lands with TASK-032; real numbers come
+  from MW-11.
+- Found while implementing: Whisper's `validateKey` was a copy of the realtime
+  adapter's. Both now call one `validateOpenAiKey`, because one key serves both
+  transports and two copies would drift (ADR-017).
 **Verified by** TC-055, TC-057, TC-150
 
 ### TASK-014 Provider health and failover

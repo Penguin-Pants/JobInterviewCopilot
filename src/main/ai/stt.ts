@@ -85,8 +85,8 @@ export function classifyStatus(status: number): ErrorClass {
 /**
  * The adapter tables. One row per provider id, in the class the model calls for.
  *
- * Two tables rather than one because a provider can ship models of both classes:
- * `openai` has the realtime transcription socket and `whisper-1`, which is REST.
+ * Two tables rather than one because a provider can ship models of both
+ * classes: a realtime socket and a REST endpoint under a single provider id.
  * The class is read off the selected model's registry entry, never off the
  * provider id, so this stays registry-driven (FR-037, TC-056, TC-151).
  */

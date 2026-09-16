@@ -458,3 +458,25 @@ describe('TC-151 no provider id outside the registry and its adapters', () => {
     });
   }
 });
+
+/**
+ * TC-057: the non-streaming badge text comes from the registry entry. No
+ * renderer names Whisper, so swapping the model or its warning text is a
+ * registry edit rather than a UI edit (FR-037, ADR-022).
+ */
+describe('TC-057 no renderer names a model', () => {
+  it('does not mention Whisper outside the registry and its adapter', () => {
+    const out = execSync(`git grep -l -i -F "whisper" -- 'src/*' || true`, {
+      encoding: 'utf8',
+      cwd: process.cwd(),
+    });
+    const files = out
+      .split('\n')
+      .filter(Boolean)
+      // `pricing.json` is data keyed by the registry, not code branching on a
+      // model name, and TC-156 already proves its keys and the registry agree.
+      .filter((f) => !f.endsWith('.json'))
+      .filter((f) => !f.startsWith('src/shared/registry/') && !f.startsWith('src/main/ai/stt/'));
+    expect(files).toEqual([]);
+  });
+});

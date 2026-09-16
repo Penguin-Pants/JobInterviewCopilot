@@ -3,8 +3,8 @@
  *
  * A credential is resolved to an adapter through the registry, not by branching
  * on its id: the first STT provider whose `credentialId` matches owns the check
- * (FR-037). One OpenAI key serves Whisper, the realtime transcription socket and
- * GPT, so validating it once against OpenAI covers every use (ADR-017).
+ * (FR-037). One key can serve several models and several capabilities, so it is
+ * validated once against its provider and that covers every use (ADR-017).
  */
 import { STT_REGISTRY } from '../../shared/registry/stt.js';
 import type { CredentialId, ValidationResult } from '../../shared/types.js';

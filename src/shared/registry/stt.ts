@@ -90,7 +90,10 @@ export const STT_REGISTRY: ProviderDescriptor<SttModelDescriptor>[] = [
         supportsEndpointing: false,
         audio: PCM_16K,
         pricePerAudioMinuteUsd: 0.006,
-        badge: 'Not live. Transcribes in 4 second batches, so suggestions lag a turn behind.',
+        badge:
+          'Not live. Transcribes in 4 second batches, so suggestions arrive up to ' +
+          'several seconds after the question ends, and accuracy is lower than the ' +
+          'realtime models because the batch boundary can cut a word in half.',
       },
     ],
   },
@@ -144,4 +147,32 @@ export function sttChoiceKeys(
   registry: ProviderDescriptor<SttModelDescriptor>[] = STT_REGISTRY,
 ): string[] {
   return registry.flatMap((p) => p.models.map((m) => `${p.id}:${m.id}`));
+}
+
+/**
+ * Which latency budget the selected model is held to (NFR-001 or NFR-017).
+ *
+ * Computed from the registry entry, never from a provider name. A new
+ * non-streaming provider gets the right budget with no change here.
+ */
+export interface LatencyBudget {
+  requirementId: 'NFR-001' | 'NFR-017';
+  p50Ms: number;
+  p95Ms: number;
+}
+
+export const STREAMING_BUDGET: LatencyBudget = {
+  requirementId: 'NFR-001',
+  p50Ms: 2500,
+  p95Ms: 4000,
+};
+
+export const NON_STREAMING_BUDGET: LatencyBudget = {
+  requirementId: 'NFR-017',
+  p50Ms: 7000,
+  p95Ms: 10000,
+};
+
+export function latencyBudgetFor(model: SttModelDescriptor): LatencyBudget {
+  return model.streaming ? STREAMING_BUDGET : NON_STREAMING_BUDGET;
 }

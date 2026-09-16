@@ -136,7 +136,7 @@ Coverage: 107 requirements, 26 tasks, 130 automated test cases, 13 manual checks
 | TASK-010 | Audio Worker spike — COMPLETE | FR-040 | MW-02 |
 | TASK-011 | Dual-stream capture — COMPLETE | FR-040, FR-041, FR-042, FR-043, FR-044, FR-045, FR-046, NFR-002 | TC-040, TC-041, TC-042, TC-043, TC-044, TC-045, TC-136 |
 | TASK-012 | STT registry and the streaming adapters — COMPLETE | FR-023, FR-037, FR-038, FR-047, FR-048, FR-100, NFR-001 | TC-050, TC-051, TC-052, TC-053, TC-054, TC-056, TC-151, TC-152, TC-153, TC-155, TC-156, TC-159 |
-| TASK-013 | Non-streaming STT class and the Whisper adapter | FR-047, FR-049, NFR-017 | TC-055, TC-057, TC-150 |
+| TASK-013 | Non-streaming STT class and the Whisper adapter — COMPLETE | FR-047, FR-049, NFR-017 | TC-055, TC-057, TC-150 |
 | TASK-014 | Provider health and failover | FR-100, FR-104 | TC-100, TC-101, TC-102, TC-103, TC-143, TC-144, TC-162 |
 | TASK-020 | Document import and conversion | FR-060, FR-061, FR-069 | TC-060, TC-061, TC-062, TC-063, TC-160 |
 | TASK-021 | Chunking | FR-062, FR-063 | TC-064, TC-065, TC-066, TC-067 |

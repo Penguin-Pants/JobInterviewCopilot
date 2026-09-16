@@ -91,6 +91,26 @@ export function openAiAdapterSpec(
   };
 }
 
+/**
+ * Shared by both OpenAI adapters. One key serves the realtime socket, the REST
+ * transcription endpoint and GPT, so there is one check rather than one per
+ * transport (ADR-017).
+ */
+export async function validateOpenAiKey(key: string): Promise<ValidationResult> {
+  try {
+    const res = await fetch(OPENAI_VALIDATE_URL, { headers: { Authorization: `Bearer ${key}` } });
+    if (res.ok) return { ok: true };
+    const cls = classifyStatus(res.status);
+    if (cls === 'auth') return { ok: false, reason: 'OpenAI rejected this key.' };
+    if (cls === 'rate-limit') {
+      return { ok: false, reason: 'OpenAI is rate limiting this key. Try again shortly.' };
+    }
+    return { ok: false, reason: 'OpenAI could not confirm this key.' };
+  } catch {
+    return { ok: false, reason: 'OpenAI could not be reached. Check your connection.' };
+  }
+}
+
 export function createOpenAiRealtimeProvider(factory: SocketFactory): SttProvider {
   return {
     id: 'openai',
@@ -109,21 +129,6 @@ export function createOpenAiRealtimeProvider(factory: SocketFactory): SttProvide
       session.connect();
       return Promise.resolve(session);
     },
-    async validateKey(key: string): Promise<ValidationResult> {
-      try {
-        const res = await fetch(OPENAI_VALIDATE_URL, {
-          headers: { Authorization: `Bearer ${key}` },
-        });
-        if (res.ok) return { ok: true };
-        const cls = classifyStatus(res.status);
-        if (cls === 'auth') return { ok: false, reason: 'OpenAI rejected this key.' };
-        if (cls === 'rate-limit') {
-          return { ok: false, reason: 'OpenAI is rate limiting this key. Try again shortly.' };
-        }
-        return { ok: false, reason: 'OpenAI could not confirm this key.' };
-      } catch {
-        return { ok: false, reason: 'OpenAI could not be reached. Check your connection.' };
-      }
-    },
+    validateKey: validateOpenAiKey,
   };
 }
