@@ -15,6 +15,7 @@ import { open, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/p
 import type { FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { sessionSchema } from '../shared/ipc.js';
 import type {
   Session,
   SessionSummary,
@@ -101,6 +102,29 @@ export interface SessionManagerOptions {
   onError?: (message: string, detail?: unknown) => void;
 }
 
+/**
+ * A session id that is safe to put in a path (`CH-115`, `CH-116`).
+ *
+ * The ids this app mints are uuids, but a session id also arrives from a
+ * renderer and from the `id` field of a file on disk the user can edit.
+ * Interpolating one straight into a path allows traversal: deleting a session
+ * whose id is `../../../settings` would remove `settings.json` at the
+ * `userData` root. No dot and no separator can appear, so no sequence of
+ * components can leave the sessions folder.
+ */
+const SAFE_SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
+export function isSafeSessionId(sessionId: string): boolean {
+  return SAFE_SESSION_ID.test(sessionId);
+}
+
+function assertSafeSessionId(sessionId: string): string {
+  if (!isSafeSessionId(sessionId)) {
+    throw new Error(`"${sessionId}" is not a valid session id.`);
+  }
+  return sessionId;
+}
+
 /** Where a session's files live. Sessions belong to a profile (ADR-013). */
 function sessionsDir(userDataDir: string, profileId: string): string {
   return join(userDataDir, 'profiles', profileId, 'sessions');
@@ -117,6 +141,38 @@ function sessionsDir(userDataDir: string, profileId: string): string {
  */
 function lockPath(userDataDir: string): string {
   return join(userDataDir, 'session.lock');
+}
+
+/**
+ * What a crash-recovered session cannot learn from its transcript (`FR-101`).
+ *
+ * Every `.ndjson` line is a transcript entry, so the profile the session was
+ * bound to, the name it had at the time and the real start time are nowhere in
+ * it. Recovering without them left every crash-recovered session with a blank
+ * profile label in Session History and a `startedAt` of whenever the first turn
+ * happened to be spoken, or of the recovery itself for a session that crashed
+ * before anyone said anything.
+ *
+ * Written once at start, beside the transcript, and deleted on a clean stop.
+ */
+interface SessionMeta {
+  profileId: string;
+  profileNameSnapshot: string;
+  startedAt: string;
+}
+
+function metaPath(dir: string, sessionId: string): string {
+  return join(dir, `${sessionId}.meta.json`);
+}
+
+async function readMeta(dir: string, sessionId: string): Promise<SessionMeta | null> {
+  try {
+    const parsed = JSON.parse(await readFile(metaPath(dir, sessionId), 'utf8')) as SessionMeta;
+    if (typeof parsed.profileId !== 'string' || typeof parsed.startedAt !== 'string') return null;
+    return parsed;
+  } catch {
+    return null;
+  }
 }
 
 interface LockContents {
@@ -192,7 +248,17 @@ export class SessionManager {
       startedAt,
     });
 
+    const meta: SessionMeta = {
+      profileId: request.profile.id,
+      profileNameSnapshot: request.profile.name,
+      startedAt,
+    };
+
     try {
+      // The sidecar first: a crash between these two writes leaves metadata
+      // with no transcript, which recovery ignores, rather than a transcript
+      // with no idea which profile it belongs to.
+      await writeFile(metaPath(dir, id), JSON.stringify(meta), 'utf8');
       this.handle = await open(join(dir, `${id}.ndjson`), 'a');
     } catch (err) {
       await rm(lockPath(this.userDataDir), { force: true });
@@ -229,10 +295,22 @@ export class SessionManager {
 
     // One `write()` of one complete line, so a crash can lose a line but cannot
     // tear one (FR-107).
-    this.writeChain = this.writeChain.then(async () => {
-      await handle.write(line);
-    });
-    return this.writeChain.then(() => seq);
+    //
+    // The chain is continued from a settled predecessor rather than from its
+    // success. Attaching to `.then` alone poisons it: one rejected write skips
+    // every later callback, so an ENOSPC that clears would still leave the rest
+    // of the interview, and every later session in this process, writing
+    // nothing. The caller still sees its own write's failure, because that is
+    // the promise returned.
+    const write = this.writeChain.then(
+      () => handle.write(line),
+      () => handle.write(line),
+    );
+    this.writeChain = write.then(
+      () => undefined,
+      () => undefined,
+    );
+    return write.then(() => seq);
   }
 
   /** A transcript turn. Text only: the type cannot express audio (FR-101). */
@@ -266,22 +344,36 @@ export class SessionManager {
 
     // Every pending append lands before the handle closes, or the last entry of
     // the session is the one that goes missing.
-    await this.writeChain.catch(() => {});
+    await this.writeChain;
     await this.handle.close();
     this.handle = null;
+
+    // `active` is cleared only once compaction has succeeded. Clearing it first
+    // left a failed compaction unrecoverable: `stop` saw no active session and
+    // refused to retry, while `start` was refused by the lock the failure had
+    // left behind, so the app could do neither until it was restarted.
+    const dir = sessionsDir(this.userDataDir, active.profileId);
+    let session: Session;
+    try {
+      session = await compactSession({
+        dir,
+        id: active.id,
+        profileId: active.profileId,
+        profileNameSnapshot: active.profileNameSnapshot,
+        startedAt: active.startedAt,
+        endedAt: this.now().toISOString(),
+        endReason,
+        usage: this.usage,
+      });
+    } catch (err) {
+      // Re-open for append so a retry can still add to the transcript, and keep
+      // the lock: the session is not over until its transcript is safe.
+      this.handle = await open(join(dir, `${active.id}.ndjson`), 'a');
+      throw err;
+    }
+
     this.active = null;
-
-    const session = await compactSession({
-      dir: sessionsDir(this.userDataDir, active.profileId),
-      id: active.id,
-      profileId: active.profileId,
-      profileNameSnapshot: active.profileNameSnapshot,
-      startedAt: active.startedAt,
-      endedAt: this.now().toISOString(),
-      endReason,
-      usage: this.usage,
-    });
-
+    await rm(metaPath(dir, active.id), { force: true });
     await rm(lockPath(this.userDataDir), { force: true });
     return session;
   }
@@ -294,10 +386,11 @@ export class SessionManager {
    * History rather than being lost or left as a file nothing reads. A stale
    * lock is cleared here, which is the only place it is cleared.
    */
-  async recover(profileIds: readonly string[]): Promise<Session[]> {
+  async recover(profiles: readonly { id: string; name: string }[]): Promise<Session[]> {
     const recovered: Session[] = [];
 
-    for (const profileId of profileIds) {
+    for (const profile of profiles) {
+      const profileId = profile.id;
       const dir = sessionsDir(this.userDataDir, profileId);
       let names: string[];
       try {
@@ -310,8 +403,9 @@ export class SessionManager {
       for (const name of names) {
         if (!name.endsWith('.ndjson')) continue;
         const id = name.slice(0, -'.ndjson'.length);
+        if (!isSafeSessionId(id)) continue;
         try {
-          const session = await this.recoverOne(dir, id);
+          const session = await this.recoverOne(dir, id, profile);
           if (session) recovered.push(session);
         } catch (err) {
           // One unreadable session must not stop the rest from being recovered.
@@ -326,7 +420,11 @@ export class SessionManager {
     return recovered;
   }
 
-  private async recoverOne(dir: string, id: string): Promise<Session | null> {
+  private async recoverOne(
+    dir: string,
+    id: string,
+    profile: { id: string; name: string },
+  ): Promise<Session | null> {
     const jsonPath = join(dir, `${id}.json`);
     const ndjsonPath = join(dir, `${id}.ndjson`);
 
@@ -335,15 +433,22 @@ export class SessionManager {
     const existing = await readJsonSession(jsonPath);
     if (existing) {
       await rm(ndjsonPath, { force: true });
+      await rm(metaPath(dir, id), { force: true });
       return null;
     }
 
     const parsed = await readNdjson(ndjsonPath);
+
+    // The sidecar is the authority on the three things the transcript cannot
+    // carry. Its absence is not fatal: the folder names the profile, and the
+    // profile's current name and the first entry's time are the best remaining
+    // answers rather than a blank label and a recovery timestamp.
+    const meta = await readMeta(dir, id);
     const session: Session = {
       id,
-      profileId: parsed.profileId,
-      profileNameSnapshot: parsed.profileNameSnapshot,
-      startedAt: parsed.startedAt ?? this.now().toISOString(),
+      profileId: meta?.profileId ?? profile.id,
+      profileNameSnapshot: meta?.profileNameSnapshot ?? profile.name,
+      startedAt: meta?.startedAt ?? parsed.startedAt ?? this.now().toISOString(),
       endedAt: this.now().toISOString(),
       entries: parsed.entries,
       usage: emptyUsage(),
@@ -351,6 +456,7 @@ export class SessionManager {
     };
     await writeSessionJson(dir, session);
     await rm(ndjsonPath, { force: true });
+    await rm(metaPath(dir, id), { force: true });
     return session;
   }
 
@@ -439,8 +545,15 @@ export async function readNdjson(path: string): Promise<ParsedNdjson> {
   let raw: string;
   try {
     raw = await readFile(path, 'utf8');
-  } catch {
-    return { entries: [], profileId: '', profileNameSnapshot: '', startedAt: null };
+  } catch (err) {
+    // Only a missing file is an empty transcript. Treating every read failure
+    // as emptiness turned a transient EACCES or EIO into permanent loss:
+    // compaction wrote an empty `.json` and then deleted the `.ndjson` that
+    // still held every entry.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { entries: [], profileId: '', profileNameSnapshot: '', startedAt: null };
+    }
+    throw err;
   }
 
   const lines = raw.split('\n').filter((line) => line.trim() !== '');
@@ -478,12 +591,23 @@ function parseEntry(line: string): TranscriptEntry | null {
   }
 }
 
+/**
+ * Reads a compacted session, or returns null.
+ *
+ * Validated rather than cast. A file that is merely *parseable*, which a
+ * hand-edited or half-written `{}` is, used to reach `listSessions`, where
+ * reading `entries.length` threw and took the whole profile's Session History
+ * with it, valid sessions included.
+ */
 async function readJsonSession(path: string): Promise<Session | null> {
+  let parsed: unknown;
   try {
-    return JSON.parse(await readFile(path, 'utf8')) as Session;
+    parsed = JSON.parse(await readFile(path, 'utf8'));
   } catch {
     return null;
   }
+  const result = sessionSchema.safeParse(parsed);
+  return result.success ? (result.data as Session) : null;
 }
 
 /** Session History for one profile, newest first (`FR-101`). */
@@ -501,7 +625,7 @@ export async function listSessions(
 
   const summaries: SessionSummary[] = [];
   for (const name of names) {
-    if (!name.endsWith('.json')) continue;
+    if (!name.endsWith('.json') || name.endsWith('.meta.json')) continue;
     const session = await readJsonSession(join(dir, name));
     if (!session) continue;
     summaries.push({
@@ -524,6 +648,7 @@ export async function readSession(
   profileId: string,
   sessionId: string,
 ): Promise<Session | null> {
+  if (!isSafeSessionId(sessionId)) return null;
   return readJsonSession(join(sessionsDir(userDataDir, profileId), `${sessionId}.json`));
 }
 
@@ -533,7 +658,11 @@ export async function deleteSession(
   profileId: string,
   sessionId: string,
 ): Promise<void> {
+  // Checked before any path is built, never after. `rm` with a traversing id
+  // would delete a file outside the sessions folder entirely.
+  assertSafeSessionId(sessionId);
   const dir = sessionsDir(userDataDir, profileId);
   await rm(join(dir, `${sessionId}.json`), { force: true });
   await rm(join(dir, `${sessionId}.ndjson`), { force: true });
+  await rm(metaPath(dir, sessionId), { force: true });
 }

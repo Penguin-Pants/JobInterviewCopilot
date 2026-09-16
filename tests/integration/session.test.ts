@@ -6,7 +6,8 @@
  * agrees with the code.
  */
 import { mkdtempSync, rmSync } from 'node:fs';
-import { readFile, readdir, stat, writeFile, mkdir } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { readFile, readdir, rm, stat, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -16,6 +17,7 @@ import {
   SessionStartRefused,
   deleteSession,
   emptyUsage,
+  isSafeSessionId,
   listSessions,
   readNdjson,
   readSession,
@@ -161,7 +163,7 @@ describe('TC-106 crash recovery', () => {
       'utf8',
     );
 
-    const recovered = await manager().recover([PROFILE.id]);
+    const recovered = await manager().recover([PROFILE]);
     expect(recovered).toHaveLength(1);
     expect(recovered[0]?.endReason).toBe('crash-recovered');
     expect(recovered[0]?.entries).toHaveLength(2);
@@ -173,7 +175,7 @@ describe('TC-106 crash recovery', () => {
   });
 
   it('recovers nothing when there is nothing to recover', async () => {
-    await expect(manager().recover([PROFILE.id])).resolves.toEqual([]);
+    await expect(manager().recover([PROFILE])).resolves.toEqual([]);
   });
 
   it('one unreadable session does not stop the others being recovered', async () => {
@@ -193,7 +195,7 @@ describe('TC-106 crash recovery', () => {
       userDataDir: userData,
       onError: (_m, detail) => errors.push(detail),
     });
-    const recovered = await m.recover([PROFILE.id]);
+    const recovered = await m.recover([PROFILE]);
 
     expect(recovered.map((s) => s.id)).toEqual(['good']);
     expect(errors).toHaveLength(1);
@@ -270,7 +272,7 @@ describe('TC-135 torn write and lock recovery', () => {
       'utf8',
     );
 
-    const recovered = await manager().recover([PROFILE.id]);
+    const recovered = await manager().recover([PROFILE]);
     expect(recovered[0]?.entries.map((e) => e.seq)).toEqual([0, 1, 2]);
   });
 
@@ -294,7 +296,7 @@ describe('TC-135 torn write and lock recovery', () => {
       'utf8',
     );
 
-    const recovered = await manager().recover([PROFILE.id]);
+    const recovered = await manager().recover([PROFILE]);
     // Nothing is recovered: the clean stop already produced the .json.
     expect(recovered).toEqual([]);
     expect(await readdir(dir)).toEqual(['both.json']);
@@ -312,7 +314,7 @@ describe('TC-135 torn write and lock recovery', () => {
     );
 
     const m = manager();
-    await m.recover([PROFILE.id]);
+    await m.recover([PROFILE]);
     await expect(stat(join(userData, 'session.lock'))).rejects.toThrow();
 
     // And the next session starts, which is the whole point of clearing it.
@@ -370,6 +372,132 @@ describe('the session binds its profile at start (ADR-013)', () => {
 
   it('refuses an append with no session rather than writing somewhere plausible', async () => {
     await expect(manager().appendTurn('interviewer', 'nowhere')).rejects.toThrow(/No session/);
+  });
+});
+
+/**
+ * Regressions found by the Codex review on the pull request.
+ */
+describe('session durability regressions', () => {
+  it('rejects a session id that could leave the sessions folder', async () => {
+    // `../../../settings` would have deleted settings.json at the userData root.
+    await expect(deleteSession(userData, PROFILE.id, '../../../settings')).rejects.toThrow(
+      /not a valid session id/,
+    );
+    await expect(readSession(userData, PROFILE.id, '../../../settings')).resolves.toBeNull();
+    expect(isSafeSessionId(randomUUID())).toBe(true);
+    for (const bad of ['..', 'a/b', 'a\\b', 'a.json', '', 'x'.repeat(200)]) {
+      expect(isSafeSessionId(bad), bad).toBe(false);
+    }
+  });
+
+  it('a read failure aborts compaction rather than writing an empty transcript', async () => {
+    const dir = sessionsDir();
+    await mkdir(dir, { recursive: true });
+    // A directory where a transcript should be: readFile fails with EISDIR,
+    // which is not ENOENT and must not be read as "no entries".
+    await mkdir(join(dir, 'unreadable.ndjson'), { recursive: true });
+
+    await expect(readNdjson(join(dir, 'unreadable.ndjson'))).rejects.toThrow();
+
+    // And the recovery pass reports it instead of writing an empty .json over it.
+    const errors: unknown[] = [];
+    const m = new SessionManager({
+      userDataDir: userData,
+      onError: (_m, detail) => errors.push(detail),
+    });
+    await m.recover([PROFILE]);
+    expect(errors).toHaveLength(1);
+    await expect(stat(join(dir, 'unreadable.json'))).rejects.toThrow();
+  });
+
+  it('one failed write does not stop every later append', async () => {
+    const m = manager();
+    await m.start(request());
+    await m.appendTurn('interviewer', 'before');
+
+    // Force one write to fail, the way a transient ENOSPC would.
+    const handle = (m as unknown as { handle: { write: (s: string) => Promise<unknown> } }).handle;
+    const realWrite = handle.write.bind(handle);
+    let failed = false;
+    handle.write = (line: string) => {
+      if (!failed) {
+        failed = true;
+        return Promise.reject(new Error('ENOSPC'));
+      }
+      return realWrite(line);
+    };
+
+    await expect(m.appendTurn('interviewer', 'the failed one')).rejects.toThrow('ENOSPC');
+
+    // The chain used to be poisoned here: every later append skipped its write.
+    await expect(m.appendTurn('interviewer', 'after')).resolves.toBe(2);
+    const raw = await readFile(join(sessionsDir(), 's1.ndjson'), 'utf8');
+    expect(raw).toContain('after');
+    await m.stop();
+  });
+
+  it('a crash-recovered session keeps its profile label and its real start time', async () => {
+    const m = manager();
+    const active = await m.start(request());
+    await m.appendTurn('interviewer', 'a question');
+
+    // A crash: the handle is abandoned with the .ndjson and the sidecar on disk.
+    await (m as unknown as { handle: { close: () => Promise<void> } }).handle.close();
+
+    const recovered = await new SessionManager({ userDataDir: userData }).recover([PROFILE]);
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]?.profileId).toBe(PROFILE.id);
+    expect(recovered[0]?.profileNameSnapshot).toBe('Acme');
+    expect(recovered[0]?.startedAt).toBe(active.startedAt);
+
+    // And Session History shows it labeled, not blank.
+    const history = await listSessions(userData, PROFILE.id);
+    expect(history[0]?.profileNameSnapshot).toBe('Acme');
+    expect(await readdir(sessionsDir())).toEqual(['s1.json']);
+  });
+
+  it('a session that is merely parseable does not take out the whole history', async () => {
+    const dir = sessionsDir();
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'broken.json'), '{}', 'utf8');
+
+    const m = manager({ newSessionId: () => 'good' });
+    await m.start(request());
+    await m.stop();
+
+    // Reading `entries.length` off `{}` used to throw and lose every valid
+    // session in the profile along with it.
+    const history = await listSessions(userData, PROFILE.id);
+    expect(history.map((s) => s.id)).toEqual(['good']);
+  });
+
+  it('a failed compaction stays retryable rather than wedging the app', async () => {
+    const m = manager();
+    await m.start(request());
+    await m.appendTurn('interviewer', 'worth keeping');
+
+    // Make the compacted write fail: a directory where the .json must go.
+    await mkdir(join(sessionsDir(), 's1.json'), { recursive: true });
+    await expect(m.stop()).rejects.toThrow();
+
+    // The session is still active, the lock is still held, and nothing is lost.
+    expect(m.isActive).toBe(true);
+    await expect(stat(join(userData, 'session.lock'))).resolves.toBeTruthy();
+    await expect(m.appendTurn('interviewer', 'still writable')).resolves.toBe(1);
+
+    // Clear the obstruction and the retry succeeds.
+    await rm(join(sessionsDir(), 's1.json'), { recursive: true, force: true });
+    const session = await m.stop();
+    expect(session?.entries).toHaveLength(2);
+    expect(m.isActive).toBe(false);
+  });
+
+  it('a clean stop leaves no sidecar behind', async () => {
+    const m = manager();
+    await m.start(request());
+    await m.stop();
+    expect(await readdir(sessionsDir())).toEqual(['s1.json']);
   });
 });
 

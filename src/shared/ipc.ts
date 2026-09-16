@@ -136,6 +136,8 @@ const session = z.object({
   endReason: z.enum(['user', 'crash-recovered']).nullable(),
 });
 
+export const sessionSchema = session;
+
 const sessionSummary = z.object({
   id: z.string(),
   profileId: z.string(),
@@ -245,10 +247,30 @@ export const invokeChannels = {
     payload: z.object({ docId: z.string(), profileId: z.string() }),
     response: ok,
   },
+  /**
+   * Start a session, or say which of four things to go and fix (FR-088).
+   *
+   * A refusal is an **answer**, not a failure, so it travels as a response
+   * rather than as a thrown error. The router replaces every thrown error with
+   * one generic message, which would make all four refusals identical and leave
+   * `TC-104`'s "distinct, named reason" true only inside the Session Manager.
+   * Recorded in the architecture document and in ADR-032.
+   */
   'session:start': {
     id: 'CH-112',
     payload: z.void(),
-    response: z.object({ sessionId: z.string() }),
+    response: z.union([
+      z.object({ sessionId: z.string() }),
+      z.object({
+        refused: z.enum([
+          'session-active',
+          'no-active-profile',
+          'stt-key-missing',
+          'llm-key-missing',
+        ]),
+        message: z.string(),
+      }),
+    ]),
   },
   'session:stop': {
     id: 'CH-113',

@@ -333,10 +333,88 @@ describe('NFR-009 app lifecycle handlers are registered before slow startup work
 
   it('does not await the knowledge base inside bootstrap', () => {
     const bootstrap = bootstrapSource();
-    // `void`, not `await`: awaiting is what put it on the critical path.
-    expect(bootstrap).toContain('void startKnowledgeBase()');
+    // The rule is that bootstrap does not *await* it. How the promise is held
+    // is not the rule: TASK-040 keeps it so `session:start` can await recovery,
+    // which is the gate that stops recovery deleting a live transcript.
+    expect(bootstrap).toContain('startKnowledgeBase()');
+    expect(bootstrap).not.toContain('await startKnowledgeBase()');
     expect(bootstrap).not.toContain('await rag.start()');
     expect(bootstrap).not.toContain('await ensureActiveProfile()');
+  });
+
+  /**
+   * TASK-040: recovery treats any `.ndjson` it finds as an orphan. Started in
+   * the background, it can run while a session is live, so `session:start` has
+   * to wait for it or the live transcript is compacted and deleted under the
+   * writer, and its lock removed.
+   */
+  it('session:start waits for crash recovery to finish', () => {
+    const source = readFileSync('src/main/index.ts', 'utf8');
+    const start = source.indexOf("router.handle('session:start'");
+    expect(start).toBeGreaterThan(-1);
+    const next = source.indexOf('router.handle(', start + 1);
+    const handler = source.slice(start, next === -1 ? undefined : next);
+    expect(handler).toContain('await recoveryComplete');
+  });
+});
+
+/**
+ * TASK-040 regressions found by the Codex review on the pull request. Each is a
+ * property of how bootstrap wires the Session Manager, so each is asserted
+ * against `index.ts` rather than against a component that cannot see the wiring.
+ */
+describe('TASK-040 session wiring', () => {
+  const source = (): string => readFileSync('src/main/index.ts', 'utf8');
+
+  function handlerBody(channel: string): string {
+    const text = source();
+    const start = text.indexOf(`router.handle('${channel}'`);
+    expect(start, `${channel} has no handler`).toBeGreaterThan(-1);
+    const next = text.indexOf('router.handle(', start + 1);
+    return text.slice(start, next === -1 ? undefined : next);
+  }
+
+  /**
+   * The router replaces every thrown handler error with one generic message, so
+   * a thrown refusal makes all four of TC-104's cases identical at the boundary.
+   */
+  it('returns the named start refusal rather than throwing it', () => {
+    const handler = handlerBody('session:start');
+    // The refusal is returned. A non-refusal error is still thrown, which is
+    // correct: that is a fault, not an answer.
+    expect(handler).toContain('return { refused: err.reason');
+
+    // And the contract can carry it.
+    const contract = readFileSync('src/shared/ipc.ts', 'utf8');
+    const spec = contract.slice(contract.indexOf("'session:start'"));
+    for (const reason of [
+      'session-active',
+      'no-active-profile',
+      'stt-key-missing',
+      'llm-key-missing',
+    ]) {
+      expect(spec.slice(0, 900)).toContain(reason);
+    }
+  });
+
+  /**
+   * The live `.ndjson` lives inside the bound profile's folder. Deleting the
+   * folder unlinks the open transcript, leaves the lock behind and makes a
+   * clean stop impossible.
+   */
+  it('refuses to delete the profile a live session is bound to', () => {
+    expect(handlerBody('profile:delete')).toContain('sessions.current?.profileId === id');
+  });
+
+  /** A renderer that loads mid-session has no channel to ask for CH-201. */
+  it('replays the session state to each renderer when it loads', () => {
+    const text = source();
+    const dashboard = text.slice(text.indexOf('function wireDashboardWindow'));
+    expect(dashboard.slice(0, 400)).toContain('pushSessionState()');
+
+    const overlay = text.slice(text.indexOf('function wireOverlayWindow'));
+    const didFinishLoad = overlay.slice(0, overlay.indexOf("overlayWindow.on('moved'"));
+    expect(didFinishLoad).toContain('pushSessionState()');
   });
 });
 

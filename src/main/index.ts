@@ -70,6 +70,17 @@ let trigger: TriggerMachine;
 let overlayGate: OverlayGate;
 let sessions: SessionManager;
 
+/**
+ * Resolves when crash recovery has finished (`FR-105`, `FR-108`).
+ *
+ * `session:start` awaits it. Recovery runs in the background so a slow or
+ * wedged knowledge base cannot delay the windows, and the IPC handlers are
+ * registered before it finishes, so without this gate a session started in that
+ * window would have its **live** `.ndjson` treated as an orphan: compacted,
+ * deleted, and its lock removed from under it.
+ */
+let recoveryComplete: Promise<void> = Promise.resolve();
+
 let dashboardWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
 let overlayInteractive = false;
@@ -208,9 +219,7 @@ async function bootstrap(): Promise<void> {
 
   const settings = config.get();
   dashboardWindow = await createDashboardWindow(settings);
-  dashboardWindow.on('closed', () => {
-    dashboardWindow = null;
-  });
+  wireDashboardWindow();
 
   // `onCreated` rather than the returned promise, and it is load-bearing.
   // `createOverlayWindow` constructs the window and then awaits its renderer, so
@@ -253,6 +262,8 @@ async function bootstrap(): Promise<void> {
     getLogger().close();
   });
 
+  // Recovery is started here, before the first `session:start` can be served,
+  // and awaited by that handler rather than by bootstrap.
   // Started last and deliberately not awaited. Reconciling a knowledge base
   // reads every file in every profile's `kb/`, and starting a watcher pulls
   // chokidar in through a dynamic ESM import; neither has anything to do with
@@ -260,7 +271,8 @@ async function bootstrap(): Promise<void> {
   // appearing and the handlers above being registered, so a slow or wedged
   // knowledge base delayed shutdown cleanup and left the app interactive with no
   // `window-all-closed` handler at all.
-  void startKnowledgeBase();
+  recoveryComplete = startKnowledgeBase();
+  void recoveryComplete;
 }
 
 /**
@@ -284,7 +296,9 @@ async function startKnowledgeBase(): Promise<void> {
   // the only place it is cleared, so a killed process cannot block every future
   // session. It needs the profile list, so it runs here rather than earlier.
   try {
-    const recovered = await sessions.recover(rag.listProfiles().map((p) => p.id));
+    const recovered = await sessions.recover(
+      rag.listProfiles().map((p) => ({ id: p.id, name: p.name })),
+    );
     if (recovered.length > 0) {
       getLogger().info('recovered sessions from a previous run', { count: recovered.length });
     }
@@ -303,9 +317,7 @@ async function startKnowledgeBase(): Promise<void> {
 async function focusOrRecreateDashboard(): Promise<void> {
   if (!dashboardWindow || dashboardWindow.isDestroyed()) {
     dashboardWindow = await createDashboardWindow(config.get());
-    dashboardWindow.on('closed', () => {
-      dashboardWindow = null;
-    });
+    wireDashboardWindow();
     return;
   }
   if (dashboardWindow.isMinimized()) dashboardWindow.restore();
@@ -318,9 +330,7 @@ async function reopenWindows(): Promise<void> {
   const settings = config.get();
   if (!dashboardWindow || dashboardWindow.isDestroyed()) {
     dashboardWindow = await createDashboardWindow(settings);
-    dashboardWindow.on('closed', () => {
-      dashboardWindow = null;
-    });
+    wireDashboardWindow();
   }
   if (!overlayWindow || overlayWindow.isDestroyed()) {
     // The callback form, for the reason bootstrap uses it: assigning from the
@@ -376,6 +386,20 @@ function applyContentSecurityPolicy(): void {
   // component that knows which window may capture (TASK-011).
 }
 
+/**
+ * A Dashboard that loads mid-session has missed every earlier `CH-201` and has
+ * no channel to ask for the current one, so it would render the session as
+ * inactive until the next transition. Reachable by closing and reopening it,
+ * which the single-instance handler supports.
+ */
+function wireDashboardWindow(): void {
+  if (!dashboardWindow) return;
+  dashboardWindow.webContents.on('did-finish-load', () => pushSessionState());
+  dashboardWindow.on('closed', () => {
+    dashboardWindow = null;
+  });
+}
+
 function wireOverlayWindow(): void {
   if (!overlayWindow) return;
 
@@ -392,6 +416,10 @@ function wireOverlayWindow(): void {
     // without this a pause survives the rebuild in the main process while the
     // overlay stops showing the idle card (FR-053).
     pushOverlayMode();
+    // A renderer that loads mid-session missed every earlier push and has no
+    // channel to ask, so it would render the session as inactive until the next
+    // transition. Reachable whenever the overlay is rebuilt (ADR-015).
+    pushSessionState();
   });
 
   overlayWindow.on('moved', () => {
@@ -768,6 +796,10 @@ function registerIpcHandlers(): void {
     const profile = rag.store.get(settings.activeProfileId);
     const keys = secrets.status();
 
+    // Recovery must finish first, or it would treat this session's live
+    // `.ndjson` as an orphan and delete it out from under the writer.
+    await recoveryComplete;
+
     try {
       const active = await sessions.start({
         profile: profile ? { id: profile.id, name: profile.name } : null,
@@ -783,10 +815,13 @@ function registerIpcHandlers(): void {
       pushSessionState();
       return { sessionId: active.id };
     } catch (err) {
-      // The refusal reaches the renderer as a typed IPC error carrying the
-      // reason, so the Dashboard can name the remedy rather than guess it.
+      // A refusal is an answer, not a failure. Thrown, it would reach the
+      // router, which replaces every thrown error with one generic message, so
+      // all four refusals would look alike and TC-104's "distinct, named
+      // reason" would hold only inside the manager. It is returned instead.
       if (err instanceof SessionStartRefused) {
         getLogger().info('session start refused', { reason: err.reason });
+        return { refused: err.reason, message: err.message };
       }
       throw err;
     }
@@ -845,6 +880,13 @@ function registerIpcHandlers(): void {
    */
   router.handle('profile:delete', async ({ id }) => {
     assertProfile(id);
+    // The live transcript is written inside this folder. Removing it would
+    // unlink the open `.ndjson`, leave the lock behind and make a clean stop
+    // impossible, which loses the session that is being recorded right now
+    // (FR-101, ADR-013).
+    if (sessions.current?.profileId === id) {
+      throw new Error('A session is running in this profile. Stop it before deleting the profile.');
+    }
     await rag.deleteProfile(id);
     if (config.get().activeProfileId === id) await ensureActiveProfile();
     return { ok: true as const };

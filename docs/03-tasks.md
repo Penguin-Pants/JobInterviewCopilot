@@ -1081,10 +1081,10 @@ vague intention:
   cleared by the recovery pass (FR-108).
 **Verified by** TC-104, TC-105, TC-106, TC-107, TC-134, TC-135
 
-**Completed 2026-09-16.** `src/main/session.ts` (`CMP-08`), 27 new tests, and
+**Completed 2026-09-16.** `src/main/session.ts` (`CMP-08`), 38 new tests, and
 the five session channels wired into bootstrap. `npm run typecheck`,
 `npm run lint`, `npm run format:check`, `npm run build`, `npm run smoke:main`,
-`python3 scripts/traceability.py` and 685 unit and integration tests all pass.
+`python3 scripts/traceability.py` and 696 unit and integration tests all pass.
 
 **Design decisions worth recording:**
 
@@ -1107,6 +1107,24 @@ capture or open the STT sessions, so the trigger listens to a stream that does
 not exist and fires nothing. Wiring the capture path, the `RagEngine.query` call
 and `runGeneration` into a live loop is the rest of this milestone's integration
 and is carried below rather than half-built here.
+
+**Defects found by the Codex review on the pull request, all ten verified and
+fixed.** Five were rated P1. The pattern across them is one mistake made in
+several places: a failure path that quietly produced a *plausible* value
+instead of stopping.
+
+| Defect | Why it mattered | Requirement |
+|---|---|---|
+| **Crash recovery raced `session:start`.** Recovery runs in the background so a slow knowledge base cannot delay the windows, but the IPC handlers are registered before it finishes | A session started in that window had its **live** `.ndjson` treated as an orphan: compacted, deleted, and its lock removed from under the open handle. `session:start` now awaits recovery | FR-105, FR-108 |
+| **`readNdjson` treated every read failure as an empty transcript.** Only `ENOENT` may mean that | A transient `EACCES` or `EIO` made compaction write an empty `.json` and then delete the `.ndjson` that still held every entry. Permanent loss from a temporary fault. Anything but `ENOENT` now aborts and preserves the source | FR-101, FR-105 |
+| **One failed write poisoned the append chain.** Each write was attached to the *success* branch of its predecessor | After a single `ENOSPC`, every later append skipped its callback, so the rest of the interview, and every later session in the process, wrote nothing even once the disk recovered. The chain continues from a *settled* predecessor now, while the caller still sees its own write's failure | FR-105, FR-106 |
+| **A session id from a renderer went straight into a path.** `CH-115` and `CH-116` take it as an arbitrary string, and it also comes from the user-editable `id` field of a file on disk | Deleting a session whose id is `../../../settings` would have removed `settings.json` at the `userData` root. Ids are validated against a pattern with no dot and no separator, so no sequence of components can leave the sessions folder | NFR-003 |
+| **The bound profile could be deleted mid-session.** `profile:delete` removes the folder the live `.ndjson` lives in | The open transcript was unlinked, the lock left behind, and a clean stop made impossible, losing the session being recorded at that moment. Refused while a session is bound to it | FR-101, ADR-013 |
+| **A failed compaction wedged the app.** `stop` cleared its active state before compaction succeeded | `stop` then saw no session and refused to retry, while `start` was refused by the lock the failure had left, so neither worked until a restart. State clears only after compaction succeeds, and the handle is re-opened for append so a retry can still add to the transcript | FR-107 |
+| **Every crash-recovered session had a blank profile label.** The transcript carries entries and nothing else, so the bound profile, its name at the time and the real start time are nowhere in it | Session History showed recovered sessions unlabeled and ordered by whenever the first turn happened to be spoken, or by the recovery itself for a session that crashed before anyone said anything. A `<sessionId>.meta.json` sidecar is written at start and deleted on a clean stop | FR-101 |
+| **A merely parseable `.json` took out the whole profile's history.** `readJsonSession` cast rather than validated | A hand-edited or half-written `{}` reached `listSessions`, where reading `entries.length` threw and lost every valid session in that profile alongside it. Parsed against the session schema now, and an invalid file is skipped | FR-101 |
+| **The named start refusal never reached the renderer.** The router replaces every thrown handler error with one generic message | All four of `TC-104`'s cases were identical at the boundary, so the acceptance criterion held only inside the Session Manager. A refusal is an answer rather than a failure, so `CH-112` returns it. Recorded in the architecture document | FR-088, TC-104 |
+| **`CH-201` was pushed only on a transition.** A Dashboard reopened mid-session, or an overlay rebuilt for a translucency change, missed every earlier push and has no channel to ask | Either would render the session as inactive until the next start, stop or pause. Both renderers are sent the current state when they load | FR-088, ADR-015 |
 
 **Follow-up work carried out of TASK-040:**
 

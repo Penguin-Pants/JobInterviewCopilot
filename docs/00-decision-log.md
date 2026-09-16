@@ -707,6 +707,46 @@ streaming model, which reads as zero, so the gap stays exactly
 `settings.trigger.turnEndGapMs` for all of them and `TC-159` is unaffected.
 Sections 3.2, 5.1 and 5.3 carry the rest of that review's behavior changes.
 
+### ADR-032 — A start refusal is a response, and a failure path must never fabricate a value
+
+**Decided 2026-09-16 during TASK-040.** Two decisions from the review of the
+Session Manager, both recorded here because both change what a document already
+says (DoD 9).
+
+**Context 1.** `FR-088` and `TC-104` require each of four start refusals to
+return "its own distinct, named reason". The Session Manager raises a typed
+`SessionStartRefused` carrying that reason, and the `session:start` handler
+rethrew it. `CMP-10` catches every thrown handler error and replaces it with one
+generic message, by design: a handler's internal failure is this app's bug, not
+the caller's, and its detail belongs in the log rather than at the boundary. So
+all four refusals arrived identical, and the acceptance criterion held only
+inside the component nobody was asking.
+
+**Decision 1.** A refusal is an **answer**, not a failure. `CH-112` returns
+`{ sessionId }` or `{ refused, message }`, validated by the channel schema like
+any other response. Only a genuine fault is thrown. This keeps `CMP-10`'s rule
+intact rather than weakening it to let one component's errors through.
+
+**Context 2.** Five of the ten defects found in review were the same mistake in
+different places: a failure path that produced a plausible value instead of
+stopping. `readNdjson` read every failure as an empty transcript, so a transient
+`EACCES` became an empty `.json` and a deleted `.ndjson`. `readJsonSession` cast
+rather than validated, so a half-written `{}` reached the code that reads
+`entries.length` and took a whole profile's history with it. Crash recovery
+filled a session's profile label with an empty string it had been handed. A
+failed compaction left state saying "stopped" while the lock said "running".
+
+**Decision 2.** On this path a failure stops and says so. Concretely: only
+`ENOENT` means "no transcript"; a parsed session file is validated against the
+schema before it is trusted; metadata a transcript cannot carry is written to a
+sidecar rather than inferred; and `stop` clears its active state only once
+compaction has succeeded, keeping the session retryable. The rule of thumb this
+milestone adds: **the transcript is the user's interview, so on the writer's
+paths, losing data must be louder than failing.**
+
+**Consequence.** `docs/02-architecture.md` sections 2 and 2.5 and section 4's
+`CH-112` row are corrected in the same change.
+
 ---
 
 ## 3a. Open questions

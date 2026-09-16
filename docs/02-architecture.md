@@ -80,6 +80,9 @@ profiles/
       <docId>.vectors.bin     Float32Array, 384 dims per chunk, row-major
     sessions/
       <sessionId>.json        transcript + suggestions + usage
+      <sessionId>.ndjson      append log during a live session, compacted on stop
+      <sessionId>.meta.json   profile binding and start time, for crash recovery
+session.lock                  one session across restarts, cleared by recovery
 models/
   Xenova/all-MiniLM-L6-v2/    downloaded on first run
 logs/
@@ -363,7 +366,21 @@ to the sessions folder". There is one such folder per profile, so that reading
 permits one concurrent session *per profile*, while `FR-108` and `ADR-013` both
 say one session, full stop. The lock is at the `userData` root.
 
-Three further rules settled while implementing `TASK-040`:
+**A start refusal is a response, not a thrown error.** `CH-112` returns
+`{ refused, message }`, where `refused` is one of `session-active`,
+`no-active-profile`, `stt-key-missing` or `llm-key-missing`. The router replaces
+every thrown handler error with one generic message, so throwing would make all
+four of `FR-088`'s cases identical at the boundary and leave `TC-104`'s
+"distinct, named reason" true only inside `CMP-08`. Recorded in ADR-032.
+
+**A crash-recovered session's metadata comes from a sidecar.** Every `.ndjson`
+line is a transcript entry, so the bound profile, its name at the time and the
+real start time are nowhere in the transcript. `<sessionId>.meta.json` is
+written beside it at start and deleted on a clean stop. Without it every
+recovered session reached Session History unlabeled and ordered by whenever its
+first turn happened to be spoken.
+
+Four further rules settled while implementing `TASK-040`:
 
 - **Only the final line of an `.ndjson` may be discarded.** A torn tail is the
   crash signature. A malformed line anywhere else means the writer did not write
@@ -373,6 +390,10 @@ Three further rules settled while implementing `TASK-040`:
   crash between writing the `.json` and deleting the `.ndjson` would otherwise
   leave a half-written `.json` whose source had already gone. The rename is
   atomic, so one of the two files is always complete.
+- **A session id is validated before it reaches a path.** `CH-115` and `CH-116`
+  take it as an arbitrary string, and it also arrives from the user-editable
+  `id` field of a file on disk. It must match a pattern carrying no dot and no
+  separator, so no sequence of components can leave the sessions folder.
 - **Only the recovery pass clears the lock, never `session:start`.** A lock held
   by a live process must refuse the start; clearing it there would silently
   overwrite a running session's transcript. Recovery runs when no session of
@@ -649,7 +670,7 @@ payload is rejected and logged, never passed through.
 | CH-109 | `doc:import` | `{ profileId, paths[] }` | `DocumentRecord[]` |
 | CH-110 | `doc:setType` | `{ docId, profileId, docType: DocType \| 'auto' }` | `DocumentRecord` |
 | CH-111 | `doc:delete` | `{ docId, profileId }` | `{ ok: true }` |
-| CH-112 | `session:start` | none | `{ sessionId }` or error |
+| CH-112 | `session:start` | none | `{ sessionId }` or `{ refused, message }` |
 | CH-113 | `session:stop` | none | `{ sessionId }` |
 | CH-114 | `session:list` | `{ profileId }` | `SessionSummary[]` |
 | CH-115 | `session:read` | `{ sessionId }` | `Session` |
