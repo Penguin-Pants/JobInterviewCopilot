@@ -550,8 +550,9 @@ Two process lessons, both fixed rather than noted:
 
 **Status: COMPLETE, 2026-09-16.** All six tasks implemented and verified.
 `npm run typecheck`, `npm run lint`, `npm run format:check`, `npm run licenses`,
-`npm run build`, `npm run smoke:main`, `python3 scripts/traceability.py` and 482
-unit and integration tests all pass. Line coverage over `src/main/rag/**` is
+`npm run build`, `npm run smoke:main`, `python3 scripts/traceability.py` and 523
+unit and integration tests all pass, and every CI job is green on Windows,
+including `Electron E2E` and `Windows installer`. Line coverage over `src/main/rag/**` is
 96.9 percent against an 80 percent floor; every file in the milestone clears the
 floor on its own.
 
@@ -568,7 +569,8 @@ percent.
 
 | Item | Why not here | Where it is proven |
 |---|---|---|
-| `asarUnpack` actually unpacks `onnxruntime-node` and `chokidar` | Wine is not installed, so electron-builder cannot emit NSIS on Linux, and neither failure mode (a `.node` inside an asar, an ESM `import()` inside an asar) exists off Windows | `package` job on `windows-latest` |
+| `electron-builder` accepts the `asarUnpack` entries and still produces the installer | Wine is not installed, so electron-builder cannot emit NSIS on Linux | **Verified:** `package` job on `windows-latest`, green on this branch |
+| The unpacked modules actually **load** from the packaged app: `onnxruntime-node`'s `.node` binary and ESM-only `chokidar` | Nothing installs and runs the packaged app. The `package` job builds the installer and checks it exists; it never launches it, so a wrong `asarUnpack` path would still produce a green build | **Still open.** No manual check covers it either, so it is carried to TASK-051 below rather than treated as proven |
 | A real MiniLM tokenizer and a real 384-dimension vector | The model is a 90 MB download from Hugging Face. CI must not depend on it, and `TC-068` measures this app's normalization, not the model's output | MW-12, and the `TC-071` E2E half below |
 
 **Defects found by the pre-push review and fixed in this change.** Each one is
@@ -622,7 +624,7 @@ vague intention:
 | `TC-071`'s "`session:start` still succeeds during the download" half | `session:start` does not exist yet. The ingestion-blocking half and the determinate-progress half are covered now, in `tests/integration/rag-model-gate.test.ts` | TASK-040 |
 | Calling `RagEngine.query` from the prompt builder | The trigger and the prompt do not exist yet. `query(profileId, text, k=3)` is the contract they will call | TASK-031 |
 | The Dashboard's document manager: the best-effort hover, the doc-type picker, the error retry button, the "model not downloaded" state, and the `2 MB / 200 chunks` ceiling text `FR-068` requires on screen | No renderer exists. `KB_CEILING`, `withinReembedCeiling`, `CH-123` and `CH-124` are the API it consumes | TASK-042 |
-| Prove `asarUnpack` really unpacks `onnxruntime-node` and `chokidar` | Needs a packaged Windows build; Wine is absent here | TASK-051 |
+| Prove the unpacked modules load from the **installed** app, not just that the installer builds | The `package` job builds the installer and asserts the `.exe` exists, which it does with or without a correct `asarUnpack` path: nothing launches the packaged app. A `.node` binary cannot be `dlopen`ed from inside an asar and Electron's asar shim does not cover Node's ESM loader, so both failures appear only at runtime. Needs either a packaged smoke launch in the `package` job or a new manual check; `MW-01` to `MW-13` cover none of it | TASK-051 |
 | `readChunkSet` reads one `readFloatLE` per value | Measured at 19 ms for a full 5000-chunk profile against a 2500 ms `NFR-001` p50, loaded once per profile per process and then cached. A typed-array copy is 4.2 ms but adds an endianness branch. Not a defect, so not fixed under a "fix now" heading | TASK-050 |
 | `reconcile` rewrites `profile.json` once per removed record | O(N) writes when a user deletes many files at once. Correct, just wasteful | TASK-050 |
 | A document's bytes are read twice and hashed twice per ingest, and a PDF is held in memory three times over | `rag.ts` reads the file, `convert.ts` reads it again, and `new Uint8Array(buffer)` copies it a third time. Correct, and a 200 MB PDF costs about 600 MB of RSS before pdfjs allocates anything | TASK-050 |
@@ -757,9 +759,11 @@ vague intention:
 - Determinate progress sums bytes across every file rather than reporting the
   current file's percent, and caps byte-driven progress at 99 so the bar cannot
   finish before loading does.
-- **Deferred to the Windows runner:** the `asarUnpack` entry for
-  `onnxruntime-node`. A `.node` binary cannot be loaded from inside an asar
-  archive; the entry is in `electron-builder.yml` and the `package` job proves it.
+- **Partly deferred:** the `asarUnpack` entry for `onnxruntime-node`. A `.node`
+  binary cannot be loaded from inside an asar archive. The entry is in
+  `electron-builder.yml` and the `package` job proves the installer still builds
+  with it, but nothing launches the packaged app, so that the binary really loads
+  from the unpacked path is unproven and carried to TASK-051.
 - **Deferred to TASK-042:** the "embedding model not downloaded" UI and its retry
   button. `CH-124` and `CH-214` carry what it needs and `TC-161` asserts the
   states.
