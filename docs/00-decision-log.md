@@ -656,6 +656,57 @@ package, accept a non-sandboxed audio worker, record the deviation from
 `FR-086`, and rework the dependency so the production tree stayed clean. Three
 costs avoided, which is the measure of what the direct path was worth.
 
+### ADR-031 — `IDLE` is not pausable, and a failed generation reports `cancelled`
+
+**Decided 2026-09-16 during Milestone 3.** Two points where `TASK-030` and
+`TASK-032` met a specification that had one reading too few. Both are recorded
+here rather than only in the task notes, because both change what a document
+already says (DoD 9).
+
+**Context 1.** `docs/02-architecture.md` section 5.3 writes the pause transition
+as `any --Ctrl+Shift+P--> PAUSED`, and the resume transition as
+`PAUSED --Ctrl+Shift+P--> LISTENING`. Read literally, pausing from `IDLE` and
+then resuming puts the machine in `LISTENING` with no session behind it: no
+audio, no STT socket, no profile bound. The trigger would then arm a turn-end
+timer for a session that does not exist, and `session:start` would find the
+machine already out of `IDLE`.
+
+**Decision 1.** `IDLE` is not pausable. `any` means any **live** state:
+`LISTENING`, `AWAITING_TURN_END`, `GENERATING`. Pressing the hotkey with no
+session running is a no-op, not a state change. `FR-053` says the hotkey pauses
+and resumes *the trigger*, and a trigger that is not running has nothing to
+pause. Section 5.3 is corrected in the same change.
+
+**Context 2.** `CH-209 suggestion:end` carries a status. `FR-076` forbids the
+overlay ever showing an error card, so there is no error status to send when a
+provider fails mid-generation. The architecture's section 4 table listed two
+values, `complete` and `cancelled`; the code has carried three since Milestone
+0, because `TranscriptEntry` needs `nonconforming` for `FR-004`.
+
+**Decision 2.** The status is `'complete' | 'cancelled' | 'nonconforming'`, and
+section 4 is corrected to say so. A **provider failure is not a status of its
+own**. It reports `cancelled` when nothing was salvaged, which clears the card
+and says nothing false, and reports the shape it actually produced when lines
+did reach the overlay, because `FR-076` says the overlay still shows what was
+salvaged. The failure itself is returned to the caller as a `ProviderError` and
+reaches the user through the Dashboard badge (`CMP-12`, `FR-100`).
+
+**Consequence.** `docs/02-architecture.md` sections 4, 5.3 and 11 are corrected
+in the same change. Section 11 gains `ai/llm/sse.ts`, `ai/llm/index.ts` and
+`overlay-gate.ts`, which the original layout did not anticipate.
+
+**Added after the Codex review on the pull request.** `SttModelDescriptor` gains
+`batchIntervalMs`, the audio window a batch model buffers before each request.
+Two components need that number: the adapter sizes its buffer from it, and
+`CMP-05` adds it to the turn-end gap. Two constants would have been two things
+that drift, and the drift is invisible: `whisper-1` answers once per 4000 ms
+window and never sends an interim, so an 800 ms gap measured from each answer
+elapses while the interviewer is still speaking into the next window, and a long
+question becomes a suggestion per fragment. The field is absent for every
+streaming model, which reads as zero, so the gap stays exactly
+`settings.trigger.turnEndGapMs` for all of them and `TC-159` is unaffected.
+Sections 3.2, 5.1 and 5.3 carry the rest of that review's behavior changes.
+
 ---
 
 ## 3a. Open questions

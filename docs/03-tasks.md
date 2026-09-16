@@ -909,7 +909,83 @@ vague intention:
 
 ## Milestone 3 — Trigger and suggestions
 
-### TASK-030 Trigger state machine
+**Status: COMPLETE, 2026-09-16.** All three tasks implemented and verified.
+`npm run typecheck`, `npm run lint`, `npm run format:check`, `npm run licenses`,
+`npm run build`, `npm run smoke:main`, `python3 scripts/traceability.py` and 658
+unit and integration tests all pass. Line coverage over the milestone's own
+files is 97 percent or better on every one of them against an 80 percent floor,
+and 95.9 percent overall.
+
+**No new runtime dependency.** Both LLM adapters stream SSE over the platform
+`fetch`, so the dependency table in `02-architecture.md` section 8 is unchanged
+and `npm ls electron --omit=dev` is still empty.
+
+**Files added.** `src/main/ai/trigger.ts` (`CMP-05`), `src/main/ai/prompt.ts`,
+`src/main/ai/llm.ts` (`CMP-07`), `src/main/ai/llm/{anthropic,openai,lineBuffer,sse,index}.ts`
+and `src/main/overlay-gate.ts`. `02-architecture.md` section 11 is corrected to
+list the three the original layout did not anticipate (DoD 9).
+
+**Spec gaps found and closed in the same change, recorded as ADR-031:**
+
+| Gap | What it said | What it says now |
+|---|---|---|
+| Section 5.3 writes the pause transition as `any -> PAUSED` | Read literally, pausing from `IDLE` and resuming puts the machine in `LISTENING` with no session behind it: no audio, no socket, no profile bound, and a turn-end timer armed for a session that does not exist | `any` means any **live** state. `IDLE` is not pausable |
+| Section 4 typed `CH-209`'s status as `'complete' \| 'cancelled'` | The code has carried a third value since Milestone 0, because `TranscriptEntry` needs `nonconforming` for `FR-004`. The table and the schema disagreed | Three values, and the table says so |
+| Section 3.3 left three cases undecided | Whether the ellipsis counts against the 120-character cap, what to do with one unbroken word longer than a limit, and whether a pending string ending exactly at 240 may be flushed whole | All three settled in section 3.3, each with the reason |
+
+**What the milestone deliberately does not do.** There is no `session:start`
+yet, so nothing drives the trigger from a live stream and nothing answers a
+firing turn with a generation. The three components are complete and tested as
+units and against each other; `TASK-040` is where they are joined to a session.
+Rather than stub that, the trigger's `onFire` logs a turn it has no consumer
+for, so a detected turn is visible instead of looking like a trigger that never
+fired.
+
+**Defects found by the pre-push review and fixed in this change.** Each one is
+pinned by a test that was checked to fail without its fix:
+
+| Defect | Why it mattered | Requirement |
+|---|---|---|
+| A generation cancelled by a newer turn reported **`complete`** and flushed its half-written bullet. `runGeneration` tested `signal.aborted` only at the top of each loop iteration, and an adapter that notices the abort first ends its stream cleanly, so the loop finished with no error and no further iteration to test the signal on | The overlay got one more line on a card that was about to be replaced, and the transcript would have recorded a cancelled generation as a completed one. Found by `TC-095` | FR-054, FR-075 |
+| A guard failure during `GENERATING` moved the machine to `LISTENING` while a generation was still streaming | A one-word interjection during a suggestion ("Okay") left the state saying `LISTENING` under a live stream, so the stream's own end arrived against a state that had already moved on | FR-051, FR-054 |
+| `setOverlayInteractive` pushed `CH-212` with `paused: false` hard-coded | Harmless while the pause hotkey only logged. Now that it pauses the trigger, pressing `Ctrl+Shift+I` while paused told the overlay it was running and would have taken the idle card off the screen | FR-053 |
+| A rebuilt overlay was told its theme and its consent text, never its mode | A translucency change rebuilds the window (`ADR-015`), so a pause survived the rebuild in the main process while the overlay stopped showing the idle card | FR-053, ADR-015 |
+| **The two overlay recreate paths reintroduced Milestone 2's null-window bug.** `applyThemeChange` and `reopenWindows` both assigned `overlayWindow` from the promise `createOverlayWindow` returns, so it stayed null for the whole of the renderer load, and the `did-finish-load` listener fired against a null window | The rebuilt overlay received **no theme, no consent text and no mode**: every push in that listener silently no-opped. Milestone 2 fixed this in `bootstrap` and left the two recreate paths behind, where it was invisible because nothing pushed to them until now. Both use the callback form now | FR-008, FR-053, FR-085 |
+| One keypress pushed `CH-212` twice on pause: once from the trigger's idle callback, once from the hotkey handler | Two messages for one state change, and two places that could disagree about it | FR-053 |
+| The forced flush could cut mid-word when the pending string ended exactly at 240 characters | `cutAtWordBoundary` returned the whole string when it was not *longer* than the limit, so a word the next delta continued was split across two bullets. `FR-004` says never mid-word | FR-004 |
+| The line cap could produce a 121-character line | The ellipsis was appended after truncating at 120. A cap a rendered line can exceed is not a cap | FR-004 |
+| `validateCredential` refused every Anthropic key | Correct in Milestones 0 to 2, where no adapter claimed that credential and `FR-026` forbids saving a key that has not passed live validation. Left in place it would have meant the LLM primary could never be configured at all | FR-026 |
+| `TC-151`'s provider-id guard did not know about `src/main/ai/llm/` | The rule allows a provider id inside its own adapter file, which is what an adapter *is*. Extending the allowlist to the LLM adapters keeps the rule's meaning rather than weakening it | FR-037 |
+
+**Defects found by the Codex review on the pull request, all eight verified and
+fixed.** Two of them only exist because a question is asked while the previous
+answer is still being spoken, which is the case a milestone about turn detection
+has to get right and which none of its own tests had reached.
+
+| Defect | Why it mattered | Requirement |
+|---|---|---|
+| **A turn was stranded when its generation settled first.** Q2's final arriving during Q1's stream arms the gap and leaves the machine in `GENERATING`. If Q1's stream then ended before the gap elapsed, `noteGenerationSettled` dropped the machine to `LISTENING`, and the timer fired into a state `evaluateTurn` refused | Q2 was never asked, and its text stayed in the buffer, so Q3 was appended to it and the model was handed two questions as one. `noteGenerationSettled` now returns to `AWAITING_TURN_END` when a turn is pending, and `evaluateTurn` refuses only `IDLE` and `PAUSED`, the two states that clear the gap on the way in | FR-050, FR-054 |
+| **Whisper's 4000 ms batches were each read as a completed turn.** `whisper-1` emits one `isFinal` per batch and never an interim or an endpoint, so an 800 ms gap measured from each batch elapses while the interviewer is still speaking into the next one | A long question became a suggestion per fragment. The batch window is now declared once in the registry as `batchIntervalMs` and added to the gap, so the timer means "a whole batch went by with no new text", the only silence evidence a batch source can give. The adapter sizes its buffer from the same field, so the two cannot disagree | FR-050, ADR-022, NFR-017 |
+| **A cancelled generation's late `suggestion:end` discarded its replacement.** The two run concurrently, so gen-1's end arrives after gen-2's begin. Keyed on "the last generation id seen", that stale end replaced the buffered card | gen-2's begin was dropped and its lines then arrived at the overlay with no card to render them on. The gate is keyed on a card now: only a `suggestion:begin` starts one, and a message for any other generation is ignored | FR-008, FR-054 |
+| **A rebuilt overlay received the tail of a generation with no begin.** `noteClosed` dropped everything already delivered, so a translucency change mid-generation left the new renderer with later lines and an end it could not reconstruct a card from | The card is kept and its delivery count reset, so the whole generation is replayed to the new renderer | FR-008, ADR-015 |
+| **Every candidate `isFinal` segment became a ring turn.** A streaming provider emits several segments for one spoken answer, Deepgram sending `is_final` per segment and `speech_final` separately | `FR-052`'s "last 2 candidate turns" held the last two *segments* of one answer and evicted everything said before them. Segments are grouped into a turn on the same silence gap the interviewer stream uses, and the turn still being spoken counts toward the context | FR-052, ASM-009 |
+| **A native endpoint was ignored unless the machine was in `AWAITING_TURN_END`.** A second question's final arrives while the first generation streams, so the state is `GENERATING` when the provider reports the silence | The user waited out a full local gap after the provider had already seen the turn end, which is the delay `FR-050` names native endpointing to avoid. An endpoint now evaluates a pending turn in any live state. An endpoint arriving *before* its text, which is the order OpenAI's server VAD uses, is held for the next final rather than discarded | FR-050 |
+| **A stream ending before its terminal marker was reported as a success.** A proxy or a dropped connection closes a 200 response cleanly without `[DONE]` or `message_stop`, and the loop exited normally | A truncated answer reached the overlay with nothing to say it was cut short, and the health machine never saw a failure. Both adapters now throw when a non-aborted stream ends without its marker, and the facade still shows the lines that did arrive (`FR-076`) | FR-070, FR-076 |
+| **`requireLlmProvider` validated the provider id but not the model id.** Settings type `modelId` as a plain string, so a stale or hand-edited choice can name a model belonging to the other provider | The request reached the provider and came back 4xx, which classifies as a non-retryable `client` error and takes the whole credential to `CONFIG_REQUIRED`, blaming a key that is perfectly good. It mirrors `openSttSession` and checks `findLlmModel` first | FR-037, ADR-024 |
+
+**Follow-up work carried out of Milestone 3**, each with an owner rather than a
+vague intention:
+
+| Item | Why it is not done here | Owner |
+|---|---|---|
+| Drive the trigger from the live STT sessions, answer `onFire` with `RagEngine.query` plus `runGeneration`, and push `CH-207`/`CH-208`/`CH-209` through the overlay gate | `session:start` does not exist. `TurnFired` and `runGeneration` are the contract it will call | TASK-040 |
+| Report a cancelled generation's token usage | An adapter that is aborted returns without yielding its terminal usage record, so a cancelled generation currently accounts zero tokens although the provider streamed some. The Cost Meter is where that decision belongs | TASK-041 |
+| `triggerConfigFrom` reads `supportsEndpointing` off the STT **primary**, even when health has failed over to the backup | The two models can disagree about native endpointing. Harmless today because nothing fails over yet: the trigger is never fed. The rebind belongs with the session that owns the failover boundary | TASK-040 |
+| Prove the overlay renders the idle card while paused, and that a suggestion buffered before `overlay:ready` reaches it | There is no overlay UI to assert against. `TC-087`'s integration half proves the main-process side; the renderer half needs `Overlay.tsx` | TASK-043 |
+| `CH-215 notice:captureFidelity` is documented as targeting the overlay, is pushed to the Dashboard, and is not in the overlay preload's allowlist | A Milestone 0 inconsistency, found by this milestone's `TC-096` test while enumerating the overlay surface. Not this milestone's to change: `NFR-012` decides which window should show it | TASK-043 |
+| A retrieved chunk's text is interpolated into the user message unescaped | The notes are the user's own documents, so this is not an injection path from a third party. A document containing a line like `CANDIDATE NOTES:` would still confuse the section structure | TASK-050 |
+
+### TASK-030 Trigger state machine — COMPLETE
 **Traces** FR-003, FR-050, FR-051, FR-052, FR-053, FR-054, FR-055, ASM-004, ASM-007, ASM-008, ASM-009
 **Depends on** TASK-012, TASK-006
 **Acceptance criteria**
@@ -932,7 +1008,7 @@ vague intention:
   timers and no Electron import.
 **Verified by** TC-080, TC-081, TC-082, TC-083, TC-084, TC-085, TC-086, TC-087, TC-088
 
-### TASK-031 Prompt assembly
+### TASK-031 Prompt assembly — COMPLETE
 **Traces** FR-004, FR-072, FR-073
 **Depends on** TASK-024, TASK-030
 **Acceptance criteria**
@@ -945,7 +1021,7 @@ vague intention:
 - `max_tokens: 200`, `temperature: 0.3` for both providers.
 **Verified by** TC-090, TC-091, TC-092
 
-### TASK-032 LLM adapters and line buffering
+### TASK-032 LLM adapters and line buffering — COMPLETE
 **Traces** FR-070, FR-071, FR-074, FR-075, FR-076
 **Depends on** TASK-031, TASK-014
 **Acceptance criteria**

@@ -88,6 +88,10 @@ export const STT_REGISTRY: ProviderDescriptor<SttModelDescriptor>[] = [
         streaming: false,
         supportsInterim: false,
         supportsEndpointing: false,
+        // The one v1 batch model. The adapter buffers this window and `CMP-05`
+        // adds it to the turn-end gap; declaring it here keeps the two from
+        // disagreeing about how long the model can be silent mid-question.
+        batchIntervalMs: 4000,
         audio: PCM_16K,
         pricePerAudioMinuteUsd: 0.006,
         badge:

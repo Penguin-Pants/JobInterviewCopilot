@@ -144,9 +144,9 @@ Coverage: 107 requirements, 26 tasks, 130 automated test cases, 13 manual checks
 | TASK-023 | Auto-tagging and user override — COMPLETE | FR-064, FR-079 | TC-072, TC-073, TC-074, TC-149 |
 | TASK-024 | Retrieval — COMPLETE | FR-065 | TC-075, TC-076, TC-077, TC-078 |
 | TASK-025 | Knowledge base watcher — COMPLETE | FR-068, FR-077, FR-078 | TC-079, TC-140, TC-141, TC-163 |
-| TASK-030 | Trigger state machine | FR-003, FR-050, FR-051, FR-052, FR-053, FR-054, FR-055 | TC-080, TC-081, TC-082, TC-083, TC-084, TC-085, TC-086, TC-087, TC-088 |
-| TASK-031 | Prompt assembly | FR-004, FR-072, FR-073 | TC-090, TC-091, TC-092 |
-| TASK-032 | LLM adapters and line buffering | FR-070, FR-071, FR-074, FR-075, FR-076 | TC-093, TC-094, TC-095, TC-096, TC-157 |
+| TASK-030 | Trigger state machine — COMPLETE | FR-003, FR-050, FR-051, FR-052, FR-053, FR-054, FR-055 | TC-080, TC-081, TC-082, TC-083, TC-084, TC-085, TC-086, TC-087, TC-088 |
+| TASK-031 | Prompt assembly — COMPLETE | FR-004, FR-072, FR-073 | TC-090, TC-091, TC-092 |
+| TASK-032 | LLM adapters and line buffering — COMPLETE | FR-070, FR-071, FR-074, FR-075, FR-076 | TC-093, TC-094, TC-095, TC-096, TC-157 |
 | TASK-040 | Session manager and transcript | FR-088, FR-101, FR-105, FR-106, FR-107, FR-108 | TC-104, TC-105, TC-106, TC-107, TC-134, TC-135 |
 | TASK-041 | Cost meter | FR-103, FR-109 | TC-108, TC-109, TC-145 |
 | TASK-042 | Dashboard UI | FR-023, FR-024, FR-025, FR-026, FR-027, FR-028, FR-029, FR-030, FR-031, FR-032, FR-038, FR-080, FR-087, FR-088, FR-110, NFR-010, NFR-014 | TC-120, TC-121, TC-122, TC-123, TC-124, TC-125, TC-154, TC-158 |

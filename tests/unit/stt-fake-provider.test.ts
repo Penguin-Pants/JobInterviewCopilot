@@ -15,6 +15,8 @@ import { findSttModel, sttChoiceKeys } from '../../src/shared/registry/stt.js';
 import { clearSttProviders, openSttSession, registerSttProvider } from '../../src/main/ai/stt.js';
 import type { SttProvider, SttSession } from '../../src/main/ai/stt.js';
 import { registerStreamingSttProviders } from '../../src/main/ai/stt/index.js';
+import { clearLlmProviders } from '../../src/main/ai/llm.js';
+import { registerAllLlmProviders } from '../../src/main/ai/llm/index.js';
 import { validateCredential } from '../../src/main/ai/validate.js';
 
 /** One registry entry. Nothing else in the app is edited. */
@@ -187,10 +189,28 @@ describe('TC-155 credential validation goes through the registry', () => {
     expect(result.reason).toMatch(/could not be reached/);
   });
 
-  it('still refuses anthropic, whose adapter is TASK-032', async () => {
+  it('validates anthropic through the LLM registry now that TASK-032 has landed', async () => {
+    // Milestone 0 and Milestone 2 refused every anthropic key, because no
+    // adapter claimed that credential and FR-026 forbids saving one that has
+    // not passed live validation. TASK-032 is the adapter, so this is a real
+    // request now rather than a refusal.
+    registerAllLlmProviders(() => 'k');
+    fetchMock.mockResolvedValue({ ok: true, status: 200 });
+
+    const result = await validateCredential('anthropic', 'k');
+    expect(result.ok).toBe(true);
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, { headers: Record<string, string> }];
+    expect(url).toContain('api.anthropic.com');
+    expect(init.headers['x-api-key']).toBe('k');
+    clearLlmProviders();
+  });
+
+  it('refuses a credential no registry claims rather than accepting it blind', async () => {
+    clearLlmProviders();
+    clearSttProviders();
     const result = await validateCredential('anthropic', 'k');
     expect(result.ok).toBe(false);
-    expect(result.reason).toMatch(/TASK-032/);
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.reason).toMatch(/not saved/);
   });
 });

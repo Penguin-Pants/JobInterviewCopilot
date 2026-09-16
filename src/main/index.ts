@@ -15,12 +15,15 @@ import {
   installPermissionHandler,
 } from './audio-host.js';
 import { ProviderHealthRegistry } from './ai/health.js';
+import { registerAllLlmProviders } from './ai/llm/index.js';
 import { registerAllSttProviders } from './ai/stt/index.js';
+import { TriggerMachine, type TriggerConfig } from './ai/trigger.js';
 import { validateCredential } from './ai/validate.js';
 import { ConfigStore } from './config.js';
 import { HotkeyManager } from './hotkeys.js';
 import { IpcRouter, push } from './ipc/router.js';
 import { getLogger, initLogger } from './logger.js';
+import { OverlayGate, type GatedMessage } from './overlay-gate.js';
 import { RagEngine } from './rag.js';
 import { SecretVaultStore } from './secrets.js';
 import {
@@ -36,7 +39,7 @@ import {
 } from './windows.js';
 import type { CredentialId, Profile, Settings, StreamState } from '../shared/types.js';
 import { findLlmProvider } from '../shared/registry/llm.js';
-import { findSttProvider } from '../shared/registry/stt.js';
+import { findSttModel, findSttProvider } from '../shared/registry/stt.js';
 
 /**
  * Application bootstrap (CMP-01).
@@ -56,6 +59,8 @@ let audioHost: ElectronAudioWorkerHost;
 let audio: AudioSupervisor;
 let health: ProviderHealthRegistry;
 let rag: RagEngine;
+let trigger: TriggerMachine;
+let overlayGate: OverlayGate;
 
 let dashboardWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
@@ -126,6 +131,35 @@ async function bootstrap(): Promise<void> {
   // session is opened. Registration is pure; it opens no socket.
   registerAllSttProviders();
 
+  // The LLM adapters, the same way (TASK-032). `secrets.peek` rather than a
+  // copied key, so a credential replaced mid-session takes effect on the next
+  // request and no adapter ever holds one (NFR-003, FR-026).
+  registerAllLlmProviders((credentialId) => secrets.peek(credentialId));
+
+  // The overlay readiness gate (FR-008, ADR-016). Declared in Milestone 0 and
+  // left empty because the messages it holds did not exist until now.
+  overlayGate = new OverlayGate(sendToOverlay);
+
+  // The trigger (CMP-05, TASK-030). Created here so the pause hotkey has
+  // something real to toggle; it stays in IDLE until `session:start` exists
+  // (TASK-040), and a firing turn is answered by the generation loop that task
+  // owns. Nothing here opens a socket or reads a document.
+  trigger = new TriggerMachine({
+    config: triggerConfigFrom(config.get()),
+    onFire: (turn) => {
+      // TASK-040 replaces this with the query, prompt and generation loop. It
+      // logs rather than silently discarding, so a turn detected with no
+      // consumer is visible instead of looking like a trigger that never fired.
+      getLogger().info('turn fired with no session consumer yet (TASK-040)', {
+        generationId: turn.generationId,
+        words: turn.question.split(/\s+/).length,
+      });
+    },
+    // Entering PAUSED shows the idle card (FR-053). Resuming is pushed by the
+    // hotkey handler, so each direction sends exactly one CH-212.
+    onOverlayIdle: () => pushOverlayMode(),
+  });
+
   // Health is keyed by credential, so one revoked key is one badge however many
   // capabilities it serves (ADR-017). Bound from settings here and rebound when
   // the user changes a provider, because the binding is what says which
@@ -190,6 +224,7 @@ async function bootstrap(): Promise<void> {
   });
   app.on('window-all-closed', () => app.quit());
   app.on('will-quit', () => {
+    trigger.dispose();
     health.dispose();
     void audio.stop();
     void rag.stop();
@@ -254,8 +289,14 @@ async function reopenWindows(): Promise<void> {
     });
   }
   if (!overlayWindow || overlayWindow.isDestroyed()) {
-    overlayWindow = await createOverlayWindow(settings);
-    wireOverlayWindow();
+    // The callback form, for the reason bootstrap uses it: assigning from the
+    // returned promise leaves `overlayWindow` null for the whole of the
+    // renderer load, so `did-finish-load` fires against a null window and the
+    // theme, the consent text and the mode never reach it.
+    await createOverlayWindow(settings, (win) => {
+      overlayWindow = win;
+      wireOverlayWindow();
+    });
   }
 }
 
@@ -312,6 +353,11 @@ function wireOverlayWindow(): void {
     const settings = config.get();
     push(overlayWindow?.webContents, 'overlay:theme', settings.theme);
     push(overlayWindow?.webContents, 'overlay:consent', { text: settings.consentReminderText });
+    // And its mode. A translucency change rebuilds the window (ADR-015), and a
+    // rebuilt renderer starts with no idea whether the trigger is paused, so
+    // without this a pause survives the rebuild in the main process while the
+    // overlay stops showing the idle card (FR-053).
+    pushOverlayMode();
   });
 
   overlayWindow.on('moved', () => {
@@ -319,6 +365,10 @@ function wireOverlayWindow(): void {
   });
   overlayWindow.on('closed', () => {
     overlayWindow = null;
+    // The next overlay has to report ready again before anything is delivered
+    // to it. A gate left open against a window that has not painted its consent
+    // card would drop the first suggestion of the next session (FR-008).
+    overlayGate.noteClosed();
   });
 }
 
@@ -330,10 +380,14 @@ function registerHotkeys(): void {
   );
   if (!interaction.ok) getLogger().warn('interaction hotkey unavailable', interaction);
 
-  // The trigger does not exist until TASK-030. The binding is held now so the
-  // key is reserved and rebinding is testable; the handler becomes real then.
+  // Pause and resume the trigger (FR-053, ASM-002). Capture and the STT
+  // sockets are deliberately untouched: pausing stops suggestions, not the
+  // session.
   const pause = hotkeys.register('togglePause', bindings.togglePause, () => {
-    getLogger().info('pause hotkey fired before the trigger exists (TASK-030)');
+    trigger.togglePause();
+    // Pausing already pushed the idle card through the trigger's own callback.
+    // Pushing again here would send CH-212 twice for one keypress.
+    if (!trigger.isPaused) pushOverlayMode();
   });
   if (!pause.ok) getLogger().warn('pause hotkey unavailable', pause);
 }
@@ -360,11 +414,19 @@ async function applyThemeChange(before: Settings, after: Settings): Promise<void
     const [x, y] = overlayWindow.getPosition();
     const wasVisible = overlayWindow.isVisible();
     overlayWindow.destroy();
-    overlayWindow = await createOverlayWindow(after);
-    wireOverlayWindow();
-    if (x !== undefined && y !== undefined) overlayWindow.setPosition(x, y);
-    overlayWindow.setIgnoreMouseEvents(!overlayInteractive, { forward: true });
-    if (wasVisible) overlayWindow.showInactive();
+
+    // Same reason as bootstrap and `reopenWindows`: the window has to be handed
+    // over *before* its renderer loads. Assigning from the promise left this
+    // path's `did-finish-load` firing against a null `overlayWindow`, so a
+    // translucency change produced an overlay that never received its theme,
+    // its consent text or its paused state (FR-008, FR-053, FR-085).
+    const rebuilt = await createOverlayWindow(after, (win) => {
+      overlayWindow = win;
+      wireOverlayWindow();
+    });
+    if (x !== undefined && y !== undefined) rebuilt.setPosition(x, y);
+    rebuilt.setIgnoreMouseEvents(!overlayInteractive, { forward: true });
+    if (wasVisible) rebuilt.showInactive();
     return;
   }
 
@@ -375,7 +437,24 @@ function setOverlayInteractive(interactive: boolean): void {
   overlayInteractive = interactive;
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
   overlayWindow.setIgnoreMouseEvents(!interactive, { forward: true });
-  push(overlayWindow.webContents, 'overlay:mode', { interactive, paused: false });
+  pushOverlayMode();
+}
+
+/**
+ * The overlay's mode (`CH-212`), from the two facts that decide it.
+ *
+ * `paused` used to be hard-coded false here, which was harmless while the pause
+ * hotkey only logged. Now that it pauses the trigger, toggling interaction
+ * while paused would have told the overlay it was running and taken the idle
+ * card off the screen (FR-053).
+ */
+function pushOverlayMode(): void {
+  push(overlayWindow?.webContents, 'overlay:mode', {
+    interactive: overlayInteractive,
+    // `trigger` is assigned during bootstrap, before any window exists. The
+    // guard covers the recreate path, which can run from a test harness.
+    paused: trigger?.isPaused ?? false,
+  });
 }
 
 /**
@@ -394,6 +473,32 @@ function reportCaptureFidelity(): void {
 
   getLogger().warn('capture exclusion degraded', { build });
   push(dashboardWindow?.webContents, 'notice:captureFidelity', { windowsBuild: build, message });
+}
+
+/**
+ * The trigger's view of the settings (`CMP-05`, FR-050, FR-051, FR-052).
+ *
+ * `supportsEndpointing` is read off the **registry entry of the selected STT
+ * model**, never off the provider id, so a new streaming provider needs no
+ * trigger change (FR-037, TC-056). A model that is not in the registry cannot
+ * endpoint as far as the trigger is concerned, which falls back to the local
+ * timer rather than trusting a signal nothing described (TC-159).
+ */
+function triggerConfigFrom(settings: Settings): TriggerConfig {
+  const model = findSttModel(settings.providers.stt.primary);
+  return {
+    ...settings.trigger,
+    supportsEndpointing: model?.supportsEndpointing ?? false,
+    // Zero for every streaming model, so the gap is exactly the user's value.
+    // A batch model declares its window and the trigger adds it, because the
+    // absence of events between two batches is not silence (FR-050).
+    batchIntervalMs: model?.batchIntervalMs ?? 0,
+  };
+}
+
+/** The gate's outlet. One place the three suggestion channels reach a window. */
+function sendToOverlay(message: GatedMessage): void {
+  push(overlayWindow?.webContents, message.channel, message.payload);
 }
 
 /**
@@ -490,6 +595,10 @@ function registerIpcHandlers(): void {
     const after = config.set(patch);
     await applyThemeChange(before, after);
     bindHealthFromSettings(after);
+    // The trigger holds its own copy of the gap and the guard, so a settings
+    // change has to reach it. Applying at the next armed timer rather than
+    // rewriting one in flight is the machine's own rule (FR-050).
+    trigger.setConfig(triggerConfigFrom(after));
     return after;
   });
 
@@ -572,14 +681,17 @@ function registerIpcHandlers(): void {
   /**
    * The overlay has mounted and rendered its consent card (FR-008, ADR-016).
    *
-   * This is the signal the suggestion buffer will gate on. The buffer itself
-   * belongs to TASK-032, which is where the messages being buffered first
-   * exist, so nothing is held here yet. Keeping unused state now would be
-   * speculative; the ordering guarantee it depends on is what Milestone 0 has
-   * to get right, and that is on the renderer side.
+   * This closes the readiness gate Milestone 0 declared and left empty. Until
+   * it arrives, `suggestion:begin`, `suggestion:line` and `suggestion:end` are
+   * held rather than dropped, so the first question of a session is not the one
+   * the user never sees. The buffer holds one generation; see
+   * `src/main/overlay-gate.ts`.
    */
   router.handle('overlay:ready', () => {
-    getLogger().info('overlay reported ready, consent card rendered');
+    getLogger().info('overlay reported ready, consent card rendered', {
+      buffered: overlayGate.pending,
+    });
+    overlayGate.noteReady();
     return { ok: true as const };
   });
 
