@@ -27,6 +27,13 @@ import { OverlayGate, type GatedMessage } from './overlay-gate.js';
 import { RagEngine } from './rag.js';
 import { SecretVaultStore } from './secrets.js';
 import {
+  SessionManager,
+  SessionStartRefused,
+  deleteSession,
+  listSessions,
+  readSession,
+} from './session.js';
+import {
   createDashboardWindow,
   createOverlayWindow,
   hasTrueCaptureExclusion,
@@ -37,7 +44,7 @@ import {
   translucencyChangeNeedsRecreate,
   windowsBuildNumber,
 } from './windows.js';
-import type { CredentialId, Profile, Settings, StreamState } from '../shared/types.js';
+import type { CredentialId, Profile, Session, Settings, StreamState } from '../shared/types.js';
 import { findLlmProvider } from '../shared/registry/llm.js';
 import { findSttModel, findSttProvider } from '../shared/registry/stt.js';
 
@@ -61,6 +68,7 @@ let health: ProviderHealthRegistry;
 let rag: RagEngine;
 let trigger: TriggerMachine;
 let overlayGate: OverlayGate;
+let sessions: SessionManager;
 
 let dashboardWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
@@ -139,6 +147,14 @@ async function bootstrap(): Promise<void> {
   // The overlay readiness gate (FR-008, ADR-016). Declared in Milestone 0 and
   // left empty because the messages it holds did not exist until now.
   overlayGate = new OverlayGate(sendToOverlay);
+
+  // The Session Manager (CMP-08, TASK-040). Sole writer of a session file and
+  // sole holder of its handle (ADR-018). Constructing it opens nothing; the
+  // crash-recovery pass runs with the knowledge base, once profiles are known.
+  sessions = new SessionManager({
+    userDataDir: userData,
+    onError: (message, detail) => getLogger().warn(message, detail),
+  });
 
   // The trigger (CMP-05, TASK-030). Created here so the pause hotkey has
   // something real to toggle; it stays in IDLE until `session:start` exists
@@ -224,6 +240,10 @@ async function bootstrap(): Promise<void> {
   });
   app.on('window-all-closed', () => app.quit());
   app.on('will-quit', () => {
+    // A quit during a live session compacts rather than abandoning the
+    // transcript. Not awaited, because `will-quit` cannot hold the app open;
+    // the recovery pass covers what does not finish (FR-105).
+    void sessions.stop();
     trigger.dispose();
     health.dispose();
     void audio.stop();
@@ -256,6 +276,20 @@ async function startKnowledgeBase(): Promise<void> {
     await rag.start();
   } catch (err) {
     getLogger().error('the knowledge base failed to start', err);
+  }
+
+  // Crash recovery (FR-105, FR-108). Any `.ndjson` left on disk means the
+  // process died during a session; each is compacted so it reaches Session
+  // History rather than being lost. The same pass clears a stale lock, which is
+  // the only place it is cleared, so a killed process cannot block every future
+  // session. It needs the profile list, so it runs here rather than earlier.
+  try {
+    const recovered = await sessions.recover(rag.listProfiles().map((p) => p.id));
+    if (recovered.length > 0) {
+      getLogger().info('recovered sessions from a previous run', { count: recovered.length });
+    }
+  } catch (err) {
+    getLogger().error('session recovery failed', err);
   }
 
   // The Dashboard has no read-only model channel, and CH-214 only fires on a
@@ -388,6 +422,9 @@ function registerHotkeys(): void {
     // Pausing already pushed the idle card through the trigger's own callback.
     // Pushing again here would send CH-212 twice for one keypress.
     if (!trigger.isPaused) pushOverlayMode();
+    // CH-201 carries `paused` too, so the Dashboard shows the same state as
+    // the overlay rather than only the overlay knowing.
+    pushSessionState();
   });
   if (!pause.ok) getLogger().warn('pause hotkey unavailable', pause);
 }
@@ -494,6 +531,29 @@ function triggerConfigFrom(settings: Settings): TriggerConfig {
     // absence of events between two batches is not silence (FR-050).
     batchIntervalMs: model?.batchIntervalMs ?? 0,
   };
+}
+
+/** `CH-201`, from the Session Manager rather than from a second copy of the state. */
+function pushSessionState(): void {
+  const active = sessions.current;
+  const payload = {
+    active: active !== null,
+    sessionId: active?.id ?? null,
+    profileName: active?.profileNameSnapshot ?? null,
+    startedAt: active?.startedAt ?? null,
+    paused: trigger.isPaused,
+  };
+  push(dashboardWindow?.webContents, 'state:session', payload);
+  push(overlayWindow?.webContents, 'state:session', payload);
+}
+
+/** Finds a session by id across every profile's sessions folder (ADR-013). */
+async function findSession(sessionId: string): Promise<Session | null> {
+  for (const profile of rag.listProfiles()) {
+    const found = await readSession(app.getPath('userData'), profile.id, sessionId);
+    if (found) return found;
+  }
+  return null;
 }
 
 /** The gate's outlet. One place the three suggestion channels reach a window. */
@@ -692,6 +752,82 @@ function registerIpcHandlers(): void {
       buffered: overlayGate.pending,
     });
     overlayGate.noteReady();
+    return { ok: true as const };
+  });
+
+  /* ---- Sessions (CMP-08, TASK-040) ---- */
+
+  /**
+   * Start a session (`CH-112`, FR-088, ADR-013).
+   *
+   * A session never starts implicitly. Each refusal names which of four things
+   * to go and fix, rather than reporting a single "could not start" (TC-104).
+   */
+  router.handle('session:start', async () => {
+    const settings = config.get();
+    const profile = rag.store.get(settings.activeProfileId);
+    const keys = secrets.status();
+
+    try {
+      const active = await sessions.start({
+        profile: profile ? { id: profile.id, name: profile.name } : null,
+        sttKeyPresent: keys[credentialFor(settings.providers.stt.primary.providerId)],
+        llmKeyPresent: keys[credentialFor(settings.providers.llm.primary.providerId)],
+      });
+
+      // The trigger leaves IDLE only here. Audio capture and the STT sessions
+      // are TASK-040's remaining half and are not started yet, so the machine
+      // is listening to a stream that does not exist; it fires nothing until it
+      // does, rather than being stubbed into looking live.
+      trigger.start();
+      pushSessionState();
+      return { sessionId: active.id };
+    } catch (err) {
+      // The refusal reaches the renderer as a typed IPC error carrying the
+      // reason, so the Dashboard can name the remedy rather than guess it.
+      if (err instanceof SessionStartRefused) {
+        getLogger().info('session start refused', { reason: err.reason });
+      }
+      throw err;
+    }
+  });
+
+  /** Stop cleanly (`CH-113`): the transcript compacts and the lock is released. */
+  router.handle('session:stop', async () => {
+    const active = sessions.current;
+    if (!active) throw new Error('No session is running.');
+
+    // The trigger stops first, so an in-flight generation is aborted before the
+    // writer closes and cannot append to a handle that has gone.
+    trigger.stop();
+    await sessions.stop();
+    pushSessionState();
+    return { sessionId: active.id };
+  });
+
+  router.handle('session:list', async ({ profileId }) =>
+    listSessions(app.getPath('userData'), assertProfile(profileId)),
+  );
+
+  /**
+   * `CH-115` and `CH-116` name a session but not its profile, and a session
+   * belongs to exactly one profile's folder (ADR-013). The profile is found by
+   * asking each one, which is a directory read per profile and keeps the
+   * channel's payload as the contract documents it.
+   */
+  router.handle('session:read', async ({ sessionId }) => {
+    const found = await findSession(sessionId);
+    if (!found) throw new Error(`Unknown session ${sessionId}.`);
+    return found;
+  });
+
+  router.handle('session:delete', async ({ sessionId }) => {
+    if (sessions.current?.id === sessionId) {
+      throw new Error('That session is still running. Stop it before deleting it.');
+    }
+    for (const profile of rag.listProfiles()) {
+      await deleteSession(app.getPath('userData'), profile.id, sessionId);
+    }
     return { ok: true as const };
   });
 
