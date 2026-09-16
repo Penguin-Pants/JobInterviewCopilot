@@ -141,6 +141,9 @@ export class CostMeter {
   /** Which thresholds have fired. Append-only for the life of the session. */
   private readonly warned: ('cost' | 'time')[] = [];
 
+  /** A usage report was refused for being non-finite, so the estimate is short. */
+  private rejected = false;
+
   constructor(options: CostMeterOptions) {
     this.pricing = options.pricing ?? PRICE_TABLE;
     this.now = options.now ?? (() => performance.now());
@@ -178,6 +181,7 @@ export class CostMeter {
     this.llmTokens.clear();
     this.streamSeconds = { interviewer: 0, candidate: 0 };
     this.warned.length = 0;
+    this.rejected = false;
     this.timer = this.setIntervalFn(() => this.tick(), this.tickMs);
     // Pushed immediately as well as on the interval, so the Dashboard shows a
     // zeroed timer at 0 s rather than an empty panel for the first second.
@@ -195,12 +199,19 @@ export class CostMeter {
       this.clearIntervalFn(this.timer);
       this.timer = null;
     }
-    const wasRunning = this.isRunning;
-    if (wasRunning) this.stoppedAtMs = this.now();
-    // One last push, so the final figures the Dashboard shows are the figures
-    // that went into the transcript. Without it the panel froze on the previous
-    // tick and disagreed with the saved session by up to a second of spend.
-    if (wasRunning) this.emit();
+    if (this.isRunning) {
+      // Checked once more while the meter is still running. An interval
+      // callback can be delayed, so a session stopped just past a threshold
+      // could cross it with no tick left to notice, and the crossing would then
+      // be missing from both `CH-205` and the record the transcript keeps.
+      this.check();
+      this.stoppedAtMs = this.now();
+      // One last push, so the final figures the Dashboard shows are the figures
+      // that went into the transcript. Without it the panel froze on the
+      // previous tick and disagreed with the saved session by up to a second of
+      // spend.
+      this.emit();
+    }
     return this.record();
   }
 
@@ -211,6 +222,14 @@ export class CostMeter {
    * the current estimate: `FR-109` says a fired threshold never re-arms for the
    * session, and re-arming would let a user produce a second warning by nudging
    * the number up and back.
+   *
+   * A threshold that has **not** warned is re-checked here, so lowering it
+   * below the current spend warns immediately. `FR-109`'s upward edge is the
+   * estimate's, and the alternative reading, that only a rising estimate may
+   * warn, means a user who sets a limit they have already passed is told
+   * nothing about cost for the rest of the session. A limit that is silently
+   * dead the moment it is set is the worse failure, and this one still warns
+   * exactly once.
    */
   setThresholds(thresholds: Thresholds): void {
     this.thresholds = { ...thresholds };
@@ -224,7 +243,11 @@ export class CostMeter {
    * clock: a stream that is down bills nothing while the session timer runs on.
    */
   noteAudio(source: TranscriptSource, choice: ProviderChoice, seconds: number): void {
-    if (!(seconds > 0)) return;
+    if (!Number.isFinite(seconds)) {
+      this.rejected = true;
+      return;
+    }
+    if (seconds <= 0) return;
     const key = priceKey(choice);
     this.sttSeconds.set(key, (this.sttSeconds.get(key) ?? 0) + seconds);
     this.streamSeconds[source] += seconds;
@@ -247,6 +270,18 @@ export class CostMeter {
    * being billed on top of it.
    */
   noteGeneration(generationId: string, choice: ProviderChoice, usage: TokenUsage): void {
+    // An adapter casts the provider's JSON onto `TokenUsage` without validating
+    // it, so a malformed frame arrives here as `Infinity` or `NaN`. Unchecked,
+    // it makes `estimatedUsd` non-finite, which the `CH-204` schema rejects and
+    // which `JSON.stringify` writes into the session file as `null` -- and that
+    // file then fails `sessionSchema` on read and the interview disappears from
+    // history. One bad frame must not cost the user a transcript (ADR-032), so
+    // the report is refused at this boundary and the estimate says so.
+    if (!Number.isFinite(usage.inputTokens) || !Number.isFinite(usage.outputTokens)) {
+      this.rejected = true;
+      this.check();
+      return;
+    }
     this.llmTokens.set(generationId, {
       key: priceKey(choice),
       input: Math.max(usage.inputTokens, 0),
@@ -292,7 +327,9 @@ export class CostMeter {
    */
   private estimate(): { usd: number; incomplete: boolean } {
     let usd = 0;
-    let incomplete = false;
+    // A refused usage report is a missing cost just as a missing price row is,
+    // and the Dashboard labels both the same way.
+    let incomplete = this.rejected;
 
     for (const [key, seconds] of this.sttSeconds) {
       const row = this.pricing.stt[key];

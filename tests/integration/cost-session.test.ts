@@ -159,6 +159,34 @@ describe('TC-108 usage reaches the transcript', () => {
   });
 });
 
+describe('one bad provider frame does not cost the user a transcript', () => {
+  it('leaves the saved session readable after a non-finite usage report', async () => {
+    const { sessions, cost, tick } = harness();
+    await sessions.start({ profile: PROFILE, sttKeyPresent: true, llmKeyPresent: true });
+    cost.start();
+
+    await sessions.appendTurn('interviewer', 'tell me about a hard bug');
+    cost.noteGeneration('gen-1', HAIKU, { inputTokens: 1000, outputTokens: 50 });
+    // A malformed provider frame: JSON `1e400` parses to Infinity.
+    cost.noteGeneration('gen-2', HAIKU, { inputTokens: Infinity, outputTokens: 0 });
+    tick(2);
+
+    sessions.noteUsage(cost.record());
+    await sessions.stop();
+    cost.stop();
+
+    // Unguarded, `estimatedUsd` would be Infinity, `JSON.stringify` would write
+    // it as null, and `sessionSchema` would then reject the file on read, so
+    // this session would be gone from history entirely.
+    const session = await read();
+    expect(session).not.toBeNull();
+    expect(session?.entries).toHaveLength(1);
+    // 1000 input at $1.00/MTok plus 50 output at $5.00/MTok.
+    expect(session?.usage.estimatedUsd).toBe(0.00125);
+    expect(session?.usage.estimateIncomplete).toBe(true);
+  });
+});
+
 describe('TC-109 warnings never stop the session', () => {
   it('crosses both thresholds and leaves the session running', async () => {
     const { sessions, cost, warnings, tick } = harness();

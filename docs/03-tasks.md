@@ -1163,8 +1163,8 @@ once per second, and raises `CH-205` at most once per threshold per session.
 `config:set`, and hands its record to `CMP-08` on `session:stop` and on quit.
 `UsageRecord` gains `estimateIncomplete`.
 
-Covered by `tests/unit/cost.test.ts` (31 cases), `tests/integration/cost-session.test.ts`
-(6 cases, the meter joined to a real Session Manager and a real temporary
+Covered by `tests/unit/cost.test.ts` (36 cases), `tests/integration/cost-session.test.ts`
+(7 cases, the meter joined to a real Session Manager and a real temporary
 `userData`) and four guardrails in `tests/unit/guardrails.test.ts`.
 
 **Design decisions taken here, with the alternatives rejected:**
@@ -1189,6 +1189,14 @@ Covered by `tests/unit/cost.test.ts` (31 cases), `tests/integration/cost-session
 | **No `CH-204` at stop.** The panel froze on the last tick | The final figures on screen could disagree with the figures written to the session file by up to a second of spend | `stop()` pushes one last snapshot, and a test asserts it equals the record `stop()` returns |
 | **The session timer read the wall clock** | A clock adjustment mid-interview moves the timer and can fire the time warning early, which `FR-109` makes permanent | Monotonic by default, pinned by a guardrail that also bans `Date.now` from the file |
 | `CostMeterOptions` had no TSDoc | DoD 8 | Documented |
+
+**Defects found in the Codex review of this task, all three real and all fixed:**
+
+| Defect | Consequence | Fix |
+|---|---|---|
+| **A non-finite token count was recorded rather than refused.** The LLM adapters cast provider JSON onto `TokenUsage` with no runtime validation, so a malformed frame (JSON `1e400`) arrives as `Infinity`, and a wrong-shaped one as `NaN`. `Math.max` preserves both | `estimatedUsd` goes non-finite. The `CH-204` schema rejects it, so the panel silently freezes, and `JSON.stringify` writes it into the session file as `null`, which then fails `sessionSchema` on read: **the whole interview disappears from history**. One bad provider frame, the user's transcript gone. Exactly the failure ADR-032 exists to prevent | Refused at the boundary in `noteGeneration` and `noteAudio`, and the refusal sets `estimateIncomplete` so it is visible rather than silent. An integration test drives a real session through a non-finite frame and asserts the saved file is still readable |
+| **`stop` froze the meter without a last threshold check.** An interval callback can be delayed | A session ended just past its time threshold crossed it with no tick left to notice, so the crossing reached neither `CH-205` nor the `warningsIssued` the transcript keeps | `check()` runs once more while the meter is still running, before `stoppedAtMs` is set |
+| **Reported: `setThresholds` warns when the user lowers a threshold below current spend.** Codex read this as level-triggered on configuration changes rather than upward-edge-triggered | Kept, deliberately, and now documented and pinned by a test. `FR-109`'s upward edge is the **estimate's**. Under the other reading, a user who sets a limit they have already passed is told nothing about cost for the rest of the session: a limit that is silently dead the moment it is set is the worse failure, and this still warns exactly once and never re-arms | Comment in `setThresholds` and a test asserting both the warning and the "exactly once" that follows it |
 
 **Follow-up work carried out of TASK-041:**
 

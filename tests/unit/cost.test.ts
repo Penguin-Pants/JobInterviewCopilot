@@ -221,6 +221,48 @@ describe('accounting (TC-108)', () => {
     expect(record.estimateIncomplete).toBe(true);
   });
 
+  it('refuses a non-finite token count instead of poisoning the estimate', () => {
+    // An adapter casts provider JSON onto TokenUsage without validating it, so
+    // a value like 1e400 arrives as Infinity. Kept, it makes estimatedUsd
+    // non-finite, which CH-204's schema rejects and which JSON.stringify writes
+    // into the session file as null, and that file then fails sessionSchema on
+    // read: one bad frame would cost the user the whole interview.
+    for (const bad of [Infinity, -Infinity, NaN]) {
+      const { cost } = meter();
+      cost.start();
+      cost.noteGeneration('gen-1', HAIKU, { inputTokens: 1000, outputTokens: 50 });
+      cost.noteGeneration('gen-2', HAIKU, { inputTokens: bad, outputTokens: 10 });
+
+      const record = cost.record();
+      expect(Number.isFinite(record.estimatedUsd)).toBe(true);
+      expect(Number.isFinite(record.llmInputTokens)).toBe(true);
+      expect(Number.isFinite(record.llmOutputTokens)).toBe(true);
+      // The good generation is still accounted, and the refusal is visible.
+      expect(record.llmInputTokens).toBe(1000);
+      expect(record.estimateIncomplete).toBe(true);
+    }
+  });
+
+  it('refuses a non-finite audio duration the same way', () => {
+    const { cost } = meter();
+    cost.start();
+    cost.noteAudio('interviewer', NOVA, 60);
+    cost.noteAudio('interviewer', NOVA, Infinity);
+    cost.noteAudio('candidate', NOVA, NaN);
+
+    const record = cost.record();
+    expect(record.sttAudioSeconds).toEqual({ interviewer: 60, candidate: 0 });
+    expect(Number.isFinite(record.estimatedUsd)).toBe(true);
+    expect(record.estimateIncomplete).toBe(true);
+  });
+
+  it('a refused report never reaches the CH-204 schema as a non-finite number', () => {
+    const { cost } = meter();
+    cost.start();
+    cost.noteGeneration('gen-1', HAIKU, { inputTokens: Infinity, outputTokens: NaN });
+    expect(pushChannels['state:usage'].payload.safeParse(cost.snapshot()).success).toBe(true);
+  });
+
   it('is complete when every model consumed has a row', () => {
     const { cost } = meter();
     cost.start();
@@ -392,6 +434,41 @@ describe('threshold warnings (TC-109, TC-145)', () => {
 
     expect(warnings.map((w) => w.kind)).toEqual(['cost', 'time']);
     expect(cost.record().warningsIssued).toEqual(['cost', 'time']);
+  });
+
+  it('catches a crossing that stop reaches before the next tick does', () => {
+    // The interval callback can be delayed. Without a check at stop, a session
+    // ended just past its threshold crosses with no tick left to notice, and
+    // the crossing is missing from CH-205 and from the saved record alike.
+    const { cost, warnings, advance } = meter({ thresholds: { costUsd: 0, timeMinutes: 1 } });
+    cost.start();
+    advance(59_000);
+    expect(warnings).toHaveLength(0);
+
+    // 1.5 s of wall clock with no interval callback at all.
+    advance(500);
+    advance(500);
+    advance(500);
+    const final = cost.stop();
+
+    expect(warnings).toEqual([{ kind: 'time', value: 1, threshold: 1 }]);
+    expect(final.warningsIssued).toEqual(['time']);
+  });
+
+  it('warns when the user lowers a threshold below what is already spent', () => {
+    // FR-109's upward edge is the estimate's. A limit set below current spend
+    // that never warns is a limit that is silently dead for the session.
+    const { cost, warnings } = meter({ thresholds: { costUsd: 10, timeMinutes: 0 } });
+    cost.start();
+    cost.noteGeneration('gen-1', HAIKU, { inputTokens: 5_000_000, outputTokens: 0 });
+    expect(warnings).toHaveLength(0);
+
+    cost.setThresholds({ costUsd: 3, timeMinutes: 0 });
+    expect(warnings).toEqual([{ kind: 'cost', value: 5, threshold: 3 }]);
+
+    // Still exactly once: lowering it again says nothing more.
+    cost.setThresholds({ costUsd: 1, timeMinutes: 0 });
+    expect(warnings).toHaveLength(1);
   });
 
   it('treats a threshold of zero or less as not set', () => {

@@ -970,6 +970,15 @@ tokens. The meter has no token counter of its own and does not estimate one from
 the text received: a number we invented would be presented as a measurement
 (ADR-033).
 
+A usage report carrying a non-finite value is **refused** at the meter's
+boundary and sets `estimateIncomplete`. The adapters cast provider JSON onto
+`TokenUsage` without validating it, so a malformed frame can arrive as
+`Infinity` or `NaN`; recorded, it makes `estimatedUsd` non-finite, which the
+`CH-204` schema rejects and which `JSON.stringify` writes into the session file
+as `null`, and that file then fails `sessionSchema` on read. One bad frame would
+cost the user the whole interview, which is the failure ADR-032 exists to
+prevent.
+
 The meter counts, and `CMP-08` writes (ADR-018). `CMP-09` imports no filesystem
 module, holds no path, and has no way to stop a session: `FR-103` is explicit
 that a threshold is reported and never acted on. `CH-204` is pushed once per
