@@ -6,6 +6,25 @@ directories:
 files:
   - out/**/*
   - package.json
+# Two kinds of package cannot be loaded from inside an asar archive, and both
+# arrived with Milestone 2 (TASK-022, TASK-025):
+#
+#   - A native addon. `onnxruntime-node`, which `@xenova/transformers` loads,
+#     ships `.node` binaries, and `process.dlopen` cannot open a file inside an
+#     archive.
+#   - An ESM-only package reached through `import()`. Electron's asar integration
+#     patches CommonJS `require`, not Node's ESM loader, so `chokidar` 5 and its
+#     `readdirp` dependency have to be real files on disk.
+#
+# Unpacking them is the standard mitigation. It is asserted by the `package` job
+# on the Windows runner rather than assumed, because neither failure is visible
+# on Linux (see the TASK-025 follow-up in docs/03-tasks.md).
+asarUnpack:
+  - '**/node_modules/onnxruntime-node/**'
+  - '**/node_modules/sharp/**'
+  - '**/node_modules/@img/**'
+  - '**/node_modules/chokidar/**'
+  - '**/node_modules/readdirp/**'
 win:
   target:
     - target: nsis

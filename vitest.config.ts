@@ -28,7 +28,12 @@ export default defineConfig({
       // `src/main/ai/**` was excluded before it existed. The STT adapters are
       // driven through an injected socket factory and are measured. Only the
       // file that constructs a real `ws` is unreachable from a unit test.
-      exclude: ['src/main/index.ts', 'src/main/ai/stt/ws-factory.ts', 'src/main/rag/**'],
+      //
+      // `src/main/rag/**` was excluded for the same reason and is measured now
+      // that TASK-020 to TASK-025 exist: the engine takes an injected `Embedder`
+      // and an injected watcher factory, so everything but the two functions
+      // that construct the real dependencies is reachable from a test.
+      exclude: ['src/main/index.ts', 'src/main/ai/stt/ws-factory.ts'],
       thresholds: { lines: 80, functions: 80, branches: 70, statements: 80 },
     },
   },

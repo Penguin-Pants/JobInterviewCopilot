@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { INVOKE_CHANNEL_NAMES, type InvokeChannel } from '../../src/shared/ipc.js';
 
 /**
  * The lint rules that carry guardrails rather than style.
@@ -247,6 +248,50 @@ describe('FR-082 overlay is actually draggable in interactive mode', () => {
 });
 
 /**
+ * FR-086 regression: `doc:retry` (CH-123) and `model:ensure` (CH-124) were
+ * declared in the contract and handled in main, but never added to the
+ * Dashboard preload's allowlist, so FR-079's retry and ADR-026's
+ * "model not downloaded, retry" action did not exist end to end. Nothing
+ * failed: the allowlist is a plain array, so an omission is invisible.
+ */
+describe('FR-086 the preload allowlists account for every invoke channel', () => {
+  /** Channels that belong to a window other than the Dashboard, named on purpose. */
+  const NOT_DASHBOARD: InvokeChannel[] = [
+    'overlay:savePosition',
+    'overlay:ready',
+    'consent:dismiss',
+  ];
+
+  it('the Dashboard may invoke every channel not explicitly reserved to another window', () => {
+    const source = readFileSync('src/preload/dashboard.ts', 'utf8');
+    const list = source.slice(
+      source.indexOf('const ALLOWED_INVOKE'),
+      source.indexOf('const ALLOWED_PUSH'),
+    );
+
+    const missing = INVOKE_CHANNEL_NAMES.filter(
+      (name) => !NOT_DASHBOARD.includes(name) && !list.includes(`'${name}'`),
+    );
+    expect(
+      missing,
+      `declared and handled but not exposed to the Dashboard: ${missing.join(', ')}`,
+    ).toEqual([]);
+  });
+
+  it('every channel the Dashboard lists is a real channel', () => {
+    const source = readFileSync('src/preload/dashboard.ts', 'utf8');
+    const list = source.slice(
+      source.indexOf('const ALLOWED_INVOKE'),
+      source.indexOf('const ALLOWED_PUSH'),
+    );
+    const listed = [...list.matchAll(/'([a-z]+:[a-zA-Z]+)'/g)].map((m) => m[1]!);
+
+    expect(listed.length).toBeGreaterThan(0);
+    for (const name of listed) expect(INVOKE_CHANNEL_NAMES).toContain(name);
+  });
+});
+
+/**
  * FR-085 / ADR-015 regression: config:set persisted a theme change but never
  * applied it, and the recreation helper was exported and tested yet never
  * called, so the running overlay kept its old appearance until restart.
@@ -254,8 +299,13 @@ describe('FR-082 overlay is actually draggable in interactive mode', () => {
 describe('FR-085 theme changes reach the running overlay', () => {
   it('config:set applies the change rather than only persisting it', () => {
     const source = readFileSync('src/main/index.ts', 'utf8');
-    const handler = source.slice(source.indexOf("router.handle('config:set'"));
-    expect(handler.slice(0, 300)).toContain('applyThemeChange');
+    const start = source.indexOf("router.handle('config:set'");
+    expect(start).toBeGreaterThan(-1);
+    // Bounded by the next handler rather than by a character count. A fixed
+    // window failed the moment a comment was added inside this handler, which
+    // says nothing about whether the theme change is applied.
+    const next = source.indexOf('router.handle(', start + 1);
+    expect(source.slice(start, next === -1 ? undefined : next)).toContain('applyThemeChange');
   });
 
   it('a translucency mode change recreates the overlay', () => {

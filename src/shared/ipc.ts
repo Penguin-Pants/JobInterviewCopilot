@@ -147,6 +147,20 @@ const sessionSummary = z.object({
   endReason: z.enum(['user', 'crash-recovered']).nullable(),
 });
 
+/**
+ * Embedding model lifecycle (ADR-011, ADR-026).
+ *
+ * `unavailable` is what makes TC-161 pass: a fresh install with no network gets
+ * a named state with a reason and a retry, not a spinner and not a generic
+ * error.
+ */
+const modelDownloadState = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('not-downloaded') }),
+  z.object({ kind: z.literal('downloading'), percent: z.number() }),
+  z.object({ kind: z.literal('ready') }),
+  z.object({ kind: z.literal('unavailable'), reason: z.string() }),
+]);
+
 const healthState = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('using-primary') }),
   z.object({ kind: z.literal('retrying'), attempt: z.number() }),
@@ -201,10 +215,36 @@ export const invokeChannels = {
   },
   'doc:setType': {
     id: 'CH-110',
-    payload: z.object({ docId: z.string(), docType }),
+    /**
+     * `'auto'` clears a user override and re-runs the guess (FR-079).
+     *
+     * Spec gap closed here: `docs/02-architecture.md` section 4 typed the payload
+     * as `{ docId, docType }` over the closed `DocType` union, which left
+     * FR-079's "resettable to auto" with no channel to travel on. A second
+     * channel for it would have given the Dashboard two ways to set one field.
+     * `profileId` is added for the same reason it is added below. Recorded in the
+     * architecture document and in ADR-030.
+     */
+    payload: z.object({
+      docId: z.string(),
+      profileId: z.string(),
+      docType: z.union([docType, z.literal('auto')]),
+    }),
     response: documentRecord,
   },
-  'doc:delete': { id: 'CH-111', payload: z.object({ docId: z.string() }), response: ok },
+  /**
+   * `profileId` accompanies `docId` on every document channel (ADR-030).
+   *
+   * A document id alone would force the main process to scan every profile to
+   * find its owner, and `kb/` being authoritative means a stale id can outlive
+   * its record. Naming the profile makes the lookup one directory read and makes
+   * FR-069's "exactly one profile" explicit at the boundary.
+   */
+  'doc:delete': {
+    id: 'CH-111',
+    payload: z.object({ docId: z.string(), profileId: z.string() }),
+    response: ok,
+  },
   'session:start': {
     id: 'CH-112',
     payload: z.void(),
@@ -269,6 +309,30 @@ export const invokeChannels = {
   },
   /** Overlay reports it has mounted and rendered the consent card (FR-008, ADR-016). */
   'overlay:ready': { id: 'CH-122', payload: z.void(), response: ok },
+  /**
+   * Re-process a document in `error` without re-importing it (FR-079, ADR-030).
+   *
+   * Not in the original CH-1xx table. FR-079 requires the retry and no channel
+   * carried it, so `doc:import` was the only way back, which would have made the
+   * user find the original file again.
+   */
+  'doc:retry': {
+    id: 'CH-123',
+    payload: z.object({ docId: z.string(), profileId: z.string() }),
+    response: documentRecord,
+  },
+  /**
+   * Download the embedding model, or report why it cannot be (ADR-011, ADR-026).
+   *
+   * This is the retry action behind the "embedding model not downloaded" state
+   * TC-161 asserts. `CH-214` pushes progress; this channel is how the renderer
+   * asks for an attempt and learns the outcome (ADR-030).
+   */
+  'model:ensure': {
+    id: 'CH-124',
+    payload: z.void(),
+    response: modelDownloadState,
+  },
 } as const;
 
 /* ------------------------------------------------------------------ *
@@ -357,9 +421,17 @@ export const pushChannels = {
       percent: z.number(),
     }),
   },
+  /**
+   * Model download progress (FR-066, ADR-011, ADR-026, ADR-030).
+   *
+   * Spec change: the payload was `{ percent, done }`, which can say "not
+   * finished" but cannot say "failed, here is why, you may retry". It now
+   * carries the same state `CH-124` returns, so the push and the request cannot
+   * describe the same model differently.
+   */
   'model:download': {
     id: 'CH-214',
-    payload: z.object({ percent: z.number(), done: z.boolean() }),
+    payload: modelDownloadState,
   },
   /**
    * The pre-19041 capture warning, shown once per session next to the consent

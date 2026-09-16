@@ -12,6 +12,24 @@ export const DEFAULT_CONSENT_REMINDER_TEXT =
   'responsibility. A text transcript of this session is saved on this computer as an ' +
   'unencrypted local file and is kept until you delete it. No audio is ever saved.';
 
+/**
+ * The supported knowledge base ceiling (FR-068).
+ *
+ * A document at or below both numbers is queryable within 5 seconds of the file
+ * system settling. Above either one the document is still processed and still
+ * shows progress, but the 5-second target does not apply.
+ *
+ * Kept in `shared` because FR-068 requires the ceiling to be stated in the
+ * Dashboard rather than only in a document, so the renderer reads these two
+ * numbers instead of repeating them in a sentence that can drift.
+ */
+export const KB_CEILING = {
+  maxBytes: 2 * 1024 * 1024,
+  maxChunks: 200,
+  /** The re-embed target the ceiling qualifies, in milliseconds (FR-068, TC-163). */
+  reembedTargetMs: 5000,
+} as const;
+
 export const SETTINGS_LIMITS = {
   overlayOpacity: { min: 0.3, max: 1.0 },
   overlayFontSizePx: { min: 16, max: 32 },

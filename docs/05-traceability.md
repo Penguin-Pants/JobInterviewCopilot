@@ -138,12 +138,12 @@ Coverage: 107 requirements, 26 tasks, 130 automated test cases, 13 manual checks
 | TASK-012 | STT registry and the streaming adapters — COMPLETE | FR-023, FR-037, FR-038, FR-047, FR-048, FR-100, NFR-001 | TC-050, TC-051, TC-052, TC-053, TC-054, TC-056, TC-151, TC-152, TC-153, TC-155, TC-156, TC-159 |
 | TASK-013 | Non-streaming STT class and the Whisper adapter — COMPLETE | FR-047, FR-049, NFR-017 | TC-055, TC-057, TC-150 |
 | TASK-014 | Provider health and failover — COMPLETE | FR-100, FR-104 | TC-100, TC-101, TC-102, TC-103, TC-143, TC-144, TC-162 |
-| TASK-020 | Document import and conversion | FR-060, FR-061, FR-069 | TC-060, TC-061, TC-062, TC-063, TC-160 |
-| TASK-021 | Chunking | FR-062, FR-063 | TC-064, TC-065, TC-066, TC-067 |
-| TASK-022 | Local embeddings and cache | FR-066, FR-067 | TC-068, TC-069, TC-070, TC-071, TC-161 |
-| TASK-023 | Auto-tagging and user override | FR-064, FR-079 | TC-072, TC-073, TC-074, TC-149 |
-| TASK-024 | Retrieval | FR-065 | TC-075, TC-076, TC-077, TC-078 |
-| TASK-025 | Knowledge base watcher | FR-068, FR-077, FR-078 | TC-079, TC-140, TC-141, TC-163 |
+| TASK-020 | Document import and conversion — COMPLETE | FR-060, FR-061, FR-069 | TC-060, TC-061, TC-062, TC-063, TC-160 |
+| TASK-021 | Chunking — COMPLETE | FR-062, FR-063 | TC-064, TC-065, TC-066, TC-067 |
+| TASK-022 | Local embeddings and cache — COMPLETE | FR-066, FR-067 | TC-068, TC-069, TC-070, TC-071, TC-161 |
+| TASK-023 | Auto-tagging and user override — COMPLETE | FR-064, FR-079 | TC-072, TC-073, TC-074, TC-149 |
+| TASK-024 | Retrieval — COMPLETE | FR-065 | TC-075, TC-076, TC-077, TC-078 |
+| TASK-025 | Knowledge base watcher — COMPLETE | FR-068, FR-077, FR-078 | TC-079, TC-140, TC-141, TC-163 |
 | TASK-030 | Trigger state machine | FR-003, FR-050, FR-051, FR-052, FR-053, FR-054, FR-055 | TC-080, TC-081, TC-082, TC-083, TC-084, TC-085, TC-086, TC-087, TC-088 |
 | TASK-031 | Prompt assembly | FR-004, FR-072, FR-073 | TC-090, TC-091, TC-092 |
 | TASK-032 | LLM adapters and line buffering | FR-070, FR-071, FR-074, FR-075, FR-076 | TC-093, TC-094, TC-095, TC-096, TC-157 |

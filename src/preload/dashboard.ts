@@ -28,6 +28,8 @@ const ALLOWED_INVOKE: readonly InvokeChannel[] = [
   'doc:import',
   'doc:setType',
   'doc:delete',
+  'doc:retry',
+  'model:ensure',
   'session:start',
   'session:stop',
   'session:list',

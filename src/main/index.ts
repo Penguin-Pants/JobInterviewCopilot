@@ -21,6 +21,7 @@ import { ConfigStore } from './config.js';
 import { HotkeyManager } from './hotkeys.js';
 import { IpcRouter, push } from './ipc/router.js';
 import { getLogger, initLogger } from './logger.js';
+import { RagEngine } from './rag.js';
 import { SecretVaultStore } from './secrets.js';
 import {
   createDashboardWindow,
@@ -33,7 +34,7 @@ import {
   translucencyChangeNeedsRecreate,
   windowsBuildNumber,
 } from './windows.js';
-import type { CredentialId, Settings, StreamState } from '../shared/types.js';
+import type { CredentialId, Profile, Settings, StreamState } from '../shared/types.js';
 import { findLlmProvider } from '../shared/registry/llm.js';
 import { findSttProvider } from '../shared/registry/stt.js';
 
@@ -54,6 +55,7 @@ let router: IpcRouter;
 let audioHost: ElectronAudioWorkerHost;
 let audio: AudioSupervisor;
 let health: ProviderHealthRegistry;
+let rag: RagEngine;
 
 let dashboardWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
@@ -139,6 +141,17 @@ async function bootstrap(): Promise<void> {
   installLoopbackHandler();
   installPermissionHandler((contents) => audioHost.owns(contents));
 
+  // The knowledge base engine (CMP-06). Constructing it is cheap and touches no
+  // network: the embedding model is only loaded when a document is ingested
+  // (ADR-011).
+  rag = new RagEngine({
+    userDataDir: userData,
+    onDocumentProgress: (docId, state, percent) =>
+      push(dashboardWindow?.webContents, 'rag:progress', { docId, state, percent }),
+    onModelState: (state) => push(dashboardWindow?.webContents, 'model:download', state),
+    onError: (message, detail) => getLogger().warn(message, detail),
+  });
+
   hotkeys = new HotkeyManager(globalShortcut);
   router = new IpcRouter(ipcMain);
   registerIpcHandlers();
@@ -155,6 +168,18 @@ async function bootstrap(): Promise<void> {
   registerHotkeys();
   reportCaptureFidelity();
 
+  // The Dashboard has no read-only model channel, and CH-214 only fires on a
+  // change, so without this first push a fresh install could not render the
+  // "embedding model not downloaded" state TC-161 requires without invoking
+  // `model:ensure`, which would start a 90 MB download unprompted on launch.
+  push(dashboardWindow.webContents, 'model:download', rag.getModelState());
+
+  // Reconciliation must finish before the watcher starts (FR-078, ADR-014), and
+  // both run after the Dashboard exists so its CH-213 rows are not pushed at a
+  // window that has not been created yet.
+  await ensureActiveProfile();
+  await rag.start();
+
   // Re-open windows, never re-run bootstrap. A second bootstrap would build a
   // second ConfigStore and re-register every IPC channel, which throws.
   app.on('activate', () => {
@@ -165,6 +190,7 @@ async function bootstrap(): Promise<void> {
   app.on('will-quit', () => {
     health.dispose();
     void audio.stop();
+    void rag.stop();
     hotkeys.disposeAll();
     router.dispose();
     getLogger().close();
@@ -381,10 +407,53 @@ async function probeCredential(credentialId: CredentialId): Promise<boolean> {
   return result.ok;
 }
 
+/**
+ * Guarantee exactly one active profile (FR-028, ADR-013).
+ *
+ * A fresh install has none, and `settings.activeProfileId` defaults to the empty
+ * string. Every document channel needs a profile to address, so one is created
+ * here rather than leaving the Dashboard to discover it has nothing to show.
+ * An `activeProfileId` pointing at a profile that has since been deleted is
+ * repaired the same way.
+ */
+async function ensureActiveProfile(): Promise<Profile> {
+  const profiles = rag.listProfiles();
+  const settings = config.get();
+  const active = profiles.find((p) => p.id === settings.activeProfileId);
+  if (active) return active;
+
+  // `rag.createProfile` and not `rag.store.create`: the engine's method also
+  // starts the `kb/` watcher. Creating the record alone left a profile whose
+  // folder nothing watched, so a file dropped into it was never adopted
+  // (FR-077). Reachable by deleting the last profile, where this runs again.
+  const fallback = profiles[0] ?? (await rag.createProfile('My profile'));
+  config.set({ activeProfileId: fallback.id });
+  return fallback;
+}
+
+/**
+ * Which profile a document channel addresses.
+ *
+ * The payload names it, so a Dashboard showing one profile cannot mutate
+ * another's documents by replaying a stale id (FR-069).
+ */
+function assertProfile(profileId: string): string {
+  if (!rag.store.get(profileId)) throw new Error(`Unknown profile ${profileId}.`);
+  return profileId;
+}
+
 function registerIpcHandlers(): void {
   router.handle('config:get', () => config.get());
   router.handle('config:set', async (patch) => {
     const before = config.get();
+    // `activeProfileId` is a plain string in the settings schema, so a Dashboard
+    // replaying a cached settings object could name a profile that has since
+    // been deleted, and nothing repaired it until the next launch. Only
+    // `profile:activate` is supposed to move it, and only to a profile that
+    // exists (FR-028).
+    if (patch.activeProfileId !== undefined && patch.activeProfileId !== before.activeProfileId) {
+      assertProfile(patch.activeProfileId);
+    }
     const after = config.set(patch);
     await applyThemeChange(before, after);
     bindHealthFromSettings(after);
@@ -473,6 +542,72 @@ function registerIpcHandlers(): void {
   router.handle('overlay:ready', () => {
     getLogger().info('overlay reported ready, consent card rendered');
     return { ok: true as const };
+  });
+
+  /* ---- Profiles and the knowledge base (CMP-06, TASK-020 to TASK-025) ---- */
+
+  router.handle('profile:list', () => rag.listProfiles());
+
+  router.handle('profile:create', async ({ name }) => rag.createProfile(name));
+
+  /**
+   * Delete a profile and everything belonging to it (FR-028, FR-069).
+   *
+   * Deleting the active profile activates another, creating a default when none
+   * remains, so the app is never left with no profile to address.
+   */
+  router.handle('profile:delete', async ({ id }) => {
+    assertProfile(id);
+    await rag.deleteProfile(id);
+    if (config.get().activeProfileId === id) await ensureActiveProfile();
+    return { ok: true as const };
+  });
+
+  router.handle('profile:activate', ({ id }) => {
+    assertProfile(id);
+    config.set({ activeProfileId: id });
+    return { ok: true as const };
+  });
+
+  router.handle('doc:import', async ({ profileId, paths }) =>
+    rag.importDocuments(assertProfile(profileId), paths),
+  );
+
+  router.handle('doc:setType', async ({ docId, profileId, docType }) => {
+    const record = await rag.setDocType(assertProfile(profileId), docId, docType);
+    if (!record) throw new Error(`Unknown document ${docId}.`);
+    return record;
+  });
+
+  router.handle('doc:retry', async ({ docId, profileId }) => {
+    const record = await rag.retryDocument(assertProfile(profileId), docId);
+    if (!record) throw new Error(`Unknown document ${docId}.`);
+    return record;
+  });
+
+  router.handle('doc:delete', async ({ docId, profileId }) => {
+    await rag.deleteDocument(assertProfile(profileId), docId);
+    return { ok: true as const };
+  });
+
+  /**
+   * Download the embedding model, or say why it cannot be (ADR-011, ADR-026).
+   *
+   * Also the Dashboard's retry action on the "not downloaded" state. Progress
+   * reaches the renderer on CH-214 through the engine's own callback, so this
+   * handler only reports the outcome.
+   */
+  router.handle('model:ensure', async () => {
+    const state = await rag.ensureModelReady({ userInitiated: true });
+    // Documents that arrived while the model was missing are left `pending`
+    // rather than `error` (ADR-011). Nothing else re-visits them until the next
+    // launch, so the retry that finally produces a model is also what unblocks
+    // them; without this the user downloads the model and their documents just
+    // sit there.
+    if (state.kind === 'ready') {
+      for (const profile of rag.listProfiles()) await rag.reconcile(profile.id);
+    }
+    return state;
   });
 }
 

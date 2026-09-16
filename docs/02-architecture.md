@@ -142,9 +142,10 @@ type CredentialId = 'deepgram' | 'openai' | 'anthropic' | 'elevenlabs';
 
 ### 2.1a Provider registries (ADR-022)
 
-Two registries, `src/shared/registry/stt.ts` and `src/shared/registry/llm.ts`.
-They are data, and they are the only place a provider is named. Adding a provider
-is one entry plus one adapter (`FR-037`).
+Three registries, `src/shared/registry/stt.ts`, `src/shared/registry/llm.ts` and
+`src/shared/registry/embedding.ts`. They are data, and they are the only place a
+provider or model is named. Adding a provider is one entry plus one adapter
+(`FR-037`).
 
 ```ts
 /**
@@ -192,6 +193,36 @@ exactly what `FR-041` produces. No per-provider resampling is needed.
 
 **v1 LLM registry contents.** `anthropic` with `claude-haiku-4-5-20251001`
 (default), `openai` with `gpt-4o-mini`. No new providers in v1.
+
+**Embedding registry** (added in TASK-022, ADR-030). Separate from the two above
+because an embedding model carries no credential: it runs locally, which is why
+ingestion survives every provider key being rejected and why `NFR-008` can
+promise offline ingestion at all (`ADR-026`).
+
+```ts
+interface EmbeddingModelDescriptor {
+  id: string;                   // 'Xenova/all-MiniLM-L6-v2', also the cache key's model part
+  displayName: string;
+  dimensions: number;           // 384, the row stride in <docId>.vectors.bin
+  maxSeqLength: number;         // shipped default only, see below
+  specialTokenCount: number;    // [CLS] and [SEP], subtracted from the chunk budget
+  approximateDownloadMb: number;
+}
+```
+
+`maxSeqLength` here is a **ceiling**, and a config on disk can only lower it.
+`src/main/rag/embed.ts` reads `max_seq_length` from `sentence_bert_config.json`
+and `model_max_length` from `tokenizer_config.json` and takes the smallest of
+those and this value.
+
+The asymmetry is forced, not a preference. `@xenova/transformers` fetches
+`tokenizer.json`, `tokenizer_config.json` and `config.json`, and **never**
+`sentence_bert_config.json`, which is the Python sentence-transformers artifact
+where MiniLM's real 256 lives. Taking the smaller of whatever happens to be on
+disk therefore resolved to the BERT backbone's 512, and the chunker produced
+chunks of up to 510 word pieces that the model silently truncated at 256 (see
+ADR-030). `ADR-023`'s intent still holds: a model swap carries its own registry
+limit, and any config claiming less still wins.
 
 ### 2.2 Secrets (`secrets.bin`)
 
@@ -266,9 +297,22 @@ interface Chunk {
 ```
 
 Vectors are stored separately in `<docId>.vectors.bin` as a flat
-`Float32Array` of `chunkCount * 384` values, L2-normalized at write time. Row
-`i` belongs to chunk index `i`. Normalizing at write time makes the query a plain
-dot product.
+`Float32Array` of `chunkCount * 384` values, L2-normalized at write time,
+followed by a 32-byte ASCII `pairId` trailer. Row `i` belongs to chunk index `i`.
+Normalizing at write time makes the query a plain dot product.
+
+`chunks.json` is `{ pairId, chunks }` rather than a bare array, and a read that
+finds two different `pairId`s discards both files and re-embeds. The row count
+alone is not enough: the pair is committed with two `rename` calls, which is not
+one atomic operation, and a crash between them leaves a new `chunks.json` beside
+the old `vectors.bin`. Whenever the edit preserved the chunk count, and a typo
+fix does, the counts agreed and retrieval ranked the new text by the old text's
+vectors forever, with nothing reporting an error (ADR-030).
+
+A vector is zeroed if any component is `NaN` or `Infinity`, and a non-finite
+score is dropped rather than ranked. A `NaN` score makes the comparator return
+`NaN`, which is falsy, so the sort falls through to the id tie-break and one
+poisoned chunk takes the whole top `k` for every question in that profile.
 
 ### 2.5 Session and transcript
 
@@ -553,8 +597,8 @@ payload is rejected and logged, never passed through.
 | CH-107 | `profile:delete` | `{ id }` | `{ ok: true }` |
 | CH-108 | `profile:activate` | `{ id }` | `{ ok: true }` |
 | CH-109 | `doc:import` | `{ profileId, paths[] }` | `DocumentRecord[]` |
-| CH-110 | `doc:setType` | `{ docId, docType }` | `DocumentRecord` |
-| CH-111 | `doc:delete` | `{ docId }` | `{ ok: true }` |
+| CH-110 | `doc:setType` | `{ docId, profileId, docType: DocType \| 'auto' }` | `DocumentRecord` |
+| CH-111 | `doc:delete` | `{ docId, profileId }` | `{ ok: true }` |
 | CH-112 | `session:start` | none | `{ sessionId }` or error |
 | CH-113 | `session:stop` | none | `{ sessionId }` |
 | CH-114 | `session:list` | `{ profileId }` | `SessionSummary[]` |
@@ -564,6 +608,28 @@ payload is rejected and logged, never passed through.
 | CH-118 | `overlay:setInteractive` | `{ interactive }` | `{ ok: true }` |
 | CH-119 | `overlay:savePosition` | `{ x, y, displayId }` | `{ ok: true }` |
 | CH-120 | `consent:dismiss` | none | `{ ok: true }` |
+| CH-121 | `overlay:reset` | none | `{ ok: true, x, y, displayId }` |
+| CH-122 | `overlay:ready` | none | `{ ok: true }` |
+| CH-123 | `doc:retry` | `{ docId, profileId }` | `DocumentRecord` |
+| CH-124 | `model:ensure` | none | `ModelDownloadState` |
+
+**Changes made in Milestone 2 (ADR-030, DoD 9).** `CH-121` and `CH-122` landed
+in Milestone 0 and are recorded here for the first time. The rest are new:
+
+- `CH-110` gains `'auto'`. `FR-079` requires a user override to be resettable to
+  automatic, and the closed `DocType` union had no value that says so. A second
+  channel would have given the Dashboard two ways to set one field.
+- `CH-110`, `CH-111` and `CH-123` all carry `profileId` beside `docId`. A
+  document id alone would make the main process scan every profile to find its
+  owner, and `kb/` being authoritative means a stale id can outlive its record.
+  Naming the profile makes the lookup one directory read and makes `FR-069`'s
+  "exactly one profile" explicit at the boundary.
+- `CH-123` `doc:retry` implements `FR-079`'s retry. Without it `doc:import` was
+  the only way back from `error`, which would have made the user find the
+  original file again.
+- `CH-124` `model:ensure` is the retry action behind the "embedding model not
+  downloaded" state (`ADR-026`, `TC-161`). `CH-214` pushes progress; this channel
+  is how the renderer asks for an attempt and learns the outcome.
 
 ### Main to renderer, push (`webContents.send`)
 
@@ -582,7 +648,27 @@ payload is rejected and logged, never passed through.
 | CH-211 | `overlay:theme` | overlay | theme subset of `Settings` |
 | CH-212 | `overlay:mode` | overlay | `{ interactive, paused }` |
 | CH-213 | `rag:progress` | dashboard | `{ docId, state, percent }` |
-| CH-214 | `model:download` | dashboard | `{ percent, done }` |
+| CH-214 | `model:download` | dashboard | `ModelDownloadState` |
+| CH-215 | `notice:captureFidelity` | overlay | `{ windowsBuild, message }` |
+
+`CH-215` landed in Milestone 0 with `NFR-012`, the pre-19041 capture warning
+shown once per session next to the consent reminder. It is recorded here for the
+first time; the contract test now asserts the table and the code agree in both
+directions, so a channel cannot be added in code and left undocumented again.
+
+```ts
+/** CH-124 and CH-214 both carry this (ADR-011, ADR-026, ADR-030). */
+type ModelDownloadState =
+  | { kind: 'not-downloaded' }
+  | { kind: 'downloading'; percent: number }
+  | { kind: 'ready' }
+  | { kind: 'unavailable'; reason: string };
+```
+
+`CH-214` was `{ percent, done }`, which can say "not finished" but cannot say
+"failed, here is why, you may retry". `TC-161` requires exactly that third
+message, so the push now carries the same state `CH-124` returns and the two
+cannot describe the same model differently.
 
 ### Audio Worker channels (`CMP-03b`)
 
@@ -881,12 +967,12 @@ src/
       llm/lineBuffer.ts
       prompt.ts
     rag.ts             CMP-06 facade
-    rag/convert.ts
-    rag/chunk.ts
-    rag/embed.ts
-    rag/store.ts
-    rag/watch.ts
-    rag/autotag.ts
+    rag/convert.ts     TASK-020, pdf-parse and mammoth to Markdown
+    rag/chunk.ts       TASK-021, pure and deterministic
+    rag/embed.ts       TASK-022, @xenova/transformers, cache key, model gate
+    rag/store.ts       TASK-020/022/024, profiles, chunks, vectors, the top-k scan
+    rag/watch.ts       TASK-025, chokidar and the coalescing ingest queue
+    rag/autotag.ts     TASK-023, the deterministic rule set
   preload/
     dashboard.ts
     overlay.ts

@@ -27,7 +27,75 @@ const ALLOWED = [
   'BlueOak-1.0.0',
   'Python-2.0',
   'CC-BY-4.0',
+  'Zlib',
 ];
+
+/**
+ * Declarations license-checker cannot resolve to an SPDX id, and how to read
+ * them. Each is resolved by reading the package's own license text rather than
+ * by trusting the string, because the string is exactly what is ambiguous.
+ *
+ * - `Custom: <file>` and `SEE LICENSE IN <file>` mean the id is in that file.
+ * - A bare family name such as `BSD` names a family, not a license. BSD-2-Clause
+ *   and BSD-3-Clause are both permissive, but `BSD-4-Clause` carries the
+ *   advertising clause and is not on the allow list, so the text decides.
+ *
+ * A declaration this function cannot resolve stays unresolved and fails. The
+ * gate never widens on a guess.
+ */
+const UNRESOLVED = /^(custom:|see license in\b|bsd$|bsd\b.*\*$)/i;
+
+/** Distinguishing sentences from the license texts the allow list accepts. */
+const TEXT_SIGNATURES = [
+  ['Apache-2.0', /Apache License\s+Version 2\.0/],
+  ['MIT', /Permission is hereby granted, free of charge, to any person obtaining a copy/],
+  ['ISC', /Permission to use, copy, modify, and\/or distribute this software/],
+  [
+    'BSD-3-Clause',
+    /Neither the name of .{0,120}? nor the names of its\s+contributors may be used to endorse/is,
+  ],
+  ['BSD-2-Clause', /Redistribution and use in source and binary forms/],
+];
+
+/**
+ * Identify a license from the text shipped in the package.
+ *
+ * BSD-3-Clause is tested before BSD-2-Clause because the 3-clause text contains
+ * the whole 2-clause text; testing in the other order would label every
+ * 3-clause package as 2-clause.
+ *
+ * @returns the SPDX id, or null when no signature matches.
+ */
+function identifyFromText(packageDir) {
+  if (!existsSync(packageDir)) return null;
+  const candidates = readdirSync(packageDir).filter((n) => /^(licen[cs]e|copying)/i.test(n));
+  for (const name of candidates) {
+    const full = join(packageDir, name);
+    if (!statSync(full).isFile()) continue;
+    const text = readFileSync(full, 'utf8');
+    for (const [id, signature] of TEXT_SIGNATURES) {
+      if (signature.test(text)) return id;
+    }
+  }
+  return null;
+}
+
+/**
+ * Evaluate an SPDX-ish expression against the allow list.
+ *
+ * `AND` requires every branch, `OR` requires one. license-checker emits both:
+ * `pako` declares `(MIT AND Zlib)`, which is permissive only because both
+ * halves are. Splitting on OR alone passed nothing and failed the build.
+ */
+function expressionIsAllowed(text) {
+  const clean = (s) => s.replace(/[()*]/g, '').trim();
+  return text.split(/\s+OR\s+/i).some((branch) =>
+    branch
+      .split(/\s+AND\s+/i)
+      .map(clean)
+      .every((id) => ALLOWED.includes(id)),
+  );
+}
 
 const failures = [];
 
@@ -50,11 +118,23 @@ function checkNpmLicenses() {
   const packages = JSON.parse(raw);
   for (const [name, info] of Object.entries(packages)) {
     const licenses = Array.isArray(info.licenses) ? info.licenses : [info.licenses];
-    const text = String(licenses.join(' OR '));
-    // An OR expression passes when any branch is allowed.
-    const branches = text.split(/\s+OR\s+/i).map((s) => s.replace(/[()*]/g, '').trim());
-    const ok = branches.some((b) => ALLOWED.includes(b));
-    if (!ok) failures.push(`${name}: disallowed license "${text}"`);
+    let text = String(licenses.join(' OR '));
+
+    // A declaration that names a file or a family rather than a license is
+    // resolved from the package's own license text. `info.path` is where
+    // license-checker found the package, so it is the copy actually installed.
+    if (UNRESOLVED.test(text.trim())) {
+      const identified = identifyFromText(info.path ?? '');
+      if (!identified) {
+        failures.push(
+          `${name}: license "${text}" could not be resolved from its license text (NFR-015)`,
+        );
+        continue;
+      }
+      text = identified;
+    }
+
+    if (!expressionIsAllowed(text)) failures.push(`${name}: disallowed license "${text}"`);
   }
 }
 
