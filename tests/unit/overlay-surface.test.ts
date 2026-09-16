@@ -129,6 +129,10 @@ describe('the overlay readiness gate', () => {
     };
   }
 
+  function end(generationId: string): GatedMessage {
+    return { channel: 'suggestion:end', payload: { generationId, status: 'cancelled' } };
+  }
+
   it('buffers rather than drops before overlay:ready, then flushes in order', () => {
     const g = gate();
     g.gate.send(begin('gen-1'));
@@ -158,6 +162,70 @@ describe('the overlay readiness gate', () => {
     g.gate.noteReady();
     expect(g.sent).toHaveLength(2);
     expect(g.sent.every((m) => m.payload.generationId === 'gen-2')).toBe(true);
+  });
+
+  /**
+   * Regressions found by the Codex review on the pull request.
+   */
+  it('ignores a cancelled generation\u2019s late end rather than dropping its replacement', () => {
+    const g = gate();
+    g.gate.send(begin('gen-1'));
+    g.gate.send(line('gen-1', 'stale'));
+
+    // A newer turn cancels gen-1 and starts gen-2. The two run concurrently, so
+    // gen-1's end arrives *after* gen-2's begin.
+    g.gate.send(begin('gen-2'));
+    g.gate.send(end('gen-1'));
+    g.gate.send(line('gen-2', 'fresh'));
+    g.gate.send(end('gen-2'));
+
+    g.gate.noteReady();
+    // The replacement's begin has to survive, or its lines arrive with no card
+    // to render them on.
+    expect(g.sent.map((m) => [m.channel, m.payload.generationId])).toEqual([
+      ['suggestion:begin', 'gen-2'],
+      ['suggestion:line', 'gen-2'],
+      ['suggestion:end', 'gen-2'],
+    ]);
+  });
+
+  it('ignores a line whose begin never arrived', () => {
+    const g = gate();
+    g.gate.noteReady();
+    g.gate.send(line('gen-9', 'orphan'));
+    expect(g.sent).toHaveLength(0);
+  });
+
+  it('replays the whole card to a rebuilt overlay (ADR-015)', () => {
+    const g = gate();
+    g.gate.noteReady();
+    g.gate.send(begin('gen-1'));
+    g.gate.send(line('gen-1', 'first'));
+    expect(g.sent).toHaveLength(2);
+
+    // A translucency change rebuilds the window mid-generation. The new
+    // renderer never saw the begin, so the tail alone cannot be rendered.
+    g.gate.noteClosed();
+    g.gate.send(line('gen-1', 'second', 1));
+    expect(g.sent).toHaveLength(2);
+
+    g.gate.noteReady();
+    expect(g.sent.slice(2).map((m) => m.channel)).toEqual([
+      'suggestion:begin',
+      'suggestion:line',
+      'suggestion:line',
+    ]);
+  });
+
+  it('reports what the current renderer has not been sent', () => {
+    const g = gate();
+    g.gate.send(begin('gen-1'));
+    g.gate.send(line('gen-1', 'first'));
+    expect(g.gate.pending).toBe(2);
+    expect(g.gate.currentGenerationId).toBe('gen-1');
+
+    g.gate.noteReady();
+    expect(g.gate.pending).toBe(0);
   });
 
   it('a second overlay:ready is a no-op rather than a second flush', () => {

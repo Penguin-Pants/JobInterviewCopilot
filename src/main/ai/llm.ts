@@ -13,11 +13,14 @@
  * (`FR-076`, TC-096).
  */
 import type {
+  LlmModelDescriptor,
   ProviderChoice,
+  ProviderDescriptor,
   ProviderError,
   SuggestionLine,
   ValidationResult,
 } from '../../shared/types.js';
+import { LLM_REGISTRY, findLlmModel } from '../../shared/registry/llm.js';
 import type { RetrievedChunk } from '../rag.js';
 import { LineBuffer } from './llm/lineBuffer.js';
 import { GENERATION_PARAMS, SYSTEM_PROMPT, buildUserMessage } from './prompt.js';
@@ -104,7 +107,23 @@ export function clearLlmProviders(): void {
  * configuration fault the Dashboard badge should name, not a silent no-op
  * during an interview.
  */
-export function requireLlmProvider(choice: ProviderChoice): LlmProvider {
+export function requireLlmProvider(
+  choice: ProviderChoice,
+  registry: ProviderDescriptor<LlmModelDescriptor>[] = LLM_REGISTRY,
+): LlmProvider {
+  // The model is checked first, exactly as `openSttSession` checks it. Settings
+  // type `modelId` as a plain string, so a stale or hand-edited choice can name
+  // a model that belongs to the other provider. Sent as-is it becomes a 4xx,
+  // which classifies as a non-retryable `client` error and takes the whole
+  // credential to CONFIG_REQUIRED, blaming a key that is perfectly good.
+  if (!findLlmModel(choice, registry)) {
+    throw providerError(
+      choice.providerId,
+      'client',
+      `"${choice.providerId}:${choice.modelId}" is not in the language-model registry.`,
+    );
+  }
+
   const provider = getLlmProvider(choice.providerId);
   if (!provider) {
     throw providerError(

@@ -125,11 +125,17 @@ async function* stream(
   }
 
   const usage = { inputTokens: 0, outputTokens: 0 };
+  let sawTerminalFrame = false;
   try {
     for await (const event of parseSse(res.chunks())) {
       if (signal.aborted) return;
       const frame = parseJson<AnthropicFrame>(event.data);
       if (!frame) continue;
+
+      if (frame.type === 'message_stop') {
+        sawTerminalFrame = true;
+        break;
+      }
 
       if (frame.type === 'error') {
         throw providerError('anthropic', 'server', frame.error?.message ?? 'Anthropic failed.');
@@ -152,6 +158,14 @@ async function* stream(
   } catch (err) {
     if (isAbortError(err)) return;
     throw err;
+  }
+
+  // A clean EOF is not a completed generation. A proxy or a dropped connection
+  // ends the body without `message_stop`, and reporting that as a success would
+  // put a truncated answer on the overlay with nothing to say it was cut short.
+  // The facade still shows the lines that did arrive (FR-076).
+  if (!sawTerminalFrame) {
+    throw providerError('anthropic', 'network', 'Anthropic ended the stream early.');
   }
 
   // Exactly one terminal usage record, whatever the stream reported along the

@@ -104,10 +104,14 @@ async function* stream(
   }
 
   const usage = { inputTokens: 0, outputTokens: 0 };
+  let sawDone = false;
   try {
     for await (const event of parseSse(res.chunks())) {
       if (signal.aborted) return;
-      if (event.data === DONE) break;
+      if (event.data === DONE) {
+        sawDone = true;
+        break;
+      }
 
       const frame = parseJson<OpenAiFrame>(event.data);
       if (!frame) continue;
@@ -127,6 +131,12 @@ async function* stream(
   } catch (err) {
     if (isAbortError(err)) return;
     throw err;
+  }
+
+  // Same rule as the Anthropic adapter: a body that ends before `[DONE]` was
+  // truncated, not completed, and must not be reported as a success.
+  if (!sawDone) {
+    throw providerError('openai', 'network', 'OpenAI ended the stream early.');
   }
 
   yield { usage };

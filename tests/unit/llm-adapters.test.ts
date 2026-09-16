@@ -222,6 +222,83 @@ describe('the OpenAI adapter handles the same failures', () => {
     expect(out).toEqual([{ delta: 'ok' }, { usage: { inputTokens: 412, outputTokens: 57 } }]);
   });
 
+  /**
+   * Regression found by the Codex review: a proxy or a dropped connection can
+   * close a 200 response cleanly before the provider's terminal marker. The
+   * loop then exits normally and a truncated answer was reported as a success.
+   */
+  it('rejects an OpenAI stream that ends before [DONE]', async () => {
+    const transport = scriptedTransport({
+      chunks: [sse('', { choices: [{ delta: { content: 'half a bul' } }] })],
+    });
+    const provider = createOpenAiLlmProvider({ keyFor: () => 'k', post: transport.post });
+
+    await expect(
+      drain(provider.generate(request('openai', 'gpt-4o-mini'), neverAbort())),
+    ).rejects.toMatchObject({ class: 'network', message: /ended the stream early/ });
+  });
+
+  it('rejects an Anthropic stream that ends before message_stop', async () => {
+    const transport = scriptedTransport({
+      chunks: [
+        sse('message_start', { type: 'message_start', message: { usage: { input_tokens: 9 } } }),
+        sse('content_block_delta', {
+          type: 'content_block_delta',
+          delta: { type: 'text_delta', text: 'half a bul' },
+        }),
+      ],
+    });
+    const provider = createAnthropicProvider({ keyFor: () => 'k', post: transport.post });
+
+    await expect(
+      drain(provider.generate(request('anthropic', 'claude-haiku-4-5-20251001'), neverAbort())),
+    ).rejects.toMatchObject({ class: 'network', message: /ended the stream early/ });
+  });
+
+  it('a truncated stream still shows the caller what was salvaged (FR-076)', async () => {
+    const transport = scriptedTransport({
+      chunks: [
+        sse('message_start', { type: 'message_start', message: { usage: { input_tokens: 9 } } }),
+        sse('content_block_delta', {
+          type: 'content_block_delta',
+          delta: { type: 'text_delta', text: 'Led checkout\ncut latency' },
+        }),
+      ],
+    });
+    const provider = createAnthropicProvider({ keyFor: () => 'k', post: transport.post });
+    const lines: string[] = [];
+
+    const outcome = await runGeneration(
+      provider,
+      request('anthropic', 'claude-haiku-4-5-20251001'),
+      neverAbort(),
+      { onBegin: () => {}, onLine: (l) => lines.push(l.line), onEnd: () => {} },
+    );
+
+    expect(lines).toEqual(['Led checkout', 'cut latency']);
+    expect(outcome.error?.message).toMatch(/ended the stream early/);
+    expect(outcome.status).toBe('complete');
+  });
+
+  it('an aborted stream is not reported as truncated', async () => {
+    const controller = new AbortController();
+    const transport = scriptedTransport({
+      chunks: anthropicScript(['one\n', 'two\n']),
+      beforeChunk: (index) => {
+        if (index === 2) controller.abort();
+      },
+    });
+    const provider = createAnthropicProvider({ keyFor: () => 'k', post: transport.post });
+
+    // Cancellation is not a provider failure, so it must not raise the
+    // early-end error on the way out.
+    await expect(
+      drain(
+        provider.generate(request('anthropic', 'claude-haiku-4-5-20251001'), controller.signal),
+      ),
+    ).resolves.toEqual([{ delta: 'one\n' }]);
+  });
+
   it('the Anthropic adapter reports an unreachable provider the same way', async () => {
     const provider = createAnthropicProvider({
       keyFor: () => 'k',
@@ -432,9 +509,35 @@ describe('the adapter table', () => {
   });
 
   it('refuses a provider with no adapter rather than returning a plausible stub', () => {
-    expect(() => requireLlmProvider({ providerId: 'acme', modelId: 'x' })).toThrow(
+    // A registry entry whose adapter was never registered. The registry check
+    // has to pass before the adapter check is the one that fires.
+    const registry = [
+      {
+        id: 'acme',
+        displayName: 'Acme',
+        credentialId: 'anthropic' as const,
+        models: [{ id: 'x', displayName: 'X', inputPerMTokUsd: 1, outputPerMTokUsd: 1 }],
+      },
+    ];
+    expect(() => requireLlmProvider({ providerId: 'acme', modelId: 'x' }, registry)).toThrow(
       /No language-model adapter/,
     );
+  });
+
+  /**
+   * Settings type `modelId` as a plain string, so a stale or hand-edited choice
+   * can name a model belonging to the other provider. Sent as-is it becomes a
+   * 4xx, which classifies as a non-retryable `client` error and takes the whole
+   * credential to CONFIG_REQUIRED, blaming a key that is perfectly good.
+   */
+  it('refuses a model the registry does not list for that provider', () => {
+    registerAllLlmProviders(() => 'key');
+    expect(() => requireLlmProvider({ providerId: 'anthropic', modelId: 'gpt-4o-mini' })).toThrow(
+      /not in the language-model registry/,
+    );
+    expect(() =>
+      requireLlmProvider({ providerId: 'openai', modelId: 'gpt-4o-mini' }),
+    ).not.toThrow();
   });
 });
 

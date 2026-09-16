@@ -911,7 +911,7 @@ vague intention:
 
 **Status: COMPLETE, 2026-09-16.** All three tasks implemented and verified.
 `npm run typecheck`, `npm run lint`, `npm run format:check`, `npm run licenses`,
-`npm run build`, `npm run smoke:main`, `python3 scripts/traceability.py` and 636
+`npm run build`, `npm run smoke:main`, `python3 scripts/traceability.py` and 658
 unit and integration tests all pass. Line coverage over the milestone's own
 files is 97 percent or better on every one of them against an 80 percent floor,
 and 95.9 percent overall.
@@ -956,6 +956,22 @@ pinned by a test that was checked to fail without its fix:
 | The line cap could produce a 121-character line | The ellipsis was appended after truncating at 120. A cap a rendered line can exceed is not a cap | FR-004 |
 | `validateCredential` refused every Anthropic key | Correct in Milestones 0 to 2, where no adapter claimed that credential and `FR-026` forbids saving a key that has not passed live validation. Left in place it would have meant the LLM primary could never be configured at all | FR-026 |
 | `TC-151`'s provider-id guard did not know about `src/main/ai/llm/` | The rule allows a provider id inside its own adapter file, which is what an adapter *is*. Extending the allowlist to the LLM adapters keeps the rule's meaning rather than weakening it | FR-037 |
+
+**Defects found by the Codex review on the pull request, all eight verified and
+fixed.** Two of them only exist because a question is asked while the previous
+answer is still being spoken, which is the case a milestone about turn detection
+has to get right and which none of its own tests had reached.
+
+| Defect | Why it mattered | Requirement |
+|---|---|---|
+| **A turn was stranded when its generation settled first.** Q2's final arriving during Q1's stream arms the gap and leaves the machine in `GENERATING`. If Q1's stream then ended before the gap elapsed, `noteGenerationSettled` dropped the machine to `LISTENING`, and the timer fired into a state `evaluateTurn` refused | Q2 was never asked, and its text stayed in the buffer, so Q3 was appended to it and the model was handed two questions as one. `noteGenerationSettled` now returns to `AWAITING_TURN_END` when a turn is pending, and `evaluateTurn` refuses only `IDLE` and `PAUSED`, the two states that clear the gap on the way in | FR-050, FR-054 |
+| **Whisper's 4000 ms batches were each read as a completed turn.** `whisper-1` emits one `isFinal` per batch and never an interim or an endpoint, so an 800 ms gap measured from each batch elapses while the interviewer is still speaking into the next one | A long question became a suggestion per fragment. The batch window is now declared once in the registry as `batchIntervalMs` and added to the gap, so the timer means "a whole batch went by with no new text", the only silence evidence a batch source can give. The adapter sizes its buffer from the same field, so the two cannot disagree | FR-050, ADR-022, NFR-017 |
+| **A cancelled generation's late `suggestion:end` discarded its replacement.** The two run concurrently, so gen-1's end arrives after gen-2's begin. Keyed on "the last generation id seen", that stale end replaced the buffered card | gen-2's begin was dropped and its lines then arrived at the overlay with no card to render them on. The gate is keyed on a card now: only a `suggestion:begin` starts one, and a message for any other generation is ignored | FR-008, FR-054 |
+| **A rebuilt overlay received the tail of a generation with no begin.** `noteClosed` dropped everything already delivered, so a translucency change mid-generation left the new renderer with later lines and an end it could not reconstruct a card from | The card is kept and its delivery count reset, so the whole generation is replayed to the new renderer | FR-008, ADR-015 |
+| **Every candidate `isFinal` segment became a ring turn.** A streaming provider emits several segments for one spoken answer, Deepgram sending `is_final` per segment and `speech_final` separately | `FR-052`'s "last 2 candidate turns" held the last two *segments* of one answer and evicted everything said before them. Segments are grouped into a turn on the same silence gap the interviewer stream uses, and the turn still being spoken counts toward the context | FR-052, ASM-009 |
+| **A native endpoint was ignored unless the machine was in `AWAITING_TURN_END`.** A second question's final arrives while the first generation streams, so the state is `GENERATING` when the provider reports the silence | The user waited out a full local gap after the provider had already seen the turn end, which is the delay `FR-050` names native endpointing to avoid. An endpoint now evaluates a pending turn in any live state. An endpoint arriving *before* its text, which is the order OpenAI's server VAD uses, is held for the next final rather than discarded | FR-050 |
+| **A stream ending before its terminal marker was reported as a success.** A proxy or a dropped connection closes a 200 response cleanly without `[DONE]` or `message_stop`, and the loop exited normally | A truncated answer reached the overlay with nothing to say it was cut short, and the health machine never saw a failure. Both adapters now throw when a non-aborted stream ends without its marker, and the facade still shows the lines that did arrive (`FR-076`) | FR-070, FR-076 |
+| **`requireLlmProvider` validated the provider id but not the model id.** Settings type `modelId` as a plain string, so a stale or hand-edited choice can name a model belonging to the other provider | The request reached the provider and came back 4xx, which classifies as a non-retryable `client` error and takes the whole credential to `CONFIG_REQUIRED`, blaming a key that is perfectly good. It mirrors `openSttSession` and checks `findLlmModel` first | FR-037, ADR-024 |
 
 **Follow-up work carried out of Milestone 3**, each with an owner rather than a
 vague intention:

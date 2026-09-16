@@ -14,14 +14,24 @@ import type {
   TranscriptEvent,
   TranscriptSource,
 } from '../../../shared/types.js';
+import { findSttModel } from '../../../shared/registry/stt.js';
 import { classifyStatus, providerError } from '../stt.js';
 import type { SttProvider, SttSession, SttSessionOptions } from '../stt.js';
 import { validateOpenAiKey } from './openai-realtime.js';
 import { encodeWav } from './wav.js';
 
+/**
+ * The fallback buffer window, used only for a batch model whose registry entry
+ * declares none. Every v1 batch model declares one (ADR-022).
+ */
 export const WHISPER_BUFFER_MS = 4000;
-/** One chunk is 1000 ms (FR-041), so four chunks fill a buffer. */
-export const WHISPER_BUFFER_CHUNKS = WHISPER_BUFFER_MS / 1000;
+
+/** One chunk is 1000 ms (FR-041), so a window of N ms is N/1000 chunks. */
+export function bufferChunksFor(batchIntervalMs: number): number {
+  return Math.max(1, Math.round(batchIntervalMs / 1000));
+}
+
+export const WHISPER_BUFFER_CHUNKS = bufferChunksFor(WHISPER_BUFFER_MS);
 
 export const WHISPER_TRANSCRIBE_URL = 'https://api.openai.com/v1/audio/transcriptions';
 
@@ -40,7 +50,7 @@ export class WhisperSttSession implements SttSession {
   readonly choice: ProviderChoice;
 
   /**
-   * At most WHISPER_BUFFER_CHUNKS chunks, cleared the moment a buffer is full.
+   * At most `bufferChunks` chunks, cleared the moment a buffer is full.
    * Exported through `bufferedChunks` so the bound is asserted from outside
    * rather than inferred (FR-043, ADR-027).
    */
@@ -55,15 +65,19 @@ export class WhisperSttSession implements SttSession {
     choice: ProviderChoice;
     key: string;
     post: PostWav;
+    /** The window this model buffers, from its registry entry (ADR-022). */
+    bufferChunks?: number;
   }) {
     this.source = opts.source;
     this.choice = opts.choice;
     this.key = opts.key;
     this.post = opts.post;
+    this.bufferChunks = opts.bufferChunks ?? WHISPER_BUFFER_CHUNKS;
   }
 
   private readonly key: string;
   private readonly post: PostWav;
+  private readonly bufferChunks: number;
 
   get bufferedChunks(): number {
     return this.buffer.length;
@@ -76,7 +90,7 @@ export class WhisperSttSession implements SttSession {
   push(chunk: AudioChunk): void {
     if (this.closed) return;
     this.buffer.push(chunk.pcm);
-    if (this.buffer.length < WHISPER_BUFFER_CHUNKS) return;
+    if (this.buffer.length < this.bufferChunks) return;
     this.flush();
   }
 
@@ -170,7 +184,20 @@ export function createWhisperProvider(post: PostWav = postWavToOpenAi()): SttPro
     ): Promise<SttSession> {
       // turnEndGapMs is deliberately unused. This model has no endpointing to
       // configure, and the registry says so rather than this file asserting it.
-      return Promise.resolve(new WhisperSttSession({ source, choice, key, post }));
+      //
+      // The buffer window does come from the registry, because `CMP-05` adds
+      // the same number to the turn-end gap. Two components deriving one window
+      // from two constants is how they drift apart.
+      const model = findSttModel(choice);
+      return Promise.resolve(
+        new WhisperSttSession({
+          source,
+          choice,
+          key,
+          post,
+          bufferChunks: bufferChunksFor(model?.batchIntervalMs ?? WHISPER_BUFFER_MS),
+        }),
+      );
     },
     // One OpenAI key, one check, whichever transport is selected (ADR-017).
     validateKey: validateOpenAiKey,

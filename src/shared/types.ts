@@ -38,6 +38,16 @@ export interface SttModelDescriptor {
   streaming: boolean;
   supportsInterim: boolean;
   supportsEndpointing: boolean;
+  /**
+   * For a batch model, the audio window it buffers before each request, in
+   * milliseconds. Absent for a streaming model, which has no window.
+   *
+   * Two components need this number and it must be one number: the adapter
+   * sizes its buffer from it, and `CMP-05` adds it to the turn-end gap, because
+   * between two of a batch model's answers nothing arrives and the absence of
+   * events is not silence (FR-050, ADR-022, NFR-017).
+   */
+  batchIntervalMs?: number;
   audio: { encoding: 'linear16'; sampleRate: 16000; channels: 1 };
   pricePerAudioMinuteUsd: number;
   /** Dashboard badge text, for example the non-streaming penalty (FR-049). */

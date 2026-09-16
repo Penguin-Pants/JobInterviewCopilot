@@ -695,6 +695,18 @@ reaches the user through the Dashboard badge (`CMP-12`, `FR-100`).
 in the same change. Section 11 gains `ai/llm/sse.ts`, `ai/llm/index.ts` and
 `overlay-gate.ts`, which the original layout did not anticipate.
 
+**Added after the Codex review on the pull request.** `SttModelDescriptor` gains
+`batchIntervalMs`, the audio window a batch model buffers before each request.
+Two components need that number: the adapter sizes its buffer from it, and
+`CMP-05` adds it to the turn-end gap. Two constants would have been two things
+that drift, and the drift is invisible: `whisper-1` answers once per 4000 ms
+window and never sends an interim, so an 800 ms gap measured from each answer
+elapses while the interviewer is still speaking into the next window, and a long
+question becomes a suggestion per fragment. The field is absent for every
+streaming model, which reads as zero, so the gap stays exactly
+`settings.trigger.turnEndGapMs` for all of them and `TC-159` is unaffected.
+Sections 3.2, 5.1 and 5.3 carry the rest of that review's behavior changes.
+
 ---
 
 ## 3a. Open questions

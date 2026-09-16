@@ -29,7 +29,7 @@ import { anthropicScript, scriptedTransport } from '../fakes/llm.js';
 const GAP = defaultSettings().trigger.turnEndGapMs;
 
 function triggerConfig(): TriggerConfig {
-  return { ...defaultSettings().trigger, supportsEndpointing: true };
+  return { ...defaultSettings().trigger, supportsEndpointing: true, batchIntervalMs: 0 };
 }
 
 /* ------------------------------------------------------------------ *

@@ -486,7 +486,14 @@ function reportCaptureFidelity(): void {
  */
 function triggerConfigFrom(settings: Settings): TriggerConfig {
   const model = findSttModel(settings.providers.stt.primary);
-  return { ...settings.trigger, supportsEndpointing: model?.supportsEndpointing ?? false };
+  return {
+    ...settings.trigger,
+    supportsEndpointing: model?.supportsEndpointing ?? false,
+    // Zero for every streaming model, so the gap is exactly the user's value.
+    // A batch model declares its window and the trigger adds it, because the
+    // absence of events between two batches is not silence (FR-050).
+    batchIntervalMs: model?.batchIntervalMs ?? 0,
+  };
 }
 
 /** The gate's outlet. One place the three suggestion channels reach a window. */

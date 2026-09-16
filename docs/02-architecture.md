@@ -473,6 +473,20 @@ interface GenerationRequest {
 The adapter yields raw deltas. Line buffering is done above the adapter in
 `CMP-07`, so both providers get identical overlay behavior (`FR-074`).
 
+**A stream that ends before its terminal marker is a failure, not a completion.**
+A proxy or a dropped connection can close a 200 response cleanly without
+Anthropic's `message_stop` or OpenAI's `[DONE]`. Reporting that as a success put
+a truncated answer on the overlay with nothing to say it was cut short, and left
+the health machine unaware. Both adapters throw a `ProviderError` when a
+non-aborted stream ends without its marker; `CMP-07` still shows the lines that
+did arrive (`FR-076`). An abort is not an early end.
+
+**A model id is checked against the registry before dispatch**, exactly as
+`openSttSession` checks it. `modelId` is a plain string in `Settings`, so a
+stale choice can name a model belonging to the other provider, and sending it
+returns a 4xx that classifies as a non-retryable `client` error, taking the
+whole credential to `CONFIG_REQUIRED` and blaming a key that is fine.
+
 ### 3.3 Line buffer rule (`FR-074`)
 
 Accumulate deltas into a pending string. Flush a `SuggestionLine` when the
@@ -739,6 +753,15 @@ If the consent card has not been dismissed when the first suggestion is ready,
 the suggestion still renders. The reminder is non-blocking (ADR-002). What is
 mandatory is that it was shown.
 
+**The readiness gate holds a card, not a queue** (`FR-008`, ADR-016). Only a
+`suggestion:begin` starts a held generation; a line or an end naming any other
+generation is ignored. Two cases require that. A cancelled generation's
+`suggestion:end` arrives *after* its replacement's `suggestion:begin`, because
+the two run concurrently, and keying on the last generation id seen let that
+stale end discard the replacement. And a rebuilt overlay (a translucency change,
+ADR-015) has a renderer that never saw the begin, so the whole card is replayed
+to it rather than its tail alone.
+
 ### 5.2 Turn to suggestion
 
 ```
@@ -780,6 +803,32 @@ any             --session:stop-->             IDLE
 is **not** pausable: there is no session to pause, and resuming out of it would
 put the machine in `LISTENING` with no audio, no STT socket and no profile
 bound. Clarified during `TASK-030` and recorded as `ADR-031`.
+
+Three further rules, each from a case the diagram does not show. All were found
+by the review on `TASK-030`'s pull request and are recorded here because they
+change what the machine does, not only how it is written.
+
+- **A pending turn survives its predecessor.** Q2's final can arrive while Q1 is
+  still streaming: the gap is armed and the state stays `GENERATING`. If Q1's
+  stream then ends first, the machine returns to `AWAITING_TURN_END`, not to
+  `LISTENING`. Dropping to `LISTENING` stranded Q2 and appended Q3 to it.
+- **A native endpoint is honored in any live state**, not only in
+  `AWAITING_TURN_END`, so the second question of a pair does not wait out a
+  local gap the provider has already observed. An endpoint arriving *before* the
+  text it ends, which is the order OpenAI's server VAD uses, is held for the
+  next final rather than discarded.
+- **The gap a batch model is measured against is the user's gap plus the
+  model's `batchIntervalMs`.** A batch model has no interims and no endpoint: it
+  answers once per window, and between two answers nothing arrives. The absence
+  of events is not silence there, so the timer has to mean "a whole window went
+  by with no new text". `batchIntervalMs` is zero for every streaming model, so
+  `TC-159`'s "a hard-coded 800 fails this test" is unaffected.
+
+**A candidate turn is a group of segments, not one segment.** A streaming
+provider emits several `isFinal` segments for one spoken answer. `FR-052`'s
+"last 2 candidate turns" means answers, so segments are accumulated and closed
+on the same silence gap, and the answer still being spoken counts toward the
+context.
 
 Candidate-stream finals only append to the context ring. They never cause a
 state change. This is the mechanical guarantee behind `FR-003` and `FR-055`.

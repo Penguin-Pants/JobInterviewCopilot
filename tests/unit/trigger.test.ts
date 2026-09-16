@@ -21,7 +21,12 @@ import {
 const GAP = defaultSettings().trigger.turnEndGapMs;
 
 function config(over: Partial<TriggerConfig> = {}): TriggerConfig {
-  return { ...defaultSettings().trigger, supportsEndpointing: true, ...over };
+  return {
+    ...defaultSettings().trigger,
+    supportsEndpointing: true,
+    batchIntervalMs: 0,
+    ...over,
+  };
 }
 
 function event(over: Partial<TranscriptEvent> = {}): TranscriptEvent {
@@ -208,10 +213,14 @@ describe('TC-084 candidate never triggers', () => {
       h.trigger.handleTranscript(
         event({ source: 'candidate', text: `I led the migration, attempt ${String(i)}` }),
       );
+      // Past the candidate grouping gap every time, so all 100 close as turns
+      // and the timer that closes them is exercised, not skipped.
       vi.advanceTimersByTime(GAP);
     }
 
     expect(h.fired).toHaveLength(0);
+    // The candidate grouping timer closes a ring entry and nothing else. It
+    // carries no transition, which is what keeps this assertion true.
     expect(h.states.length).toBe(before);
     expect(h.trigger.current).toBe('LISTENING');
     expect(vi.getTimerCount()).toBe(0);
@@ -224,22 +233,60 @@ describe('TC-084 candidate never triggers', () => {
   });
 });
 
+/** A candidate turn: its segments, then the silence that closes it (FR-052). */
+function candidateTurn(h: Harness, ...segments: string[]): void {
+  for (const text of segments) {
+    h.trigger.handleTranscript(event({ source: 'candidate', text }));
+  }
+  vi.advanceTimersByTime(GAP);
+}
+
 /** TC-085: the context ring (FR-052, ASM-009). */
 describe('TC-085 context ring', () => {
   it('keeps the last 2 of 5 candidate turns', () => {
     const h = harness();
-    for (const n of [1, 2, 3, 4, 5]) {
-      h.trigger.handleTranscript(event({ source: 'candidate', text: `turn ${String(n)}` }));
-    }
+    for (const n of [1, 2, 3, 4, 5]) candidateTurn(h, `turn ${String(n)}`);
     expect(h.trigger.candidateContext).toBe('turn 4\nturn 5');
+  });
+
+  /**
+   * A streaming provider emits several `isFinal` segments for one spoken
+   * answer: Deepgram sends `is_final` per segment and `speech_final` separately.
+   * Treating each segment as a turn made the ring hold the last two segments of
+   * one answer and evict everything said before it.
+   */
+  it('groups the segments of one spoken answer into one turn', () => {
+    const h = harness();
+    candidateTurn(h, 'I owned the rollout');
+    candidateTurn(h, 'We cut latency', 'by sixty percent', 'over two quarters');
+
+    expect(h.trigger.candidateContext).toBe(
+      'I owned the rollout\nWe cut latency by sixty percent over two quarters',
+    );
+  });
+
+  it('counts the turn still being spoken, before its silence closes it', () => {
+    const h = harness();
+    candidateTurn(h, 'first answer');
+    h.trigger.handleTranscript(event({ source: 'candidate', text: 'still talking' }));
+
+    // The candidate has said the words, so FR-052's "do not repeat this" covers
+    // them whether or not the segments have been grouped yet.
+    expect(h.trigger.candidateContext).toBe('first answer\nstill talking');
+  });
+
+  it('does not let the ring array grow for the length of the interview', () => {
+    const h = harness();
+    for (let i = 0; i < 50; i += 1) candidateTurn(h, `turn ${String(i)}`);
+    expect(h.trigger.candidateContext).toBe('turn 48\nturn 49');
   });
 
   it('caps the pair at 400 characters, dropping the oldest content first', () => {
     const h = harness();
     const older = `OLDSTART${'o'.repeat(300)}`;
     const newer = 'n'.repeat(200);
-    h.trigger.handleTranscript(event({ source: 'candidate', text: older }));
-    h.trigger.handleTranscript(event({ source: 'candidate', text: newer }));
+    candidateTurn(h, older);
+    candidateTurn(h, newer);
 
     const context = h.trigger.candidateContext;
     expect(context.length).toBe(400);
@@ -337,6 +384,7 @@ describe('TC-087 and TC-088 pause and resume', () => {
     const h = harness();
     h.trigger.togglePause();
     h.trigger.handleTranscript(event({ source: 'candidate', text: 'I owned the rollout' }));
+    vi.advanceTimersByTime(GAP);
     expect(h.trigger.candidateContext).toBe('I owned the rollout');
   });
 
@@ -366,6 +414,144 @@ describe('TC-087 and TC-088 pause and resume', () => {
     const idle = new TriggerMachine({ config: config(), onFire: (t) => fired.push(t) });
     idle.togglePause();
     expect(idle.current).toBe('IDLE');
+  });
+});
+
+/**
+ * Regressions found by the Codex review on the pull request. Each one is a case
+ * the original TASK-030 tests did not reach.
+ */
+describe('turn-end regressions', () => {
+  it('does not strand a turn whose generation settles before its gap elapses', () => {
+    const h = harness();
+
+    // Q1 fires and starts streaming.
+    h.trigger.handleTranscript(event({ text: 'First question about your work' }));
+    vi.advanceTimersByTime(GAP);
+    expect(h.fired).toHaveLength(1);
+
+    // Q2's final arrives while Q1 is still streaming, so its gap is armed and
+    // the machine stays GENERATING.
+    h.trigger.handleTranscript(event({ text: 'Second question about your work' }));
+
+    // Q1's stream ends first. The machine used to drop to LISTENING here, and
+    // the gap timer then fired into a state evaluateTurn refused.
+    h.trigger.noteGenerationSettled('gen-1');
+    expect(h.trigger.current).toBe('AWAITING_TURN_END');
+
+    vi.advanceTimersByTime(GAP);
+    expect(h.fired).toHaveLength(2);
+    expect(h.fired[1]?.question).toBe('Second question about your work');
+  });
+
+  it('a settled generation with no turn pending still returns to LISTENING', () => {
+    const h = harness();
+    h.trigger.handleTranscript(event());
+    vi.advanceTimersByTime(GAP);
+    h.trigger.noteGenerationSettled('gen-1');
+    expect(h.trigger.current).toBe('LISTENING');
+  });
+
+  it('the stranded turn is not merged into the question that follows it', () => {
+    const h = harness();
+    h.trigger.handleTranscript(event({ text: 'First question about your work' }));
+    vi.advanceTimersByTime(GAP);
+    h.trigger.handleTranscript(event({ text: 'Second question about your work' }));
+    h.trigger.noteGenerationSettled('gen-1');
+    vi.advanceTimersByTime(GAP);
+
+    h.trigger.handleTranscript(event({ text: 'Third question about your work' }));
+    h.trigger.noteGenerationSettled('gen-2');
+    vi.advanceTimersByTime(GAP);
+
+    expect(h.fired).toHaveLength(3);
+    expect(h.fired[2]?.question).toBe('Third question about your work');
+  });
+
+  it('honors a native endpoint while a generation is still streaming', () => {
+    const h = harness();
+    h.trigger.handleTranscript(event({ text: 'First question about your work' }));
+    vi.advanceTimersByTime(GAP);
+
+    h.trigger.handleTranscript(event({ text: 'Second question about your work' }));
+    // The provider has already observed the silence. Waiting out another full
+    // local gap after that is the delay FR-050 exists to avoid.
+    h.trigger.handleEndpoint();
+
+    expect(h.fired).toHaveLength(2);
+    expect(h.fired[0]?.signal.aborted).toBe(true);
+  });
+
+  it('holds an endpoint that arrives before the text it ends', () => {
+    // OpenAI's server VAD emits speech_stopped before the completed item.
+    const h = harness();
+    h.trigger.handleEndpoint();
+    expect(h.fired).toHaveLength(0);
+
+    h.trigger.handleTranscript(event({ text: 'Tell me about a hard project' }));
+    expect(h.fired).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('a held endpoint is spent once, not on every later turn', () => {
+    const h = harness();
+    h.trigger.handleEndpoint();
+    h.trigger.handleTranscript(event({ text: 'Tell me about a hard project' }));
+    h.trigger.noteGenerationSettled('gen-1');
+
+    h.trigger.handleTranscript(event({ text: 'And what did you learn from it' }));
+    expect(h.fired).toHaveLength(1);
+    vi.advanceTimersByTime(GAP);
+    expect(h.fired).toHaveLength(2);
+  });
+
+  it('a held endpoint does not survive a pause', () => {
+    const h = harness();
+    h.trigger.handleEndpoint();
+    h.trigger.togglePause();
+    h.trigger.togglePause();
+
+    h.trigger.handleTranscript(event({ text: 'Tell me about a hard project' }));
+    expect(h.fired).toHaveLength(0);
+    vi.advanceTimersByTime(GAP);
+    expect(h.fired).toHaveLength(1);
+  });
+
+  /**
+   * `whisper-1` emits one `isFinal` per 4000 ms batch and never an interim or
+   * an endpoint. An 800 ms gap measured from each batch fires while the
+   * interviewer is still speaking into the next one, cutting a long question
+   * into a suggestion per fragment.
+   */
+  it('waits a whole batch window before calling a batch model silent', () => {
+    const h = harness({ batchIntervalMs: 4000, supportsEndpointing: false });
+
+    h.trigger.handleTranscript(event({ text: 'Tell me about a time when you had to' }));
+    vi.advanceTimersByTime(GAP);
+    expect(h.fired).toHaveLength(0);
+
+    // The next batch lands, still the same question.
+    vi.advanceTimersByTime(3000);
+    h.trigger.handleTranscript(event({ text: 'make a difficult technical tradeoff' }));
+    vi.advanceTimersByTime(GAP + 3999);
+    expect(h.fired).toHaveLength(0);
+
+    vi.advanceTimersByTime(1);
+    expect(h.fired).toHaveLength(1);
+    expect(h.fired[0]?.question).toBe(
+      'Tell me about a time when you had to make a difficult technical tradeoff',
+    );
+  });
+
+  it('a streaming model still fires at exactly the configured gap', () => {
+    // batchIntervalMs is 0 for every streaming model, so TC-159's "a hard-coded
+    // 800 fails this test" is unaffected by the batch allowance.
+    const h = harness({ turnEndGapMs: 1400 });
+    h.trigger.handleTranscript(event());
+    vi.advanceTimersByTime(1399);
+    expect(h.fired).toHaveLength(0);
+    vi.advanceTimersByTime(1);
+    expect(h.fired).toHaveLength(1);
   });
 });
 
