@@ -556,6 +556,19 @@ declared. An unbounded accumulation is not.
 - The audio path must expose its live-chunk count so the assertion can be made
   from outside, rather than inferred.
 
+**What that count does and does not prove.** Corrected after code review on
+PR #4. `chunksInFlight` measures concurrency: how many chunks have been handed
+to the consumer and not yet finished with. It cannot detect a consumer that
+returns promptly and keeps the buffer, which is the retention this ADR is about.
+Retention is proved by the direct-reference assertions in `TC-041` and by
+`TC-137`'s runtime filesystem-write monitor. The count is still worth asserting,
+as a bound on how much audio can be outstanding at once, but it is not the
+retention proof and this document no longer implies it is.
+
+An async consumer is not finished when it returns its promise. The count is
+released when the promise settles, or the bound would read as one while several
+requests were genuinely outstanding.
+
 ### ADR-028 — Acquire loopback with the platform API, not a third-party package
 
 **TASK-010 spike result. Confirmed on Windows 2026-09-15; the gate is closed.**
