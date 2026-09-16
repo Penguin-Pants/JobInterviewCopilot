@@ -550,7 +550,7 @@ Two process lessons, both fixed rather than noted:
 
 **Status: COMPLETE, 2026-09-16.** All six tasks implemented and verified.
 `npm run typecheck`, `npm run lint`, `npm run format:check`, `npm run licenses`,
-`npm run build`, `npm run smoke:main`, `python3 scripts/traceability.py` and 523
+`npm run build`, `npm run smoke:main`, `python3 scripts/traceability.py` and 536
 unit and integration tests all pass, and every CI job is green on Windows,
 including `Electron E2E` and `Windows installer`. Line coverage over `src/main/rag/**` is
 96.9 percent against an 80 percent floor; every file in the milestone clears the
@@ -604,6 +604,22 @@ pinned by a test that was checked to fail without its fix:
 | `CH-215` shipped in Milestone 0 and was never written into the IPC table. The contract test only checked documented-implies-implemented | The test now asserts both directions | DoD 9 |
 | **The overlay was unreachable while its renderer loaded.** `overlayWindow` was assigned from `await createOverlayWindow(...)`, so it stayed null for the whole of that load, while the Dashboard was already interactive and the window was already in `BrowserWindow.getAllWindows()` | `overlay:reset` arriving in that window failed its `if (overlayWindow)` guard, moved nothing and **returned `ok`**, so the Dashboard rendered "Overlay reset" over a window that had not moved. Found by `TC-148` failing identically on two heads on the Windows runner, where the overlay's renderer is the slower of the two to load; reproduced on Linux by delaying that one assignment, and the fix verified against a deliberately slow overlay load. The window is now handed over through a callback before the load, and the handler throws rather than reporting success with nothing done. A Milestone 0 bug this milestone's timing made reproducible | FR-009 |
 | Knowledge base startup was **awaited inside `bootstrap`**, between the windows being created and `window-all-closed` and `will-quit` being registered. Reconciling reads every file in every profile's `kb/`, and starting a watcher pulls chokidar in through a dynamic ESM import | A slow or wedged knowledge base left the app interactive with no shutdown wiring at all, and delayed everything after it. Found by `TC-148` failing on the Windows runner, which is sensitive to that timing: the overlay is created `show: false` and Windows re-applies the placement of a never-shown window when it is finally shown. Startup is now background work, registered last and not awaited, with the lifecycle handlers ahead of it | NFR-009 |
+
+**Defects found by the Codex review on the pull request, all eight verified and
+fixed.** Three were regressions introduced by fixes earlier in this same branch,
+which is the part worth remembering: a fix is not free, and each one needs its
+own adversarial pass.
+
+| Defect | Why it mattered | Requirement |
+|---|---|---|
+| A document deleted during its **first** ingest came back. The cancel was gated on the snapshot taken before the pipeline started, which is null for a new document, so the check could never fire on a first ingest | The document republished as `ready` with its `kb/` file already gone and its chunks queryable. The earlier fix only ever covered re-ingests | FR-077 |
+| Reconciliation trusted a `ready` document because its chunk pair merely **loaded**, never comparing the bytes | A file edited while the app was shut down served its pre-edit chunks forever, because the watcher starts with `ignoreInitial` and no change event arrives. It also defeated ADR-012 entirely: bumping the chunker version or the model no longer invalidated anything on relaunch | FR-067, ADR-012 |
+| An entry `stat` could not answer for was treated as deleted, dropping its record, chunks, vectors and derived Markdown. **A regression from this branch's own bootstrap-crash fix** | An EACCES file or an antivirus lock is not a deletion, and `ignoreInitial` meant a file that was still there might never come back. Only `ENOENT` counts as gone now | FR-077 |
+| A profile whose `profile.json` was unreadable vanished from `list` entirely | Its `kb/` was never scanned or watched, `ensureActiveProfile` quietly selected another, and every document in it became invisible. This directly contradicted ADR-014, which this milestone's own comments quote: `profile.json` is derived, `kb/` is the authority. It is rebuilt from the folder now | ADR-014, FR-077 |
+| The determinate download bar parked at 99 percent for the entire real download. **A regression from this branch's own monotonic-progress fix** | The tokenizer loads before the 90 MB weights, so one shared byte ratio hit 99 on a few hundred kilobytes and the monotonic clamp then suppressed every honest update from the weights. Each phase gets its own slice of the range now | FR-066 |
+| Prose before a document's first heading produced `headerPath: []` | `hasSplittingHeading` was true, so no synthetic wrapper was added, and the preamble flushed with an empty stack. The milestone's own "every chunk has a header path" test had no preamble shape in it | FR-063 |
+| A fenced block closed on any delimiter, so a ``` block ended at an inner `~~~` and a ```` block at an inner ``` | The `#` lines after the false close were read as headings, corrupting every following `headerPath`. CommonMark closes only on the same character, at least as long | FR-062, FR-063 |
+| The license gate identified BSD-4-Clause as BSD-3-Clause | A BSD-4-Clause text contains the whole three-clause text including the non-endorsement sentence the gate matched on, so a dependency declaring the ambiguous bare `BSD` resolved to an allowed license and passed. The advertising clause is checked first now | NFR-015 |
 
 **Found while fixing TC-148, deliberately not fixed here.** `wireOverlayWindow`
 registers a `did-finish-load` listener, and it used to run *after*

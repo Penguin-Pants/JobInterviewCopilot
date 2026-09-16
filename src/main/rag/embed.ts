@@ -224,6 +224,14 @@ export function readMaxSeqLength(
  */
 const MEMOIZED_WORD_MAX_CHARS = 64;
 
+/**
+ * Percent of the determinate bar the tokenizer phase may fill.
+ *
+ * The tokenizer is a few hundred kilobytes against roughly 90 MB of weights, so
+ * it is worth about five percent of the wait and gets five percent of the bar.
+ */
+const TOKENIZER_PROGRESS_SHARE = 5;
+
 /** The subset of the library's progress events this app reacts to. */
 interface ProgressEvent {
   status: string;
@@ -312,6 +320,8 @@ export class XenovaEmbedder implements Embedder {
   private readonly progressByFile = new Map<string, { loaded: number; total: number }>();
   /** Highest percent reported so far. The bar never moves backwards. */
   private highestPercent = 0;
+  /** Which half of the load is running. Each gets its own slice of the range. */
+  private phase: 'tokenizer' | 'weights' = 'tokenizer';
 
   constructor(private readonly options: XenovaEmbedderOptions) {
     this.descriptor = options.descriptor ?? EMBEDDING_MODEL;
@@ -379,6 +389,9 @@ export class XenovaEmbedder implements Embedder {
     this.tokenizer = await lib.AutoTokenizer.from_pretrained(this.descriptor.id, {
       progress_callback: progress,
     });
+    // The weights are the other 95 percent of the bytes and of the range.
+    this.phase = 'weights';
+    this.progressByFile.clear();
     this.extractor = await lib.pipeline('feature-extraction', this.descriptor.id, {
       quantized: true,
       progress_callback: progress,
@@ -391,12 +404,20 @@ export class XenovaEmbedder implements Embedder {
   /**
    * Turn per-file byte counts into one determinate percent (FR-066).
    *
-   * Monotonic by construction, not by hope. The denominator grows every time a
-   * new file announces its size, and the tokenizer is loaded before the 90 MB
-   * weights, so the honest ratio really does fall: the bar hit 99 percent on the
-   * 700 KB tokenizer and then snapped back to 3 percent when the weights
-   * appeared. A bar that goes backwards reads as a stall, so the highest percent
-   * reported so far is held instead.
+   * The download has two phases and they are wildly unequal: the tokenizer is a
+   * few hundred kilobytes and the weights are about 90 MB. Sharing one
+   * byte-ratio across both is what made the bar misbehave, in two different ways:
+   *
+   * - Unclamped, it hit 99 percent on the tokenizer and then snapped back to 3
+   *   when the weights announced their size, which reads as a stall.
+   * - Clamped to the highest value seen, it hit 99 on the tokenizer and then sat
+   *   there through the entire real download, which is worse: the bar is
+   *   nominally determinate and tells the user nothing at all.
+   *
+   * So each phase gets its own slice of the range instead. The tokenizer fills
+   * 0 to {@link TOKENIZER_PROGRESS_SHARE} percent and the weights fill the rest,
+   * each from its own byte ratio. Monotonic within a phase, monotonic across the
+   * boundary, and the number keeps moving while the 90 MB is actually arriving.
    */
   private notifyProgress(event: ProgressEvent): void {
     if (event.status !== 'progress' || !event.file) return;
@@ -413,7 +434,13 @@ export class XenovaEmbedder implements Embedder {
       total += entry.total;
     }
     if (total === 0) return;
-    const percent = Math.min(99, Math.round((loaded / total) * 100));
+
+    const [from, to] =
+      this.phase === 'tokenizer' ? [0, TOKENIZER_PROGRESS_SHARE] : [TOKENIZER_PROGRESS_SHARE, 99];
+    const percent = Math.min(to, Math.round(from + (loaded / total) * (to - from)));
+
+    // Still monotonic, but only against this phase's floor, so the weights are
+    // free to report their own honest progress from where the tokenizer left off.
     if (percent <= this.highestPercent) return;
     this.highestPercent = percent;
     this.options.onProgress?.(percent);

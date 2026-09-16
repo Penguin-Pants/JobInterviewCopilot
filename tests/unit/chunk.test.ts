@@ -85,6 +85,18 @@ describe('TC-061 synthetic heading', () => {
     expect(chunks[0]!.text).not.toContain('\uFEFF');
   });
 
+  it('gives prose before the first heading a synthetic section', () => {
+    // `hasSplittingHeading` is true here, so no synthetic wrapper is added, and
+    // `toSections` used to flush the preamble with an empty stack.
+    const chunks = chunkMarkdown(
+      'Intro prose before any heading.\n\n# Experience\n\nAcme.',
+      options(),
+    );
+
+    expect(chunks.map((c) => c.headerPath)).toEqual([[SYNTHETIC_HEADING], ['Experience']]);
+    expect(chunks[0]!.text).toContain('Intro prose');
+  });
+
   it('every chunk of every shape carries a non-empty headerPath (FR-063)', () => {
     const shapes = [
       'No heading at all.',
@@ -92,6 +104,8 @@ describe('TC-061 synthetic heading', () => {
       '```\n# fenced\n```\n\nBody.',
       '\uFEFF# Title\n\nBody.',
       '# Real\n\nBody.',
+      'Preamble prose.\n\n# Then a heading\n\nBody.',
+      '## Starts deeper\n\nBody.',
     ];
     for (const markdown of shapes) {
       for (const chunk of chunkMarkdown(markdown, options())) {
@@ -126,6 +140,31 @@ describe('TC-064 header splitting', () => {
     ]);
     expect(chunks[2]!.text).toContain('#### Sub detail');
     expect(chunks[2]!.text).toContain('This stays inside Highlights.');
+  });
+
+  it('closes a fence only on its own delimiter, at least as long', () => {
+    // CommonMark requires the same character and at least the opening length.
+    // Toggling on any delimiter closed a ``` block at an inner ~~~ line, and the
+    // `#` after it became a heading, corrupting every following headerPath.
+    const tilde = ['```', 'code', '~~~', '# not a heading', '```', '', 'After.'].join('\n');
+    expect(chunkMarkdown(tilde, options()).map((c) => c.headerPath)).toEqual([[SYNTHETIC_HEADING]]);
+
+    const shorter = ['````', 'code', '```', '# also not a heading', '````', '', 'After.'].join(
+      '\n',
+    );
+    expect(chunkMarkdown(shorter, options()).map((c) => c.headerPath)).toEqual([
+      [SYNTHETIC_HEADING],
+    ]);
+  });
+
+  it('still closes a fence on a matching, longer delimiter', () => {
+    const md = ['# Heading', '', '```', 'code', '`````', '', '## After the fence', 'Body.'].join(
+      '\n',
+    );
+    expect(chunkMarkdown(md, options()).map((c) => c.headerPath)).toEqual([
+      ['Heading'],
+      ['Heading', 'After the fence'],
+    ]);
   });
 
   it('does not open a section for a heading inside a fenced code block', () => {

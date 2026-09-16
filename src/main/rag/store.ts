@@ -179,7 +179,7 @@ export class ProfileStore {
     // same message for a malicious id as for a stale one.
     if (!SAFE_ID.test(profileId)) return null;
     const file = this.profileFile(profileId);
-    if (!existsSync(file)) return null;
+    if (!existsSync(file)) return this.recover(profileId);
     try {
       const parsed = JSON.parse(readFileSync(file, 'utf8')) as Partial<Profile>;
       if (typeof parsed?.id !== 'string' || typeof parsed.name !== 'string') return null;
@@ -198,8 +198,36 @@ export class ProfileStore {
         documents: Array.isArray(parsed.documents) ? parsed.documents : [],
       };
     } catch {
-      return null;
+      return this.recover(profileId);
     }
+  }
+
+  /**
+   * Rebuild a profile whose index is missing or unreadable (ADR-014, FR-077).
+   *
+   * `profile.json` is a derived index and `kb/` is the authority, so a truncated
+   * or corrupt index must not take the profile with it. Returning null here
+   * dropped the whole profile from `list`, so reconciliation never scanned its
+   * `kb/`, no watcher was started for it, `ensureActiveProfile` quietly selected
+   * a different one, and every document in it became invisible.
+   *
+   * The presence of `kb/` is what distinguishes a real profile with a damaged
+   * index from a leftover directory: `delete` removes `kb/` before it removes
+   * the record, so an interrupted delete has no `kb/` and stays deleted.
+   *
+   * @returns a profile with an empty document list, which reconciliation refills
+   * from `kb/`, or null when there is nothing to recover.
+   */
+  private recover(profileId: string): Profile | null {
+    const kb = this.kbDir(profileId);
+    if (!existsSync(kb)) return null;
+    return {
+      id: profileId,
+      name: 'Recovered profile',
+      createdAt: new Date(0).toISOString(),
+      kbPath: kb,
+      documents: [],
+    };
   }
 
   list(): Profile[] {

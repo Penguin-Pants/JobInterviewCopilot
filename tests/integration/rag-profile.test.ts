@@ -1,4 +1,11 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync as mkdirSyncReal,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { makeHarness, NOTES_MD, RESUME_MD } from '../fakes/rag-harness.js';
@@ -32,7 +39,7 @@ describe('TC-160 profile deletion cascade', () => {
 
     // A transcript, which FR-069 names alongside documents and vectors.
     const transcript = join(h.engine.store.sessionsDir(doomed.id), 'session-1.json');
-    mkdirSync(h.engine.store.sessionsDir(doomed.id), { recursive: true });
+    mkdirSyncReal(h.engine.store.sessionsDir(doomed.id), { recursive: true });
     writeFileSync(
       transcript,
       JSON.stringify({ id: 'session-1', entries: [{ text: 'a secret answer' }] }),
@@ -213,12 +220,37 @@ describe('TC-160 profile deletion cascade', () => {
     expect(h.engine.store.get(profile.id)!.kbPath).toBe(h.engine.store.kbDir(profile.id));
   });
 
-  it('an unreadable profile.json reads as null rather than throwing', async () => {
+  it('recovers a profile whose index is unreadable instead of losing it', async () => {
     const h = makeHarness();
     const profile = await h.engine.createProfile('Acme');
+    await h.engine.importDocuments(profile.id, [h.writeSourceFile('resume.md', RESUME_MD)]);
+
+    // A truncated write. `profile.json` is a derived index and `kb/` is the
+    // authority (ADR-014), so returning null here dropped the whole profile from
+    // `list`: its kb/ was never scanned, no watcher started, and every document
+    // in it became invisible.
     writeFileSync(join(h.engine.store.profileDir(profile.id), 'profile.json'), '{ broken');
 
-    expect(h.engine.store.get(profile.id)).toBeNull();
-    expect(h.engine.listProfiles()).toEqual([]);
+    const recovered = h.engine.store.get(profile.id);
+    expect(recovered).not.toBeNull();
+    expect(recovered!.id).toBe(profile.id);
+    expect(recovered!.documents).toEqual([]);
+    expect(h.engine.listProfiles().map((p) => p.id)).toEqual([profile.id]);
+
+    // Reconciliation refills the index from the folder, which is the whole point.
+    await h.engine.reconcile(profile.id);
+    expect(h.engine.store.get(profile.id)!.documents).toHaveLength(1);
+    expect((await h.engine.query(profile.id, 'Acme Corp billing', 3)).length).toBeGreaterThan(0);
+  });
+
+  it('does not resurrect a profile whose delete was interrupted', () => {
+    const h = makeHarness();
+    // `delete` removes kb/ before the record, so a directory with no kb/ is a
+    // delete in progress and must stay deleted rather than coming back empty.
+    const id = '11111111-2222-4333-8444-555555555555';
+    mkdirSyncReal(h.engine.store.profileDir(id), { recursive: true });
+
+    expect(h.engine.store.get(id)).toBeNull();
+    expect(h.engine.listProfiles().map((p) => p.id)).toEqual([]);
   });
 });

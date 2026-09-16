@@ -45,6 +45,16 @@ const ALLOWED = [
  */
 const UNRESOLVED = /^(custom:|see license in\b|bsd$|bsd\b.*\*$)/i;
 
+/**
+ * The BSD advertising clause, which makes a license BSD-4-Clause.
+ *
+ * Checked before anything else, because a BSD-4-Clause text contains the whole
+ * BSD-3-Clause text including its non-endorsement sentence. Matching on that
+ * sentence alone identified a four-clause license as three-clause and let the
+ * gate pass a dependency the allow list does not permit.
+ */
+const ADVERTISING_CLAUSE = /All advertising materials mentioning features or use of this software/i;
+
 /** Distinguishing sentences from the license texts the allow list accepts. */
 const TEXT_SIGNATURES = [
   ['Apache-2.0', /Apache License\s+Version 2\.0/],
@@ -73,6 +83,10 @@ function identifyFromText(packageDir) {
     const full = join(packageDir, name);
     if (!statSync(full).isFile()) continue;
     const text = readFileSync(full, 'utf8');
+    // BSD-4-Clause first, and as a rejection rather than an identification: it
+    // is not on the allow list, and every signature below would otherwise claim
+    // it. Returning its real id lets the caller fail it by name.
+    if (ADVERTISING_CLAUSE.test(text)) return 'BSD-4-Clause';
     for (const [id, signature] of TEXT_SIGNATURES) {
       if (signature.test(text)) return id;
     }

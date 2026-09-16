@@ -59,6 +59,13 @@ const SPLITTING_HEADING = /^(#{1,3})\s+(.+?)\s*$/;
 export const SYNTHETIC_HEADING = 'Document';
 
 /**
+ * A fenced code block delimiter, capturing the run so its marker and length can
+ * be compared. CommonMark closes a fence only on the same character, at least as
+ * long as the opening run.
+ */
+const FENCE = /^\s*(`{3,}|~{3,})/;
+
+/**
  * A UTF-8 byte-order mark, which Notepad and VS Code both write.
  *
  * Left in place it precedes the first `#`, so `\uFEFF# Jane Doe` matches no
@@ -97,13 +104,17 @@ export function ensureHeadings(markdown: string): string {
 
 /** Whether any line outside a fence opens a section, by the splitter's own rules. */
 function hasSplittingHeading(markdown: string): boolean {
-  let inFence = false;
+  let fence: { marker: string; length: number } | null = null;
   for (const line of markdown.split('\n')) {
-    if (/^\s*(```|~~~)/.test(line)) {
-      inFence = !inFence;
+    const delimiter = FENCE.exec(line);
+    if (delimiter) {
+      const marker = (delimiter[1] ?? '')[0] ?? '';
+      const length = (delimiter[1] ?? '').length;
+      if (!fence) fence = { marker, length };
+      else if (marker === fence.marker && length >= fence.length) fence = null;
       continue;
     }
-    if (!inFence && SPLITTING_HEADING.test(line)) return true;
+    if (!fence && SPLITTING_HEADING.test(line)) return true;
   }
   return false;
 }
@@ -118,20 +129,37 @@ function toSections(markdown: string): Section[] {
   const sections: Section[] = [];
   const stack: { level: number; title: string }[] = [];
   let body: string[] = [];
-  let inFence = false;
+  let fence: { marker: string; length: number } | null = null;
 
   const flush = (): void => {
     const text = body.join('\n').trim();
     if (text.length > 0) {
-      sections.push({ headerPath: stack.map((s) => s.title), body: text });
+      // A document may open with prose before its first heading. Flushing that
+      // preamble with an empty stack gave it `headerPath: []`, which breaks
+      // FR-063's guarantee that every chunk carries its ancestor chain, so it
+      // gets the same synthetic section a heading-less document gets.
+      const headerPath = stack.length > 0 ? stack.map((s) => s.title) : [SYNTHETIC_HEADING];
+      sections.push({ headerPath, body: text });
     }
     body = [];
   };
 
   for (const line of markdown.split('\n')) {
-    if (/^\s*(```|~~~)/.test(line)) inFence = !inFence;
+    const delimiter = FENCE.exec(line);
+    if (delimiter) {
+      const marker = (delimiter[1] ?? '')[0] ?? '';
+      const length = (delimiter[1] ?? '').length;
+      if (!fence) fence = { marker, length };
+      // CommonMark closes a fence only on the same character, at least as long
+      // as the opener. Toggling on any delimiter closed a ``` block at an inner
+      // ~~~ line, or a ```` block at an inner ```, and the `#` lines after it
+      // were then read as headings, corrupting every following headerPath.
+      else if (marker === fence.marker && length >= fence.length) fence = null;
+      body.push(line);
+      continue;
+    }
 
-    const heading = inFence ? null : SPLITTING_HEADING.exec(line);
+    const heading = fence ? null : SPLITTING_HEADING.exec(line);
     if (!heading) {
       body.push(line);
       continue;

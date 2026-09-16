@@ -35,11 +35,20 @@ function seedModel(root: string, extra: Record<string, string> = {}): void {
   for (const [name, contents] of Object.entries(extra)) writeFileSync(join(dir, name), contents);
 }
 
+interface ProgressEvent {
+  status: string;
+  file?: string;
+  loaded?: number;
+  total?: number;
+}
+
 interface FakeLibOptions {
   /** Vector width the fake extractor returns. Defaults to the registry's. */
   width?: number;
-  /** Progress events the loader emits, in order. */
-  progress?: { status: string; file?: string; loaded?: number; total?: number }[];
+  /** Events the weights phase emits, in order. */
+  progress?: ProgressEvent[];
+  /** Events the tokenizer phase emits, in order, before the weights start. */
+  tokenizerProgress?: ProgressEvent[];
   /** Word pieces per word, before the special tokens are added back. */
   tokensPerWord?: number;
 }
@@ -72,14 +81,18 @@ function fakeLibrary(options: FakeLibOptions = {}): {
       env: {},
       pipeline: pipeline as unknown as TransformersLibrary['pipeline'],
       AutoTokenizer: {
-        from_pretrained: async () => ({
-          // `encode` includes the special tokens, as a BERT tokenizer does.
-          encode: (text: string) =>
-            new Array(
-              text.split(/\s+/).filter(Boolean).length * (options.tokensPerWord ?? 1) +
-                EMBEDDING_MODEL.specialTokenCount,
-            ).fill(0),
-        }),
+        from_pretrained: async (_model: string, opts: Record<string, unknown>) => {
+          const callback = opts.progress_callback as ((event: unknown) => void) | undefined;
+          for (const event of options.tokenizerProgress ?? []) callback?.(event);
+          return {
+            // `encode` includes the special tokens, as a BERT tokenizer does.
+            encode: (text: string) =>
+              new Array(
+                text.split(/\s+/).filter(Boolean).length * (options.tokensPerWord ?? 1) +
+                  EMBEDDING_MODEL.specialTokenCount,
+              ).fill(0),
+          };
+        },
       },
     },
   };
@@ -167,67 +180,81 @@ describe('XenovaEmbedder loading', () => {
 });
 
 describe('XenovaEmbedder download progress (FR-066)', () => {
-  it('reports one determinate percent across every file, ending at 100', async () => {
+  /** Run the loader and collect every percent it reported, in order. */
+  async function percentsFor(options: FakeLibOptions): Promise<number[]> {
     const onProgress = vi.fn();
-    const { lib } = fakeLibrary({
-      progress: [
-        { status: 'progress', file: 'model.onnx', loaded: 0, total: 100 },
-        { status: 'progress', file: 'model.onnx', loaded: 50, total: 100 },
-        { status: 'progress', file: 'tokenizer.json', loaded: 100, total: 100 },
-        { status: 'progress', file: 'model.onnx', loaded: 100, total: 100 },
-      ],
-    });
-    const embedder = new XenovaEmbedder({
+    const { lib } = fakeLibrary(options);
+    await new XenovaEmbedder({
       modelsRoot: tmp(),
       onProgress,
       loadLibrary: async () => lib,
+    }).ensureReady();
+    return onProgress.mock.calls.map((c) => c[0] as number);
+  }
+
+  it('never goes backwards, stays in range and ends at 100', async () => {
+    const percents = await percentsFor({
+      tokenizerProgress: [
+        { status: 'progress', file: 'tokenizer.json', loaded: 350_000, total: 700_000 },
+        { status: 'progress', file: 'tokenizer.json', loaded: 700_000, total: 700_000 },
+      ],
+      progress: [
+        { status: 'progress', file: 'model_quantized.onnx', loaded: 0, total: 90_000_000 },
+        { status: 'progress', file: 'model_quantized.onnx', loaded: 45_000_000, total: 90_000_000 },
+        { status: 'progress', file: 'model_quantized.onnx', loaded: 90_000_000, total: 90_000_000 },
+      ],
     });
 
-    await embedder.ensureReady();
-
-    const percents = onProgress.mock.calls.map((c) => c[0] as number);
     expect(percents.every((p) => p >= 0 && p <= 100)).toBe(true);
-    // Two files of 100 bytes with 50 and 100 loaded is 75 percent, not 50.
-    expect(percents).toContain(75);
+    expect([...percents].sort((a, b) => a - b)).toEqual(percents);
     expect(percents[percents.length - 1]).toBe(100);
   });
 
+  it('keeps moving through the weights instead of parking at 99', async () => {
+    // The tokenizer is a few hundred kilobytes and the weights are about 90 MB.
+    // One shared byte-ratio drove the bar to 99 on the tokenizer; clamping it
+    // monotonically then held it there for the entire real download, which is a
+    // nominally determinate bar that tells the user nothing.
+    const percents = await percentsFor({
+      tokenizerProgress: [
+        { status: 'progress', file: 'tokenizer.json', loaded: 700_000, total: 700_000 },
+      ],
+      progress: [
+        { status: 'progress', file: 'model_quantized.onnx', loaded: 9_000_000, total: 90_000_000 },
+        { status: 'progress', file: 'model_quantized.onnx', loaded: 45_000_000, total: 90_000_000 },
+        { status: 'progress', file: 'model_quantized.onnx', loaded: 81_000_000, total: 90_000_000 },
+      ],
+    });
+
+    // The tokenizer may not claim more than its share of the bar.
+    expect(percents[0]).toBeLessThanOrEqual(5);
+    // And the weights phase reports several distinct, rising values.
+    const duringWeights = percents.slice(1, -1);
+    expect(duringWeights.length).toBeGreaterThanOrEqual(3);
+    expect(new Set(duringWeights).size).toBe(duringWeights.length);
+    expect(Math.max(...duringWeights)).toBeGreaterThan(50);
+  });
+
   it('ignores events with no file or no known total rather than reporting NaN', async () => {
-    const onProgress = vi.fn();
-    const { lib } = fakeLibrary({
+    const percents = await percentsFor({
       progress: [
         { status: 'initiate', file: 'model.onnx' },
         { status: 'progress', loaded: 10, total: 100 },
         { status: 'progress', file: 'model.onnx', loaded: 10, total: 0 },
       ],
     });
-    const embedder = new XenovaEmbedder({
-      modelsRoot: tmp(),
-      onProgress,
-      loadLibrary: async () => lib,
-    });
-
-    await embedder.ensureReady();
 
     // Only the completion call, and nothing that could render as NaN percent.
-    expect(onProgress.mock.calls.map((c) => c[0])).toEqual([100]);
+    expect(percents).toEqual([100]);
   });
 
   it('never reports 100 from byte progress alone, so the bar does not finish early', async () => {
-    const onProgress = vi.fn();
-    const { lib } = fakeLibrary({
+    const percents = await percentsFor({
       progress: [{ status: 'progress', file: 'model.onnx', loaded: 100, total: 100 }],
     });
-    const embedder = new XenovaEmbedder({
-      modelsRoot: tmp(),
-      onProgress,
-      loadLibrary: async () => lib,
-    });
-
-    await embedder.ensureReady();
 
     // The byte-driven event caps at 99; only loading finishing reports 100.
-    expect(onProgress.mock.calls.map((c) => c[0])).toEqual([99, 100]);
+    expect(percents).toEqual([99, 100]);
   });
 });
 

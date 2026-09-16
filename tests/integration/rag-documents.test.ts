@@ -367,6 +367,28 @@ describe('races between an ingest and the user', () => {
     );
   });
 
+  it('does not resurrect a document deleted during its FIRST ingest', async () => {
+    const h = makeHarness();
+    const profile = await withProfile(h);
+    const path = h.writeKbFile(profile.id, 'a.md', RESUME_MD);
+
+    // No prior record, so the pipeline's pre-await snapshot is null. Gating the
+    // cancel on that snapshot meant a first ingest could not be cancelled at
+    // all: the document came back `ready`, with its kb/ file gone and its chunks
+    // queryable (FR-077).
+    const { atEmbed, release } = holdAtEmbed(h);
+    const ingesting = h.engine.processFile(profile.id, path);
+    await atEmbed;
+    const docId = h.engine.store.get(profile.id)!.documents[0]!.id;
+    await h.engine.deleteDocument(profile.id, docId);
+    release();
+    await ingesting;
+
+    expect(h.engine.store.get(profile.id)!.documents).toEqual([]);
+    expect(existsSync(path)).toBe(false);
+    expect(await h.engine.query(profile.id, 'Acme Corp', 5)).toEqual([]);
+  });
+
   it('does not resurrect a document deleted while it was embedding', async () => {
     const h = makeHarness();
     const profile = await withProfile(h);

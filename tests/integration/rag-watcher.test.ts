@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { makeHarness, NOTES_MD, RESUME_MD, type Harness } from '../fakes/rag-harness.js';
@@ -278,6 +278,105 @@ describe('path matching survives a differently spelled path (FR-077, FR-078)', (
     expect(h.engine.store.get(profile.id)!.documents).toHaveLength(1);
     expect(h.engine.store.get(profile.id)!.documents[0]!.id).toBe(record.id);
     expect(h.embedder.calls).toEqual([]);
+  });
+});
+
+describe('FR-067 reconciliation revalidates what it trusts', () => {
+  it('re-embeds a file edited while the app was not running', async () => {
+    const h = makeHarness();
+    const profile = await h.engine.createProfile('Acme');
+    const path = h.writeKbFile(profile.id, 'a.md', '# A\n\noriginal widgets content');
+    await fire(h, profile.id, 'add', path);
+
+    // The app is closed, the file is edited, the app relaunches. The watcher
+    // starts with `ignoreInitial`, so reconciliation is the only thing that can
+    // notice: skipping `ready` because its chunk pair merely loads trusted the
+    // bytes without ever comparing them, and the pre-edit chunks were served
+    // for the rest of the process.
+    writeFileSync(path, '# A\n\nreplaced sprockets content');
+    h.embedder.reset();
+    await h.engine.reconcile(profile.id);
+
+    expect(h.embedder.embeddedCount).toBeGreaterThan(0);
+    const hits = await h.engine.query(profile.id, 'sprockets', 3);
+    expect(hits.some((r) => r.chunk.text.includes('sprockets'))).toBe(true);
+    expect(
+      (await h.engine.query(profile.id, 'widgets', 3)).some((r) =>
+        r.chunk.text.includes('widgets'),
+      ),
+    ).toBe(false);
+  });
+
+  it('a relaunch over unchanged files still costs zero embedding calls (FR-067)', async () => {
+    const h = makeHarness();
+    const profile = await h.engine.createProfile('Acme');
+    h.writeKbFile(profile.id, 'a.md', RESUME_MD);
+    h.writeKbFile(profile.id, 'b.md', NOTES_MD);
+    await h.engine.start();
+    h.embedder.reset();
+
+    await h.engine.reconcile(profile.id);
+
+    // Revalidating costs one read and one hash per document, never an embed.
+    expect(h.embedder.calls).toEqual([]);
+  });
+
+  it('a chunker or model change still invalidates on relaunch (TC-070)', async () => {
+    const h = makeHarness();
+    const profile = await h.engine.createProfile('Acme');
+    const path = h.writeKbFile(profile.id, 'a.md', RESUME_MD);
+    await fire(h, profile.id, 'add', path);
+
+    const stale = h.engine.store.get(profile.id)!.documents[0]!;
+    h.engine.store.upsertDocument({
+      ...stale,
+      embeddingKey: stale.embeddingKey.replace(/:(\d+):/, ':0:'),
+    });
+    h.embedder.reset();
+
+    await h.engine.reconcile(profile.id);
+
+    expect(h.embedder.embeddedCount).toBeGreaterThan(0);
+    expect(h.engine.store.findDocument(profile.id, stale.id)!.embeddingKey).toBe(
+      stale.embeddingKey,
+    );
+  });
+
+  it('keeps a record whose file could not be stat-ed, rather than deleting it', async () => {
+    const h = makeHarness();
+    const profile = await h.engine.createProfile('Acme');
+    const path = h.writeKbFile(profile.id, 'a.md', RESUME_MD);
+    await fire(h, profile.id, 'add', path);
+    const docId = h.engine.store.get(profile.id)!.documents[0]!.id;
+
+    // A self-referential symlink: `readdir` still lists it, `stat` fails ELOOP.
+    // A real non-ENOENT failure, which is what an EACCES file or an
+    // antivirus-locked one looks like from here. Treating it as a deletion
+    // removed the record, chunks, vectors and derived Markdown, and the
+    // watcher's `ignoreInitial` meant a file that was still there might never
+    // come back for the rest of the process.
+    rmSync(path);
+    symlinkSync('a.md', path);
+
+    await h.engine.reconcile(profile.id);
+
+    expect(h.engine.store.findDocument(profile.id, docId)).not.toBeNull();
+    expect(h.engine.store.readChunkSet(profile.id, docId)).not.toBeNull();
+  });
+
+  it('still removes a record whose file is genuinely gone', async () => {
+    const h = makeHarness();
+    const profile = await h.engine.createProfile('Acme');
+    const path = h.writeKbFile(profile.id, 'a.md', RESUME_MD);
+    await fire(h, profile.id, 'add', path);
+    const docId = h.engine.store.get(profile.id)!.documents[0]!.id;
+
+    // ENOENT is the one answer that really does mean deleted (FR-077).
+    rmSync(path);
+    await h.engine.reconcile(profile.id);
+
+    expect(h.engine.store.findDocument(profile.id, docId)).toBeNull();
+    expect(h.engine.store.readChunkSet(profile.id, docId)).toBeNull();
   });
 });
 

@@ -523,7 +523,13 @@ export class RagEngine {
       // override reverted to the guess, and a deleted document reappeared as
       // `ready` with no file behind it and its chunks served by `query`.
       const current = this.findByPath(profileId, path);
-      if (!current && existing) return; // Deleted mid-ingest (FR-077).
+      // `!current` alone, not `!current && existing`. By this point the pipeline
+      // has published at least the `embedding` record, so a missing record means
+      // it was deleted, whether or not one existed when the ingest began. Gating
+      // on `existing` meant a first ingest could not be cancelled at all: the
+      // document came back `ready`, its kb/ file gone and its chunks queryable
+      // (FR-077).
+      if (!current) return;
 
       if (!this.store.writeChunkSet(profileId, docId, chunks, vectors)) return;
       this.cache.delete(profileId);
@@ -756,18 +762,26 @@ export class RagEngine {
     // Keyed by the normalized path, valued by the path as `readdir` spells it,
     // because that spelling is what a new record stores.
     const onDisk = new Map<string, string>();
+    // Entries `readdir` listed but `stat` could not answer for. They are not
+    // absent, only unknown, and the difference matters: treating an EACCES file
+    // or an antivirus-locked one as deleted removed its record, chunks, vectors
+    // and derived Markdown, and the watcher's `ignoreInitial` meant a file that
+    // was still there might never come back for the rest of the process.
+    const unreadable = new Set<string>();
+
     for (const entry of await readdir(kbDir)) {
       const full = join(kbDir, entry);
       if (!sourceFormatFor(entry)) continue;
       try {
         if (!(await stat(full)).isFile()) continue;
       } catch (err) {
-        // A dangling symlink to an unmounted drive, an EACCES file, or a file
-        // deleted between `readdir` and `stat`. Unguarded, this rejected out of
-        // `reconcile` and `start`, and since bootstrap awaits `start` before
-        // registering `window-all-closed` and `will-quit`, one such file left
-        // the app with no watchers, no shutdown cleanup and a zombie process
-        // holding the single-instance lock.
+        // Only a definitive "not there" counts as gone. Anything else, a
+        // dangling symlink to an unmounted drive included, is preserved.
+        // Unguarded this also rejected out of `reconcile` and out of `start`,
+        // and bootstrap awaits `start` before registering `window-all-closed`
+        // and `will-quit`.
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== 'ENOENT') unreadable.add(normalizePath(full));
         this.options.onError?.('skipping an unreadable knowledge base entry', { err, path: full });
         continue;
       }
@@ -775,7 +789,8 @@ export class RagEngine {
     }
 
     for (const record of [...profile.documents]) {
-      if (!onDisk.has(normalizePath(record.originalPath))) {
+      const key = normalizePath(record.originalPath);
+      if (!onDisk.has(key) && !unreadable.has(key)) {
         this.store.removeDocument(profileId, record.id);
       }
     }
@@ -790,11 +805,22 @@ export class RagEngine {
         await this.processFile(profileId, path);
         continue;
       }
-      if (record.state === 'ready' && this.store.readChunkSet(profileId, record.id) !== null) {
-        continue;
-      }
       if (record.state === 'error') continue; // Terminal until the user retries (FR-079).
-      this.store.upsertDocument({ ...record, state: 'pending', errorMessage: null });
+
+      // Every non-error record goes through `processFile`, `ready` ones
+      // included. Skipping `ready` because its chunk pair merely *loads* trusted
+      // the bytes without ever comparing them: a file edited while the app was
+      // shut down kept serving its pre-edit chunks forever, because the watcher
+      // starts with `ignoreInitial` and no change event ever arrives for it. It
+      // also defeated ADR-012's whole point, that bumping the chunker version or
+      // the embedding model invalidates the cache on the next launch.
+      //
+      // The cost is one read and one hash per document at startup, which is
+      // exactly what `processFile`'s cache check needs in order to decide. An
+      // unchanged file still performs zero embedding calls (FR-067).
+      if (record.state !== 'ready') {
+        this.store.upsertDocument({ ...record, state: 'pending', errorMessage: null });
+      }
       await this.processFile(profileId, path);
     }
   }
