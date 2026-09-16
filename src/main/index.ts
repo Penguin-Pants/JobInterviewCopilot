@@ -8,6 +8,12 @@ import {
   screen,
   session,
 } from 'electron';
+import { AudioSupervisor } from './audio.js';
+import {
+  ElectronAudioWorkerHost,
+  installLoopbackHandler,
+  installPermissionHandler,
+} from './audio-host.js';
 import { ConfigStore } from './config.js';
 import { HotkeyManager } from './hotkeys.js';
 import { IpcRouter, push } from './ipc/router.js';
@@ -39,6 +45,9 @@ let config: ConfigStore;
 let secrets: SecretVaultStore;
 let hotkeys: HotkeyManager;
 let router: IpcRouter;
+
+let audioHost: ElectronAudioWorkerHost;
+let audio: AudioSupervisor;
 
 let dashboardWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
@@ -78,6 +87,33 @@ async function bootstrap(): Promise<void> {
   await app.whenReady();
   applyContentSecurityPolicy();
 
+  // Audio capture is wired now but not started. Starting belongs to the session
+  // manager (TASK-040); what has to exist before then are the two main-process
+  // concessions loopback needs, and a supervisor ready to receive chunks.
+  audioHost = new ElectronAudioWorkerHost({
+    onChunk: (chunk) => audio.handleChunk(chunk),
+    onStreamState: ({ source, state, error }) => {
+      if (state === 'error') {
+        void audio.handleStreamEnded(source, error ?? 'The audio stream ended.');
+      }
+      push(dashboardWindow?.webContents, 'state:audio', {
+        interviewer: audio.statusFor('interviewer').state,
+        candidate: audio.statusFor('candidate').state,
+      });
+    },
+  });
+
+  audio = new AudioSupervisor({
+    worker: audioHost,
+    // The chunk goes straight to the STT layer once TASK-012 lands. Until then
+    // it is dropped here rather than queued: a queue with no consumer is the
+    // unbounded retention ADR-027 exists to prevent.
+    onChunk: () => {},
+  });
+
+  installLoopbackHandler();
+  installPermissionHandler((contents) => audioHost.owns(contents));
+
   hotkeys = new HotkeyManager(globalShortcut);
   router = new IpcRouter(ipcMain);
   registerIpcHandlers();
@@ -102,6 +138,7 @@ async function bootstrap(): Promise<void> {
   });
   app.on('window-all-closed', () => app.quit());
   app.on('will-quit', () => {
+    void audio.stop();
     hotkeys.disposeAll();
     router.dispose();
     getLogger().close();
@@ -175,11 +212,8 @@ function applyContentSecurityPolicy(): void {
     });
   });
 
-  // Milestone 0 needs no device access. Media permission is granted in
-  // TASK-011 when the audio worker actually needs it.
-  session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) =>
-    callback(false),
-  );
+  // The permission handler is installed by the audio host, which is the only
+  // component that knows which window may capture (TASK-011).
 }
 
 function wireOverlayWindow(): void {

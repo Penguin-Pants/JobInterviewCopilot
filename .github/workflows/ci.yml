@@ -9,11 +9,14 @@ on:
     # could not answer it.
     branches: ['**']
 
-# A push to a branch with an open pull request triggers both events. Keep the
-# newest run for a ref and cancel the rest, so the duplication costs a
-# cancelled job rather than a doubled queue.
+# A push to a branch with an open pull request triggers both events. Group them
+# by branch name so the pair collapses to one run.
+#
+# `github.ref` does not do this: for a push it is refs/heads/<branch> and for a
+# pull_request it is refs/pull/<n>/merge, so the two events landed in different
+# groups and both ran. head.ref and ref_name are both the bare branch name.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
