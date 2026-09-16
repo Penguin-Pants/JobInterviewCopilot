@@ -53,6 +53,8 @@ describe('TC-042 no filesystem on the audio path', () => {
       'src/main/audio-host.ts',
       'src/main/ai/stt.ts',
       'src/main/ai/stt/**/*.ts',
+      // TASK-044: every chunk is routed to its provider session through here.
+      'src/main/live.ts',
     ]) {
       expect(config, `audio path missing: ${p}`).toContain(p);
     }
@@ -817,5 +819,127 @@ describe('FR-103 the cost meter outlives a failed session stop', () => {
     expect(handOver).toBeGreaterThan(-1);
     expect(compact).toBeGreaterThan(handOver);
     expect(meterStop).toBeGreaterThan(compact);
+  });
+});
+
+/**
+ * TASK-044: how bootstrap wires the live session loop (`CMP-15`).
+ *
+ * Each of these is a property of the wiring rather than of a component, so none
+ * of them can be asserted from inside a component. Each is also a defect that
+ * produces no error at all when it is wrong: a chunk routed nowhere, a turn
+ * fired at nothing, or a transcript append racing the handle that is closing.
+ */
+describe('TASK-044 live loop wiring', () => {
+  const source = (): string => readFileSync('src/main/index.ts', 'utf8');
+
+  function handlerBody(channel: string): string {
+    const text = source();
+    const start = text.indexOf(`router.handle('${channel}'`);
+    expect(start, `${channel} has no handler`).toBeGreaterThan(-1);
+    const next = text.indexOf('router.handle(', start + 1);
+    return text.slice(start, next === -1 ? undefined : next);
+  }
+
+  /**
+   * The supervisor's consumer used to be an empty function, because the STT
+   * layer had nothing to receive a chunk. An empty consumer is invisible: the
+   * app looks healthy, transcribes nothing, and bills nothing.
+   */
+  it('routes every audio chunk into the loop rather than dropping it', () => {
+    const text = source();
+    const supervisor = text.slice(
+      text.indexOf('audio = new AudioSupervisor('),
+      text.indexOf('registerAllSttProviders()'),
+    );
+    expect(supervisor).toContain('live.handleChunk(chunk)');
+    expect(supervisor).not.toMatch(/onChunk: \(\) => \{\}/);
+  });
+
+  /** A turn that fires into a logger is a trigger that looks like it works. */
+  it('answers a fired turn with the loop rather than a log line', () => {
+    const text = source();
+    const machine = text.slice(
+      text.indexOf('trigger = new TriggerMachine('),
+      text.indexOf('health = new ProviderHealthRegistry('),
+    );
+    expect(machine).toContain('onFire: (turn) => live.onFire(turn)');
+  });
+
+  /** Section 5.1: capture and the STT sessions come up with the session. */
+  it('session:start brings the loop up after the meter is running', () => {
+    const handler = handlerBody('session:start');
+    const meter = handler.indexOf('cost.start()');
+    const loop = handler.indexOf('await live.start(');
+    expect(meter, 'the meter must start').toBeGreaterThan(-1);
+    expect(loop, 'the loop must start').toBeGreaterThan(-1);
+    // The meter clears every accumulator on start, so audio handed over before
+    // it runs is discarded rather than counted.
+    expect(meter).toBeLessThan(loop);
+  });
+
+  /**
+   * Bringing capture and two sockets up takes long enough that a Dashboard told
+   * after it would render the session as inactive for the whole of it, while
+   * the session is already live and already writing (FR-088).
+   */
+  it('tells the renderers the session is live before the loop comes up', () => {
+    const handler = handlerBody('session:start');
+    const pushed = handler.indexOf('pushSessionState()');
+    const loop = handler.indexOf('await live.start(');
+    expect(pushed).toBeGreaterThan(-1);
+    expect(pushed).toBeLessThan(loop);
+  });
+
+  /**
+   * The order in `session:stop` is the whole of "cannot append to a closed
+   * handle". The loop is what can still append; the writer closes last.
+   */
+  it('session:stop awaits the loop before the writer compacts', () => {
+    const handler = handlerBody('session:stop');
+    const loop = handler.indexOf('await live.stop()');
+    const handOver = handler.indexOf('cost.record()');
+    const compact = handler.indexOf('await sessions.stop()');
+
+    expect(loop, 'the loop must be stopped').toBeGreaterThan(-1);
+    expect(loop).toBeLessThan(handOver);
+    expect(handOver).toBeLessThan(compact);
+  });
+
+  /** `will-quit` cannot await, so the loop is released rather than stopped. */
+  it('releases the loop on will-quit before the session is compacted', () => {
+    const text = source();
+    const quit = text.slice(text.indexOf("app.on('will-quit'"));
+    const body = quit.slice(0, quit.indexOf('recoveryComplete'));
+    const dispose = body.indexOf('live.dispose()');
+    const stop = body.indexOf('void sessions.stop()');
+    expect(dispose).toBeGreaterThan(-1);
+    expect(dispose).toBeLessThan(stop);
+  });
+
+  /**
+   * TASK-030 carried this: the trigger read `supportsEndpointing` off the
+   * configured primary even when health had put the session on the backup. The
+   * two models can disagree, so the trigger would trust a native turn-end
+   * signal the open socket never sends.
+   */
+  it('reads the trigger capabilities off the model that is serving', () => {
+    const text = source();
+    const fn = text.slice(
+      text.indexOf('function triggerConfigFrom('),
+      text.indexOf('function pushSessionState('),
+    );
+    expect(fn).toContain('serving ?? settings.providers.stt.primary');
+    expect(text).toContain('triggerConfigFrom(after, live.activeSttChoice)');
+  });
+
+  /**
+   * ADR-018 and NFR-002 for the loop: it holds no file handle and no window,
+   * and audio bytes pass through it, so neither Electron nor `fs` belongs here.
+   */
+  it('the loop imports no Electron and no filesystem module', () => {
+    const loop = readFileSync('src/main/live.ts', 'utf8');
+    expect(loop).not.toMatch(/from '(node:)?fs/);
+    expect(loop).not.toMatch(/from 'electron'/);
   });
 });

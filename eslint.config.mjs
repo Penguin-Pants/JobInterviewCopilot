@@ -22,6 +22,9 @@ const AUDIO_PATH_FILES = [
   'src/main/audio-host.ts',
   'src/main/ai/stt.ts',
   'src/main/ai/stt/**/*.ts',
+  // The live session loop routes every chunk from the supervisor to its
+  // provider session, so audio bytes pass through it (TASK-044, CMP-15).
+  'src/main/live.ts',
 ];
 
 const FS_MODULES = ['fs', 'node:fs', 'fs/promises', 'node:fs/promises', 'original-fs'];

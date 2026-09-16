@@ -836,6 +836,58 @@ commit, and `docs/05-traceability.md` regenerates from them.
 
 ---
 
+### ADR-035 — The live loop is a component, and a failed retrieval abandons the turn
+
+**Decided 2026-09-16 during TASK-044.** Three decisions the loop forced,
+recorded here because each changes what a document already says (DoD 9).
+
+**Context 1.** The loop has no component in the map. `CMP-01` is the only
+candidate, and its own row forbids it: "must not contain business logic". The
+work is real and has state of its own: the streams that are open, the model that
+is serving, and the generation in flight.
+
+**Decision 1.** `CMP-15 Live Session Loop`, `src/main/live.ts`. It owns no policy
+of its own, writes no file and creates no window, and it imports neither Electron
+nor `node:fs`, which is asserted rather than intended. Every collaborator is
+injected, so the whole loop runs in a test with no Electron, no socket and no
+model. `CMP-01` starts and stops it and owns nothing else about a session.
+
+Audio bytes now pass through it, so it joins the reachable audio path in the
+`NFR-002` lint ban and in section 9 of the architecture.
+
+**Context 2.** `RagEngine.query` can fail: a torn `vectors.bin`, a transient
+read error. The loop then has a question, no notes, and a working language
+model. Generating anyway produces a card the overlay renders exactly like a
+grounded one, and the user has no way to tell which they are reading during an
+interview.
+
+**Decision 2.** A failed retrieval **abandons the turn**. The failure is logged,
+the trigger is told the generation settled so the machine is free for the next
+question, and nothing reaches the overlay. This is ADR-032 applied to a
+suggestion: an unanswered turn looks like silence, which `FR-102` says is not an
+error, while an ungrounded suggestion is the plausible value that rule forbids.
+`FR-076` leaves no third option, because the overlay has no error state.
+
+**Context 3.** A model that is not in the registry, a credential with no key and
+a missing adapter are **configuration** faults. Routed through `CMP-12`, each
+arrives as a non-retryable `client` error, which sends the credential to
+`CONFIG_REQUIRED` and blames a key that is perfectly good. That is the failure
+`requireLlmProvider` already guards against inside the LLM facade, and it comes
+straight back if the loop resolves a provider inside `runFor`.
+
+**Decision 3.** Both the STT target and the LLM target are resolved **outside**
+the health machine. `runFor` sees only what a provider actually did. The other
+half of the same boundary: `runGeneration` returns a provider failure rather
+than throwing it, because the overlay has no error state, so the loop rethrows
+that failure inside `runFor` and keeps the salvaged outcome. Without the rethrow
+a dead key would never fail over; without keeping the outcome, `FR-076`'s
+salvage would be thrown away on the way past.
+
+**Consequence.** `docs/02-architecture.md` sections 1, 5.1, 5.2, 9, 10 and 11
+change in the same pull request. Section 5.1's ordering is corrected: `CMP-09`
+starts before capture, because a meter that is not running discards the audio
+handed to it.
+
 ---
 
 ## 3a. Open questions

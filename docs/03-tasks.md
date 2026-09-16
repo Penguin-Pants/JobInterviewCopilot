@@ -1049,9 +1049,9 @@ vague intention:
 
 ## Milestone 4 — Sessions, cost, UI
 
-**Status: IN PROGRESS.** `TASK-040` and `TASK-041` are complete. `TASK-044` is
-the live loop, split out of `TASK-042` by `ADR-034`. `TASK-042` and `TASK-043`
-are not started.
+**Status: IN PROGRESS.** `TASK-040`, `TASK-041` and `TASK-044` are complete.
+`TASK-044` is the live loop, split out of `TASK-042` by `ADR-034`. `TASK-042`
+and `TASK-043` are not started.
 
 ### TASK-040 Session manager and transcript — COMPLETE
 **Traces** FR-088, FR-101, FR-105, FR-106, FR-107, FR-108, ADR-003, ADR-013, ADR-018
@@ -1209,7 +1209,7 @@ Covered by `tests/unit/cost.test.ts` (36 cases), `tests/integration/cost-session
 | Usage accounted after `cost.stop()` and before the next `start()` is kept in the maps rather than refused | Harmless: `start()` clears every accumulator, and the only caller that could do it is an in-flight generation the trigger has already aborted. Refusing it would silently lose a late report instead | TASK-050 |
 | `estimate()` is recomputed up to three times per tick | O(models consumed), which is at most four, once a second. Measurably free, and caching it adds an invalidation rule to get wrong | TASK-050 |
 
-### TASK-044 Live session loop
+### TASK-044 Live session loop — COMPLETE
 **Traces** FR-008, FR-046, FR-047, FR-050, FR-051, FR-052, FR-053, FR-054, FR-055, FR-072, FR-075, FR-076, FR-100, FR-101, FR-102, FR-103, FR-105, FR-106
 **Depends on** TASK-013, TASK-030, TASK-032, TASK-040, TASK-041
 **Blocks** TASK-042
@@ -1252,11 +1252,67 @@ zero spend.
 **Verified by** TC-071, TC-080, TC-086, TC-087, TC-088, TC-164
 
 **Inherited follow-ups this task closes**
+
 - `triggerConfigFrom` reading `supportsEndpointing` off the STT primary even
   when health has failed over to the backup, carried out of TASK-030.
 - `TC-071`'s "`session:start` still succeeds during the model download" half,
   carried out of Milestone 2, then TASK-040, then TASK-041.
 - Nothing calling `noteAudio` or `noteGeneration`, carried out of TASK-041.
+- Routing live STT and LLM requests through `CMP-12`'s `runFor`, deferred by
+  TASK-014 to "the session manager".
+
+**Completed 2026-09-16.** `src/main/live.ts` is `CMP-15`: one class, every
+collaborator injected, no Electron import and no filesystem import. It starts
+capture, opens one `SttSession` per stream under the health machine, pushes
+`CH-206`, appends every final, answers `onFire` with `RagEngine.query` and
+`runGeneration` through the overlay gate, appends each outcome, feeds the Cost
+Meter from both audio and generations, and tears the whole thing down in an
+order that cannot append to a closed handle. `src/main/index.ts` constructs it
+and starts and stops it from `CH-112` and `CH-113`; it holds nothing else about
+a session.
+
+Covered by `tests/integration/live-session.test.ts` (13 cases, every component
+below the loop real and only the audio worker, the STT transport and the LLM
+transport faked), `tests/unit/live-loop.test.ts` (20 failure-path cases) and
+seven wiring guardrails in `tests/unit/guardrails.test.ts`. `npm run typecheck`,
+`npm run lint`, `npm run format:check`, `npm run licenses`, `npm run build`,
+`npm run smoke:main`, `npm run trace` and 786 unit and integration tests all
+pass. Line coverage on `live.ts` is 98.6 percent.
+
+**Design decisions taken here, with the alternatives rejected:**
+
+| Decision | Alternative rejected | Why |
+|---|---|---|
+| The loop is its own component, `CMP-15` | Putting it in `CMP-01` | `CMP-01`'s own row in the component table forbids business logic, and the loop has state of its own: the open streams, the serving model and the generation in flight. Recorded as ADR-035 |
+| A **failed retrieval abandons the turn** | Generating from no notes | A card built without the knowledge base renders identically to one built with it, and the user cannot tell them apart mid-interview. That is the plausible value ADR-032 forbids. An unanswered turn looks like silence, and `FR-102` says silence is not an error |
+| The STT and LLM targets are resolved **outside** `runFor` | Resolving inside, where the target is known | A model that is not in the registry, a missing key and a missing adapter are configuration faults. Through `CMP-12` each arrives as a non-retryable `client` error and takes a perfectly good credential to `CONFIG_REQUIRED` (ADR-024). That is the failure `requireLlmProvider` already guards against inside the LLM facade |
+| A provider failure is **rethrown inside** `runFor`, and the salvaged outcome is kept outside it | Letting `runGeneration`'s returned outcome stand | `runGeneration` returns a provider failure rather than throwing it, because the overlay has no error state (`FR-076`). Without the rethrow a dead key would never fail over; without keeping the outcome, `FR-076`'s salvage would be discarded on the way past |
+| Both streams open under **one** `runFor` | One call per stream | Two streams on two models would give the trigger two answers about native endpointing and the Cost Meter two rates for one session. A partially opened pair is closed rather than kept, because one stream transcribing and one silently not reads as a provider that cannot hear the candidate |
+| `noteAudio` is called where a chunk is **handed to a provider** | Counting the session timer, or counting at capture | Seconds are what the provider bills. A stream whose socket never opened bills nothing while the timer runs on, which is the honest number |
+| Seconds come from `byteLength / (sampleRate * 2)`, with the rate read off the model's registry entry | A `1000 ms per chunk` constant | A short final chunk costs what it is, and a model shipped at another sample rate needs no edit in this file (ADR-022). A rate of zero contributes zero rather than `Infinity`, which would reach the transcript as `null` and fail the session schema |
+| Only the **interviewer** session gets an `endpoint` listener | Wiring both, as the transcript listener is wired | A candidate endpoint reaches `handleEndpoint`, which evaluates the **interviewer's** pending turn and fires it early. That is a candidate event causing a suggestion, which is exactly what `FR-055` forbids. Found by writing the test, pinned by it |
+| The replacement of a cancelled generation **awaits its predecessor's promise** | Relying on the append chain's own ordering | The chain orders two appends that have both been issued. It says nothing about which is issued first, and a cancelled generation's unwind can outlive its replacement's whole stream. Awaiting is what makes `FR-106` a mechanism (TC-134) |
+| `cost.start()` runs **before** capture, not after it as section 5.1 lists | Following the sequence as written | `start()` clears every accumulator, so audio handed over before the meter runs is discarded rather than counted. The correction is recorded in section 5.1 |
+| The session state is pushed **before** the loop comes up | Pushing once everything is live | Capture and two sockets take long enough that a Dashboard told afterwards renders the session as inactive for the whole of it, while the session is already live and already writing (`FR-088`) |
+
+**Defects found in the local two-pass review and fixed before pushing:**
+
+| Defect | Consequence | Fix |
+|---|---|---|
+| **A closed STT session that emits was still routed.** Handlers are registered on the provider session and are not detached by `close()` | A late final pushed `CH-206` to a Dashboard whose session had ended, and offered an append to a writer that had already compacted and closed. Teardown order was resting on the writer refusing rather than on the loop not asking | An event whose stream is no longer open is ignored. Pinned by a test that asserts the late event changes nothing: no push, no error and no transcript entry |
+| **A turn could become an unhandled rejection.** Nothing awaits the stored generation promise between one turn and the next | `NFR-009` would log it only after it had escaped, and the next turn would then await a rejected chain | The `catch` is attached to the stored promise, so the chain a later turn awaits can never reject. Pinned by a test that makes the machine throw and then answers another turn |
+| **`CH-201` was pushed after the loop came up** | The Dashboard rendered the session as inactive for as long as capture and both sockets took to start | Pushed as soon as the manager accepts, and pinned by a wiring guardrail |
+
+**Follow-up work carried out of TASK-044:**
+
+| Item | Why it is not done here | Owner |
+|---|---|---|
+| `FR-044`'s "must not start a session in a state where the interviewer would not be heard", and section 10's "loopback device missing, session start refused" | Capture starts **inside** `session:start`, after `CMP-08` has created the transcript and taken the lock, so the verdict is not available when the refusal would have to be made. A fifth named refusal on `CH-112` is a contract change with no acceptance criterion in this task, and rolling back a created session to refuse it is the transcript-deleting path ADR-032 exists to prevent. `AudioSupervisor.canStartSession` is the verdict it will read. Today a dead interviewer stream shows on the `CH-203` badge and the session runs | TASK-050 |
+| `noteCleanBoundary` at real turn boundaries, so a recovered primary is switched back to | Honoring it for STT means closing both sockets and reopening them on the new target at a boundary with no audio in flight. Calling it without that reopen would leave the machine reporting `using-primary` while the sockets are on the backup, which is the plausible-but-wrong state ADR-032 names. The LLM half needs no reopen and comes free with it | TASK-050 |
+| An STT socket that dies mid-session is logged, and not reopened | `FR-100`'s retry and failover cover a **request**. A streaming socket that closes after it opened is a different lifecycle, and `MAX_STREAM_RESTARTS` covers the audio stream beneath it rather than the transcription above it | TASK-050 |
+| A prompt-assembly failure inside an adapter is classified as a provider failure | `buildMessages` runs inside `provider.generate`, so a malformed retrieved chunk surfaces as a generation error and spends the whole retry ladder against a healthy credential. Pre-existing in `runGeneration`; the loop only made it reachable | TASK-050 |
+| A batch STT model's final buffer is billed although it is never posted | Seconds are counted when a chunk is handed to the adapter, which is the boundary that means "sent". A batch adapter holding up to its window at session end over-counts by at most that window, once per session | TASK-050 |
+| Profile switching is not disabled in the Dashboard during a live session | The loop binds `profileId` at start and answers every turn from it, so the transcript and the retrieval are both safe. The control that must be disabled is a renderer that does not exist | TASK-042 |
 
 ### TASK-042 Dashboard UI
 **Traces** FR-023, FR-024, FR-025, FR-026, FR-027, FR-028, FR-029, FR-030, FR-031, FR-032, FR-038, FR-080, FR-087, FR-088, FR-110, NFR-010, NFR-014
