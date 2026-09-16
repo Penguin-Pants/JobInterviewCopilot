@@ -248,6 +248,53 @@ describe('FR-082 overlay is actually draggable in interactive mode', () => {
 });
 
 /**
+ * FR-009 / TC-148 regression: `overlayWindow` was assigned from
+ * `await createOverlayWindow(...)`, so it stayed null for the whole of the
+ * overlay's renderer load while the Dashboard was already interactive and the
+ * window was already in `BrowserWindow.getAllWindows()`. `overlay:reset`
+ * arriving in that window failed its `if (overlayWindow)` guard, moved nothing
+ * and returned `ok`, so the Dashboard rendered "Overlay reset" over a window
+ * that had not moved. Reproduced on Linux by delaying that one assignment.
+ */
+describe('FR-009 the overlay is reachable before its renderer finishes loading', () => {
+  it('assigns overlayWindow from the creation callback, not the promise', () => {
+    const source = readFileSync('src/main/index.ts', 'utf8');
+    const bootstrap = source.slice(
+      source.indexOf('async function bootstrap('),
+      source.indexOf('async function startKnowledgeBase('),
+    );
+
+    expect(bootstrap).toContain('await createOverlayWindow(settings, (win) => {');
+    expect(bootstrap).toContain('overlayWindow = win;');
+    // The awaited form is what leaves the variable null across the load.
+    expect(bootstrap).not.toMatch(/overlayWindow = await createOverlayWindow\(settings\);/);
+  });
+
+  it('hands the window over before the renderer load', () => {
+    const source = readFileSync('src/main/windows.ts', 'utf8');
+    const create = source.slice(source.indexOf('export async function createOverlayWindow('));
+    const handOver = create.indexOf('onCreated?.(win)');
+    const load = create.indexOf("loadRenderer(win, 'overlay')");
+
+    expect(handOver).toBeGreaterThan(-1);
+    expect(load).toBeGreaterThan(-1);
+    expect(handOver, 'the window must be handed over before its load is awaited').toBeLessThan(
+      load,
+    );
+  });
+
+  it('overlay:reset fails loudly when there is no overlay rather than reporting ok', () => {
+    const source = readFileSync('src/main/index.ts', 'utf8');
+    const handler = source.slice(source.indexOf("router.handle('overlay:reset'"));
+    const body = handler.slice(0, handler.indexOf("router.handle('overlay:ready'"));
+
+    // Silently skipping the move and still returning ok is what hid TC-148.
+    expect(body).toContain('There is no overlay window to reset.');
+    expect(body).not.toMatch(/if \(overlayWindow && !overlayWindow\.isDestroyed\(\)\) \{/);
+  });
+});
+
+/**
  * NFR-009 regression: knowledge base startup was awaited inside `bootstrap`
  * between the windows being created and `window-all-closed` / `will-quit` being
  * registered. Reconciling a knowledge base reads every file in every profile,

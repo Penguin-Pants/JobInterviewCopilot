@@ -162,8 +162,22 @@ async function bootstrap(): Promise<void> {
     dashboardWindow = null;
   });
 
-  overlayWindow = await createOverlayWindow(settings);
-  wireOverlayWindow();
+  // `onCreated` rather than the returned promise, and it is load-bearing.
+  // `createOverlayWindow` constructs the window and then awaits its renderer, so
+  // assigning from the promise left `overlayWindow` null for the whole of that
+  // load, while the Dashboard was already interactive and the window was already
+  // in `BrowserWindow.getAllWindows()`. `overlay:reset` arriving in that window
+  // failed its `if (overlayWindow)` guard, moved nothing, and reported success.
+  // That is TC-148's -30000; delaying this one assignment reproduces it exactly
+  // on Linux. The overlay's renderer is the slower of the two on Windows, which
+  // is why the runner hit it every time.
+  //
+  // Wiring inside the callback also puts the `did-finish-load` listener in place
+  // before the load it is waiting for, which the old order could not do.
+  await createOverlayWindow(settings, (win) => {
+    overlayWindow = win;
+    wireOverlayWindow();
+  });
 
   registerHotkeys();
   reportCaptureFidelity();
@@ -518,27 +532,33 @@ function registerIpcHandlers(): void {
     const asIfFresh = { ...config.get(), overlayWindow: { x: null, y: null, displayId: null } };
     const pos = resolveOverlayPosition(asIfFresh, displays, primary.id);
 
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-      // Show before moving. A window that has never been shown can have its
-      // placement re-applied by Windows when it is finally shown, which
-      // silently undoes bounds set while it was hidden. That left the overlay
-      // exactly where it was and made Reset Overlay look like a no-op.
-      if (!overlayWindow.isVisible()) overlayWindow.showInactive();
-
-      const bounds = overlayBoundsFor(pos);
-      overlayWindow.setBounds(bounds);
-      // setBounds and setPosition take different paths on Windows; the second
-      // is the direct move and costs nothing when the first already worked.
-      overlayWindow.setPosition(bounds.x, bounds.y);
-      overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+    // No overlay is a failure, not a success. Skipping the move and still
+    // returning `ok` is what let TC-148 fail silently for two rounds: the
+    // Dashboard rendered "Overlay reset" over a window that had not moved. The
+    // throw reaches the router, which returns a typed error, and the Dashboard
+    // renders its existing failure state (FR-009).
+    if (!overlayWindow || overlayWindow.isDestroyed()) {
+      throw new Error('There is no overlay window to reset.');
     }
+
+    // Show before moving. A window that has never been shown can have its
+    // placement re-applied by Windows when it is finally shown, which silently
+    // undoes bounds set while it was hidden. That left the overlay exactly
+    // where it was and made Reset Overlay look like a no-op.
+    if (!overlayWindow.isVisible()) overlayWindow.showInactive();
+
+    const bounds = overlayBoundsFor(pos);
+    overlayWindow.setBounds(bounds);
+    // setBounds and setPosition take different paths on Windows; the second is
+    // the direct move and costs nothing when the first already worked.
+    overlayWindow.setPosition(bounds.x, bounds.y);
+    overlayWindow.setAlwaysOnTop(true, 'screen-saver');
 
     setOverlayInteractive(true);
     hotkeys.reregisterAll();
     config.set({ overlayWindow: { x: pos.x, y: pos.y, displayId: pos.displayId } });
 
-    const [appliedX, appliedY] =
-      overlayWindow?.isDestroyed() === false ? overlayWindow.getPosition() : [pos.x, pos.y];
+    const [appliedX, appliedY] = overlayWindow.getPosition();
     getLogger().info('overlay reset', { requested: pos, applied: { x: appliedX, y: appliedY } });
 
     return {

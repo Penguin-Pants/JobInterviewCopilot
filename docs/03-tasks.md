@@ -600,7 +600,19 @@ pinned by a test that was checked to fail without its fix:
 | A `profile.json` with no `documents` array made every later `.find` throw out of `reconcile`; one bad profile emptied the whole Dashboard list | `kb/` is the authority, so an empty index is rebuilt, not fatal | ADR-014 |
 | The determinate download bar hit 99 percent on the 700 KB tokenizer and snapped back to 3 percent when the 90 MB weights announced themselves | Monotonic now | FR-066 |
 | `CH-215` shipped in Milestone 0 and was never written into the IPC table. The contract test only checked documented-implies-implemented | The test now asserts both directions | DoD 9 |
+| **The overlay was unreachable while its renderer loaded.** `overlayWindow` was assigned from `await createOverlayWindow(...)`, so it stayed null for the whole of that load, while the Dashboard was already interactive and the window was already in `BrowserWindow.getAllWindows()` | `overlay:reset` arriving in that window failed its `if (overlayWindow)` guard, moved nothing and **returned `ok`**, so the Dashboard rendered "Overlay reset" over a window that had not moved. Found by `TC-148` failing identically on two heads on the Windows runner, where the overlay's renderer is the slower of the two to load; reproduced on Linux by delaying that one assignment, and the fix verified against a deliberately slow overlay load. The window is now handed over through a callback before the load, and the handler throws rather than reporting success with nothing done. A Milestone 0 bug this milestone's timing made reproducible | FR-009 |
 | Knowledge base startup was **awaited inside `bootstrap`**, between the windows being created and `window-all-closed` and `will-quit` being registered. Reconciling reads every file in every profile's `kb/`, and starting a watcher pulls chokidar in through a dynamic ESM import | A slow or wedged knowledge base left the app interactive with no shutdown wiring at all, and delayed everything after it. Found by `TC-148` failing on the Windows runner, which is sensitive to that timing: the overlay is created `show: false` and Windows re-applies the placement of a never-shown window when it is finally shown. Startup is now background work, registered last and not awaited, with the lifecycle handlers ahead of it | NFR-009 |
+
+**Found while fixing TC-148, deliberately not fixed here.** `wireOverlayWindow`
+registers a `did-finish-load` listener, and it used to run *after*
+`createOverlayWindow` had already awaited that load, so on first launch the
+listener was attached to an event that had already fired and the overlay's theme
+and consent text were never pushed. Moving the wiring into the creation callback
+puts the listener in place before the load, which fixes it as a side effect. It
+is called out here rather than left silent because it changes Milestone 0
+behavior: `FR-008`'s consent text now actually reaches the overlay on first
+launch. `TASK-043` owns proving that end to end, since no overlay UI exists yet
+to assert against.
 
 **Follow-up work carried out of Milestone 2**, each with an owner rather than a
 vague intention:
