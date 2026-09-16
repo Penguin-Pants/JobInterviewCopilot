@@ -214,8 +214,12 @@ export interface TranscriptEvent {
 }
 
 /**
- * One second of PCM. Never written to disk; the ArrayBuffer is transferred, not
- * copied, so the sender's reference is neutered on send (FR-043, NFR-002).
+ * One second of PCM. Never written to disk (NFR-002).
+ *
+ * The buffer is copied, not transferred: Electron IPC accepts only a MessagePort
+ * in a transfer list. ADR-027 measured the copy at 31 KiB and 0.08 ms and found
+ * it is not the risk; unbounded retention is. So the enforceable property is
+ * that nobody holds a reference after handing the chunk on (FR-043).
  */
 export interface AudioChunk {
   source: TranscriptSource;
@@ -233,6 +237,18 @@ export interface SuggestionLine {
 }
 
 export type StreamState = 'idle' | 'starting' | 'running' | 'error';
+
+/**
+ * How a provider failure is classified. `retryable` follows from the class:
+ * false for 'auth' and 'client', true for the rest (ADR-024).
+ */
+export type ErrorClass = 'auth' | 'rate-limit' | 'network' | 'timeout' | 'server' | 'client';
+
+export interface ProviderError extends Error {
+  class: ErrorClass;
+  providerId: string;
+  retryable: boolean;
+}
 
 /** Health is keyed by credential, never by capability (ADR-017). */
 export type HealthState =

@@ -138,7 +138,8 @@ Follow-up work found during implementation:
   bound retention instead. `TC-041` is rewritten from a byteLength assertion to
   a retention assertion, and `FR-043` now states the enforceable property.
 - **TASK-011** must add the `media` permission to the permission request
-  handler, which Milestone 0 sets to deny everything.
+  handler, which Milestone 0 sets to deny everything. **Done.** The handler now
+  lives in `src/main/audio-host.ts` and grants `media` only to the Audio Worker.
 - `Logger.rotateIfNeeded` calls `statSync` on every line. Harmless at Milestone 0
   volumes, worth revisiting if logging becomes hot during a live session.
 - The content security policy lists `file:` because the packaged app loads
@@ -287,7 +288,7 @@ Follow-up work found during implementation:
 - This task gates TASK-011, and the gate is now open.
 **Verified by** MW-02
 
-### TASK-011 Dual-stream capture
+### TASK-011 Dual-stream capture — COMPLETE
 **Traces** FR-040, FR-041, FR-042, FR-043, FR-044, FR-045, FR-046, NFR-002
 **Depends on** TASK-010, TASK-005
 **Acceptance criteria**
@@ -314,9 +315,23 @@ Follow-up work found during implementation:
 - Unexpected stream end retries 3 times before surfacing an error badge.
 - `session:stop` destroys both contexts, stops all tracks and closes the worker
   window. No `AudioContext` remains after stop.
+- **Result: complete.** The hidden Audio Worker acquires each stream through
+  its own `getDisplayMedia`/`getUserMedia` call and its own forced 16 kHz
+  `AudioContext`; the two graphs are never joined. `pcm-worklet.ts` emits
+  32000-byte Int16 LE mono chunks tagged with `source`, `timestamp` and a
+  per-source `sequence`. `AudioSupervisor` bounds live chunks by the exported
+  `MAX_CHUNKS_IN_FLIGHT` and exposes `chunksInFlight` so the bound is asserted
+  from outside. `main/index.ts` installs the loopback display-media handler
+  and replaces the Milestone 0 deny-all permission handler with one that
+  grants `media` to the Audio Worker `webContents` alone. Capture is wired but
+  not started; starting is TASK-040.
+- The runtime filesystem-write monitor is TASK-050 (TC-137). The static ban
+  required here is in place and covers `src/main/ai/stt.ts` and
+  `src/main/ai/stt/**` before those files exist, so TASK-012 cannot open the
+  hole it guards.
 **Verified by** TC-040, TC-041, TC-042, TC-043, TC-044, TC-045, TC-136
 
-### TASK-012 STT registry and the streaming adapters
+### TASK-012 STT registry and the streaming adapters — COMPLETE
 **Traces** FR-023, FR-037, FR-038, FR-047, FR-048, FR-100, NFR-001
 **Depends on** TASK-011, TASK-004
 **Acceptance criteria**
@@ -346,6 +361,37 @@ Follow-up work found during implementation:
 - Adding a fake provider to the registry makes it selectable and usable end to
   end with no edit outside the registry and its adapter (FR-037).
 - Every registry model has a `providerId:modelId` row in `pricing.json`.
+- **Result: complete.** `src/shared/registry/{stt,llm}.ts` hold the v1 contents.
+  `src/main/ai/stt.ts` is the facade; `src/main/ai/stt/` holds the three
+  adapters over one shared `SocketSttSession`. `TC-151` is enforced as a real
+  `git grep`, so a provider id written into the trigger or a renderer fails the
+  build rather than being caught in review.
+- **Spec corrections made in the same change** (DoD 9):
+  - `pricing.json` `llm` rows are keyed `providerId:modelId`, matching the `stt`
+    block and `TC-156`'s wording. Section 7 had shown bare model ids.
+  - `deepgram:nova-2` was in the registry table with no price row. Added.
+    `TC-156` now also fails on a price row no model claims.
+  - `supportsEndpointing` is defined as "the native signal fires at the user's
+    configured gap", not "the provider has a signal". It was ambiguous for
+    ElevenLabs and two engineers would have read it differently.
+  - Three provider SDKs replaced by one `ws` transport (ADR-029). Section 8's
+    runtime table and its stale `electron-audio-loopback` risk paragraph are
+    rewritten.
+  - Coverage no longer excludes `src/main/ai/**`. That exclusion was written
+    before the directory existed and would have hidden an untested adapter.
+    Only `ws-factory.ts`, which builds a real socket, stays excluded.
+- **Design decision found during implementation.** The reconnect ladder resets
+  only after a connection that stayed up for `HEALTHY_CONNECTION_MS`. Resetting
+  on `open` alone lets a provider that accepts and immediately drops the socket
+  reconnect forever, which is the unbounded retry ADR-024 rules out.
+- **Deferred to TASK-013:** `openai:whisper-1` routes to the `batch` adapter
+  table, which is empty, so it fails with a named reason rather than being
+  silently handled by the streaming adapter. The test asserting this is the
+  handoff.
+- **Deferred to TASK-014:** health keyed by credential, and failover. The error
+  classes and `retryable` flag this needs are in place and tested.
+- **Deferred to TASK-042:** the Dashboard model picker that reads the registry.
+  Selection is registry-driven at the model layer; no renderer exists yet.
 **Verified by** TC-050, TC-051, TC-052, TC-053, TC-054, TC-056, TC-151, TC-152, TC-153, TC-155, TC-156, TC-159
 
 ### TASK-013 Non-streaming STT class and the Whisper adapter

@@ -1,0 +1,15 @@
+{
+  "version": "2026-09-15",
+  "llm": {
+    "anthropic:claude-haiku-4-5-20251001": { "inputPerMTok": 1.0, "outputPerMTok": 5.0 },
+    "openai:gpt-4o-mini": { "inputPerMTok": 0.15, "outputPerMTok": 0.6 }
+  },
+  "stt": {
+    "deepgram:nova-3": { "perAudioMinute": 0.0043 },
+    "deepgram:nova-2": { "perAudioMinute": 0.0043 },
+    "openai:gpt-4o-transcribe": { "perAudioMinute": 0.006 },
+    "openai:gpt-4o-mini-transcribe": { "perAudioMinute": 0.003 },
+    "openai:whisper-1": { "perAudioMinute": 0.006 },
+    "elevenlabs:scribe-v2-realtime": { "perAudioMinute": 0.0067 }
+  }
+}

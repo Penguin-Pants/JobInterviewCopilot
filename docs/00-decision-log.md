@@ -709,6 +709,41 @@ specified but can be changed cheaply before build starts.
 Any change to an `ASM` row requires an update to this table, to the bound
 requirement, and to the affected test cases in the same change.
 
+### ADR-029 — One `ws` transport for all three streaming STT adapters
+
+**TASK-012.** Section 8 listed `@deepgram/sdk`, `openai` and
+`@elevenlabs/elevenlabs-js` as the runtime dependencies for streaming speech to
+text, with "a raw `ws` client is the fallback if the ElevenLabs SDK does not
+expose the realtime STT socket cleanly".
+
+**Decision.** Use one `ws` client for all three streaming adapters. The SDKs are
+still the right choice where they add something: Whisper REST (`TASK-013`) and
+the LLM adapters (`TASK-032`) keep them.
+
+**Why.**
+- **The tests the plan demands are wire-level.** `TC-052` asserts the query
+  string on the connection URL, `TC-159` asserts the gap inside it, `TC-153`
+  asserts the audio format. Each SDK builds its socket internally, so asserting
+  what it put on the wire means reaching past the SDK's own abstraction, which
+  tests the reach rather than the adapter.
+- **Reconnect must behave identically on all three.** `TC-054` requires a
+  dropped socket to come back without ending the session. Three SDKs means three
+  reconnect policies, three backoff ladders and three definitions of "gave up".
+  `SocketSttSession` gives one, tested once.
+- **Two of the three authenticate with a request header.** The platform
+  `WebSocket` constructor cannot set one, so a Node client is needed regardless.
+- **Three SDKs are three production dependencies on the critical audio path.**
+  The `electron-audio-loopback` lesson (ADR-028) is that a dependency on this
+  path has to earn its place. `npm ls electron --omit=dev` staying empty is a
+  guard the project already runs; fewer production packages keeps it easy.
+
+**Cost.** Protocol changes at any of the three providers land on us rather than
+on an SDK release. Accepted: each adapter is under 120 lines, the frame handling
+is a switch on a message type, and the fake-socket tests make a protocol change
+a visible failure rather than a silent one.
+
+**Consequence.** Section 8's runtime table is corrected in the same change.
+
 ---
 
 ## 5. Out of scope for v1

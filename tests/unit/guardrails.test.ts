@@ -416,3 +416,45 @@ describe('packaging never publishes from CI', () => {
     expect(pkg.author).toBeTruthy();
   });
 });
+
+/**
+ * TC-151 and TC-056: the registry drives everything.
+ *
+ * The acceptance criterion is "a grep finds no branch on a provider id string
+ * outside the adapter files and the registry itself". That is asserted here as
+ * a grep rather than described in a comment, because a comment does not fail a
+ * build when someone writes `if (providerId === 'deepgram')` in the trigger.
+ */
+describe('TC-151 no provider id outside the registry and its adapters', () => {
+  const PROVIDER_IDS = ['deepgram', 'elevenlabs', 'anthropic'];
+
+  /**
+   * 'openai' is deliberately absent. It is a credential id and appears in the
+   * vault's key map and the settings schema, which name credentials, not
+   * providers. The three above are equally credential ids, so the allowlist
+   * below carries the files that legitimately name a credential.
+   */
+  const ALLOWED = [
+    'src/shared/registry/',
+    'src/main/ai/stt/',
+    // Credential plumbing: these name a vault key, not a provider to branch on.
+    'src/shared/types.ts',
+    'src/shared/ipc.ts',
+    'src/shared/defaults.ts',
+    'src/main/secrets.ts',
+  ];
+
+  for (const id of PROVIDER_IDS) {
+    it(`does not name "${id}" outside the registry, the adapters and the vault`, () => {
+      const out = execSync(`git grep -l -F "'${id}'" -- 'src/*.ts' 'src/*.tsx' || true`, {
+        encoding: 'utf8',
+        cwd: process.cwd(),
+      });
+      const files = out
+        .split('\n')
+        .filter(Boolean)
+        .filter((f) => !ALLOWED.some((prefix) => f.startsWith(prefix)));
+      expect(files).toEqual([]);
+    });
+  }
+});

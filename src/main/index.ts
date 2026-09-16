@@ -14,6 +14,8 @@ import {
   installLoopbackHandler,
   installPermissionHandler,
 } from './audio-host.js';
+import { registerStreamingSttProviders } from './ai/stt/index.js';
+import { validateCredential } from './ai/validate.js';
 import { ConfigStore } from './config.js';
 import { HotkeyManager } from './hotkeys.js';
 import { IpcRouter, push } from './ipc/router.js';
@@ -30,7 +32,7 @@ import {
   translucencyChangeNeedsRecreate,
   windowsBuildNumber,
 } from './windows.js';
-import type { CredentialId, Settings, ValidationResult } from '../shared/types.js';
+import type { Settings } from '../shared/types.js';
 
 /**
  * Application bootstrap (CMP-01).
@@ -110,6 +112,10 @@ async function bootstrap(): Promise<void> {
     // unbounded retention ADR-027 exists to prevent.
     onChunk: () => {},
   });
+
+  // The STT adapters must be registered before any key is validated or any
+  // session is opened. Registration is pure; it opens no socket.
+  registerStreamingSttProviders();
 
   installLoopbackHandler();
   installPermissionHandler((contents) => audioHost.owns(contents));
@@ -311,18 +317,6 @@ function reportCaptureFidelity(): void {
   push(dashboardWindow?.webContents, 'notice:captureFidelity', { windowsBuild: build, message });
 }
 
-/**
- * Live key validation is implemented per provider in TASK-012 and TASK-032.
- * Until those adapters exist this refuses rather than silently accepting a key,
- * because FR-026 says a key that has not passed validation is never saved.
- */
-async function validateKey(credentialId: CredentialId, _key: string): Promise<ValidationResult> {
-  return {
-    ok: false,
-    reason: `Live validation for ${credentialId} arrives with its provider adapter (TASK-012, TASK-032). Keys are not saved until it does (FR-026).`,
-  };
-}
-
 function registerIpcHandlers(): void {
   router.handle('config:get', () => config.get());
   router.handle('config:set', async (patch) => {
@@ -334,7 +328,7 @@ function registerIpcHandlers(): void {
 
   router.handle('secrets:status', () => secrets.status());
   router.handle('secrets:set', async ({ provider, key }) =>
-    secrets.set(provider, key, validateKey),
+    secrets.set(provider, key, validateCredential),
   );
 
   router.handle('hotkey:rebind', ({ action, accelerator }) => {
