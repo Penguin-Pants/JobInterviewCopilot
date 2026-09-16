@@ -11,7 +11,6 @@
  * which is the type-level guarantee `TC-107` asserts rather than a check this
  * file performs (`FR-101`, NFR-002).
  */
-import { constants as fsConstants } from 'node:fs';
 import { open, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -364,12 +363,9 @@ export class SessionManager {
   private async acquireLock(contents: LockContents): Promise<void> {
     const path = lockPath(this.userDataDir);
     try {
-      const handle = await open(
-        path,
-        fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY,
-      );
-      await handle.write(JSON.stringify(contents));
-      await handle.close();
+      // `wx` writes and closes in one call, so there is no handle to leak if
+      // the write fails between opening and closing.
+      await writeFile(path, JSON.stringify(contents), { encoding: 'utf8', flag: 'wx' });
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
         throw new SessionStartRefused('session-active');
