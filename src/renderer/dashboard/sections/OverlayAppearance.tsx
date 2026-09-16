@@ -59,6 +59,20 @@ export function OverlayAppearance({
   const pending = useRef<Settings['theme'] | null>(null);
 
   /**
+   * One theme write at a time.
+   *
+   * A translucency change destroys the overlay and awaits its replacement
+   * (ADR-015). A second change made while the first is in flight stores the
+   * newer setting, but `applyThemeChange` finds no window to act on and
+   * returns, and the first call then finishes building a window from the older
+   * settings: the overlay ends up in one mode while the settings and the
+   * Dashboard both say the other. Serializing removes the overlap this renderer
+   * can cause. Reconciling a rebuilt window against the newest settings is the
+   * main process's half, and is carried as follow-up work.
+   */
+  const [committing, setCommitting] = useState(false);
+
+  /**
    * The next value is computed here, not inside the state updater.
    *
    * A `setTheme(current => { pending.current = …; })` runs its updater when
@@ -80,15 +94,20 @@ export function OverlayAppearance({
     if (!next) return;
     pending.current = null;
     setError(null);
-    const result = await call('config:set', { theme: next });
-    if (!result.ok) {
-      setError(result.message);
-      // Put the control back to what is actually stored, rather than leaving a
-      // value on screen that the main process refused.
-      setTheme(settings.theme);
-      return;
+    setCommitting(true);
+    try {
+      const result = await call('config:set', { theme: next });
+      if (!result.ok) {
+        setError(result.message);
+        // Put the control back to what is actually stored, rather than leaving
+        // a value on screen that the main process refused.
+        setTheme(settings.theme);
+        return;
+      }
+      await onSettingsChanged();
+    } finally {
+      setCommitting(false);
     }
-    await onSettingsChanged();
   }
 
   function writeTheme(patch: Partial<Settings['theme']>): void {
@@ -135,6 +154,7 @@ export function OverlayAppearance({
         id="overlay-translucency"
         data-testid="overlay-translucency"
         value={theme.overlayTranslucency}
+        disabled={committing}
         onChange={(e) => writeTheme({ overlayTranslucency: e.target.value as OverlayTranslucency })}
       >
         {TRANSLUCENCY.map((mode) => (

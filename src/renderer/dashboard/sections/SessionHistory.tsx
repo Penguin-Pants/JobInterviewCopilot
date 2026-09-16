@@ -18,8 +18,14 @@ export const TRANSCRIPT_PRIVACY_TEXT =
 
 export interface SessionHistoryProps {
   profiles: Profile[];
-  /** Re-lists when a session ends, so history is current without a refresh. */
-  sessionRevision: string | null;
+  /**
+   * Re-lists on every `state:session` push, so history is current without a
+   * refresh. A counter rather than the session id: crash recovery compacts an
+   * orphan transcript after this section has already listed the profile, and it
+   * re-pushes a state whose id has not changed. Keyed on the id, that recovered
+   * interview stayed invisible until the window was reloaded (FR-105, FR-108).
+   */
+  sessionRevision: number;
 }
 
 export function SessionHistory({ profiles, sessionRevision }: SessionHistoryProps): JSX.Element {

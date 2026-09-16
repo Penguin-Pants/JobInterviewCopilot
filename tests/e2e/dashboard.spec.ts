@@ -460,3 +460,52 @@ test('FR-029 theme and overlay settings are written and survive a reload', async
     after ?? '',
   );
 });
+
+/* ------------------------------------------------------------------ *
+ * FR-088  the session controls, and what a live session binds
+ * ------------------------------------------------------------------ */
+
+/**
+ * The Stop control and the locks a live session applies.
+ *
+ * `TC-120` asserts the idle half: Start offered, Stop unavailable because no
+ * session has started. The live half had no case, and two defects lived there.
+ * `TC-158` covers the profile lock; this covers the session controls themselves
+ * and the provider lock (ADR-013).
+ */
+test('FR-088 Stop is available as soon as a session is live, and bindings lock', async () => {
+  await expect(dashboard.locator('[data-testid="stop-session"]')).toBeDisabled();
+  await expect(dashboard.locator('[data-testid="save-providers"]')).toBeEnabled();
+
+  // The main process pushes this *before* it awaits the loop, deliberately: the
+  // session is live the moment the manager accepts it, while capture and two
+  // sockets are still coming up. Stop has to work for the whole of that, or a
+  // slow permission prompt leaves a running interview with no way out.
+  await pushToDashboard(app, 'state:session', {
+    active: true,
+    sessionId: 'e2e-controls-1',
+    profileName: 'My profile',
+    startedAt: '2026-01-02T10:00:00.000Z',
+    paused: false,
+  });
+
+  await expect(dashboard.locator('[data-testid="stop-session"]')).toBeEnabled();
+  await expect(dashboard.locator('[data-testid="start-session"]')).toBeDisabled();
+
+  // The providers are bound for the session, as the profile is. Saving a new
+  // selection mid-session rebinds the health registry while the STT sockets
+  // stay on the old choice, so the badge would describe a configuration the
+  // audio is not using.
+  await expect(dashboard.locator('[data-testid="providers-locked"]')).toBeVisible();
+  await expect(dashboard.locator('[data-testid="save-providers"]')).toBeDisabled();
+
+  await pushToDashboard(app, 'state:session', {
+    active: false,
+    sessionId: null,
+    profileName: null,
+    startedAt: null,
+    paused: false,
+  });
+  await expect(dashboard.locator('[data-testid="stop-session"]')).toBeDisabled();
+  await expect(dashboard.locator('[data-testid="save-providers"]')).toBeEnabled();
+});

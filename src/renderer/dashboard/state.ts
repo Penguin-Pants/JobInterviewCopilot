@@ -44,8 +44,15 @@ export interface DashboardData {
    * there": no settings became a permanent "Loading settings…", no profiles
    * became "there are no profiles yet", and no secret status became "not
    * saved" beside every key that was in fact saved.
+   *
+   * Recorded per resource and joined for display. A single shared slot let a
+   * later success erase an earlier failure: a failed `profile:list` followed by
+   * a successful `config:get` left an empty profile list with nothing on screen
+   * to say why and no retry, which is the failure this exists to prevent.
    */
   loadError: string | null;
+  /** A counter that moves on every `state:session` push, not only on a new id. */
+  sessionRevision: number;
   reloadSettings: () => Promise<void>;
   reloadSecrets: () => Promise<void>;
   reloadProfiles: () => Promise<void>;
@@ -81,36 +88,42 @@ export function useDashboardData(): DashboardData {
     () => lastSeen('notice:captureFidelity')?.message ?? null,
   );
   const [docProgress, setDocProgress] = useState<Record<string, DocProgress>>({});
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [sessionRevision, setSessionRevision] = useState(0);
+  // One slot per resource. They are independent failures and a success in one
+  // says nothing about another.
+  const [errors, setErrors] = useState<{
+    settings: string | null;
+    secrets: string | null;
+    profiles: string | null;
+  }>({ settings: null, secrets: null, profiles: null });
 
   const reloadSettings = useCallback(async () => {
     const result = await call('config:get');
-    if (!result.ok) {
-      setLoadError(`The settings could not be read. ${result.message}`);
-      return;
-    }
-    setLoadError(null);
-    setSettings(result.value);
+    setErrors((e) => ({
+      ...e,
+      settings: result.ok ? null : `The settings could not be read. ${result.message}`,
+    }));
+    if (result.ok) setSettings(result.value);
   }, []);
 
   const reloadSecrets = useCallback(async () => {
     const result = await call('secrets:status');
-    if (!result.ok) {
-      // `secrets` stays null, and every section that reads it says "unknown"
-      // rather than "not saved", which is a claim this failure cannot support.
-      setLoadError(`Which keys are saved could not be read. ${result.message}`);
-      return;
-    }
-    setSecrets(result.value);
+    // On failure `secrets` stays null, and every section that reads it says
+    // "unknown" rather than "not saved", which is a claim this cannot support.
+    setErrors((e) => ({
+      ...e,
+      secrets: result.ok ? null : `Which keys are saved could not be read. ${result.message}`,
+    }));
+    if (result.ok) setSecrets(result.value);
   }, []);
 
   const reloadProfiles = useCallback(async () => {
     const result = await call('profile:list');
-    if (!result.ok) {
-      setLoadError(`The profile list could not be read. ${result.message}`);
-      return;
-    }
-    setProfiles(result.value);
+    setErrors((e) => ({
+      ...e,
+      profiles: result.ok ? null : `The profile list could not be read. ${result.message}`,
+    }));
+    if (result.ok) setProfiles(result.value);
   }, []);
 
   const reloadAll = useCallback(async () => {
@@ -119,7 +132,6 @@ export function useDashboardData(): DashboardData {
     // sets `activeProfileId`. Reading the settings first returned the
     // pre-bootstrap snapshot, so the header said no profile was active over a
     // profile that was.
-    setLoadError(null);
     await reloadProfiles();
     await reloadSettings();
     await reloadSecrets();
@@ -129,12 +141,32 @@ export function useDashboardData(): DashboardData {
     void reloadAll();
   }, [reloadAll]);
 
+  /**
+   * `kb/` is authoritative, and a file deleted there is removed with no
+   * `CH-213` push: `removeByPath` says so and says the Dashboard re-reads
+   * `profile:list`. Nothing told it to, so a document deleted in Explorer
+   * stayed on screen. Re-reading when the window is focused again is what
+   * "the Dashboard re-reads" means for a change made outside the app, and it
+   * costs one in-memory list rather than a poll (FR-077, ADR-014).
+   */
+  useEffect(() => {
+    const onFocus = (): void => void reloadProfiles();
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [reloadProfiles]);
+
   useEffect(() => {
     // Every subscription is torn down by the function it returns. A Dashboard
     // that is reloaded keeps the main-process listener alive otherwise, and the
     // second copy pushes into a tree that no longer exists.
     const off = [
-      window.copilot.on('state:session', setSession),
+      window.copilot.on('state:session', (payload) => {
+        setSession(payload);
+        // A counter, not the id: the id is unchanged when the main process
+        // re-pushes the same state, which is how crash recovery tells Session
+        // History to look again for a transcript it has just compacted.
+        setSessionRevision((n) => n + 1);
+      }),
       window.copilot.on('state:usage', setUsage),
       window.copilot.on('state:providers', setProviders),
       window.copilot.on('state:audio', setAudio),
@@ -202,21 +234,30 @@ export function useDashboardData(): DashboardData {
   // so the profile list is the truth from then on and the progress entry would
   // only go stale. Reloaded here rather than polled.
   //
-  // Keyed on *which* documents have settled, not on how many. A count is lossy:
-  // one document settling while another goes back to `pending` in the same
-  // batch leaves the count unchanged, and the settled document's real record,
-  // its chunk count and its error text, was never read back.
-  const settledSignature = Object.entries(docProgress)
-    .filter(([, p]) => p.state === 'ready' || p.state === 'error')
+  // Keyed on *which* documents are in *which* state, never on how many have
+  // settled. Two reasons, both found in review:
+  //
+  // A count is lossy. One document settling while another returns to `pending`
+  // in the same batch leaves the count unchanged, so the settled document's
+  // real record, its chunk count and its error text, was never read back.
+  //
+  // And waiting for `ready` or `error` was too late for a document the watcher
+  // adopted: a file copied into `kb/` has no record in the current snapshot, so
+  // its `pending`, `converting` and `embedding` pushes named an id with no row
+  // to render, and the user saw nothing at all until the work had finished.
+  // Reacting to the first state change gives the row something to show progress
+  // on. The percentage is deliberately not in the key, or every tick would
+  // re-list.
+  const progressSignature = Object.entries(docProgress)
     .map(([docId, p]) => `${docId}:${p.state}`)
     .sort()
     .join(',');
-  const lastSettled = useRef(settledSignature);
+  const lastProgress = useRef(progressSignature);
   useEffect(() => {
-    if (settledSignature === lastSettled.current) return;
-    lastSettled.current = settledSignature;
+    if (progressSignature === lastProgress.current) return;
+    lastProgress.current = progressSignature;
     void reloadProfiles();
-  }, [settledSignature, reloadProfiles]);
+  }, [progressSignature, reloadProfiles]);
 
   // The session state carries the profile *name* for display. The active
   // profile itself is settings plus the profile list, so that the section that
@@ -239,7 +280,8 @@ export function useDashboardData(): DashboardData {
     captureNotice,
     docProgress,
     activeProfile,
-    loadError,
+    sessionRevision,
+    loadError: [errors.profiles, errors.settings, errors.secrets].filter(Boolean).join(' ') || null,
     reloadSettings,
     reloadSecrets,
     reloadProfiles,

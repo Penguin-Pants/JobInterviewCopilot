@@ -6,7 +6,7 @@
  * inline and puts the field back to what is actually registered. It never keeps
  * a binding on screen that is not the one in force.
  */
-import { useEffect, useState, type JSX, type KeyboardEvent } from 'react';
+import { useEffect, useRef, useState, type JSX, type KeyboardEvent } from 'react';
 import type { Settings } from '../../../shared/types.js';
 import { call } from '../call.js';
 
@@ -58,15 +58,27 @@ export function Hotkeys({ settings, onSettingsChanged }: HotkeysProps): JSX.Elem
   // Keyed on the value. `config:get` answers with a fresh object every time, so
   // depending on the object identity threw away a captured but unapplied
   // combination whenever any other section saved anything.
+  //
+  // Only the actions the user has not captured are synced. Replacing the whole
+  // draft threw the other action's captured-but-unapplied combination away the
+  // moment either one was applied, because applying reloads the settings.
+  const dirty = useRef<Partial<Record<Action, true>>>({});
   const storedHotkeys = JSON.stringify(settings.hotkeys);
   useEffect(() => {
-    setDraft(JSON.parse(storedHotkeys) as Settings['hotkeys']);
+    const stored = JSON.parse(storedHotkeys) as Settings['hotkeys'];
+    setDraft((current) => ({
+      toggleInteraction: dirty.current.toggleInteraction
+        ? current.toggleInteraction
+        : stored.toggleInteraction,
+      togglePause: dirty.current.togglePause ? current.togglePause : stored.togglePause,
+    }));
   }, [storedHotkeys]);
 
   async function apply(action: Action): Promise<void> {
     setApplied((a) => ({ ...a, [action]: false }));
     const accelerator = draft[action];
     const result = await call('hotkey:rebind', { action, accelerator });
+    delete dirty.current[action];
     if (!result.ok) {
       setErrors((e) => ({ ...e, [action]: result.message }));
       setDraft(settings.hotkeys);
@@ -93,6 +105,7 @@ export function Hotkeys({ settings, onSettingsChanged }: HotkeysProps): JSX.Elem
     const accelerator = acceleratorFrom(event);
     if (!accelerator) return;
     setDraft((d) => ({ ...d, [action]: accelerator }));
+    dirty.current[action] = true;
     // The verdict belonged to the combination that was applied, not to this
     // one. Left standing, "Bound" sat next to an unapplied combination, which
     // is the UI asserting a binding that is not registered: the one thing this

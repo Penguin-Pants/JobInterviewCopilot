@@ -411,12 +411,47 @@ describe('TASK-040 session wiring', () => {
   /** A renderer that loads mid-session has no channel to ask for CH-201. */
   it('replays the session state to each renderer when it loads', () => {
     const text = source();
+    // Sliced to the end of the handler rather than to a fixed width. The
+    // original 400-character window broke the moment the handler grew a
+    // doc comment, which made the test about the formatting rather than the
+    // behavior.
     const dashboard = text.slice(text.indexOf('function wireDashboardWindow'));
-    expect(dashboard.slice(0, 400)).toContain('pushSessionState()');
+    const onLoad = dashboard.slice(0, dashboard.indexOf("dashboardWindow.on('closed'"));
+    expect(onLoad).toContain('pushSessionState()');
 
     const overlay = text.slice(text.indexOf('function wireOverlayWindow'));
     const didFinishLoad = overlay.slice(0, overlay.indexOf("overlayWindow.on('moved'"));
     expect(didFinishLoad).toContain('pushSessionState()');
+  });
+
+  /**
+   * TASK-042. The Dashboard can be closed and reopened, and a reopened one has
+   * missed every one-shot push with no channel to ask for it. The model state
+   * is the one with a control behind it: without it, a download that is
+   * `unavailable` shows neither its reason nor the retry that is the only way
+   * back for the documents waiting on it (ADR-026).
+   */
+  it('replays the model and provider state to a Dashboard that loads', () => {
+    const text = source();
+    const dashboard = text.slice(text.indexOf('function wireDashboardWindow'));
+    const onLoad = dashboard.slice(0, dashboard.indexOf("dashboardWindow.on('closed'"));
+    expect(onLoad).toContain("'model:download'");
+    expect(onLoad).toContain("'state:providers'");
+  });
+
+  /**
+   * TASK-042. Recovery compacts an orphan transcript after the Dashboard has
+   * already listed that profile's history, and changes neither the profile list
+   * nor the session id, so without a push the recovered interview stayed
+   * invisible until the window was reloaded (FR-105, FR-108).
+   */
+  it('tells the Dashboard to look again once crash recovery has compacted', () => {
+    const text = source();
+    const recovery = text.slice(
+      text.indexOf('recovered sessions from a previous run'),
+      text.indexOf("push(dashboardWindow?.webContents, 'model:download', rag.getModelState())"),
+    );
+    expect(recovery).toContain('pushSessionState()');
   });
 });
 

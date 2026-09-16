@@ -45,7 +45,16 @@ function streamText(state: StreamState): string {
 export function Dashboard(): JSX.Element {
   const data = useDashboardData();
   const [sessionError, setSessionError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  // Two flags, not one. `session:start` pushes `state:session` active *before*
+  // it awaits `live.start`, on purpose: the session is live the moment the
+  // manager accepts it, and bringing capture and two sockets up takes long
+  // enough that a Dashboard told afterwards would render it as inactive for the
+  // whole of it. A single shared flag re-imposed exactly that, disabling Stop
+  // over an already-running session until the start invoke returned, so a slow
+  // permission prompt or a wedged socket left an interview with no way to stop
+  // it (FR-088).
+  const [starting, setStarting] = useState(false);
+  const [stopping, setStopping] = useState(false);
 
   // FR-080: the Dashboard follows the theme mode setting. `system` leaves the
   // attribute off so the stylesheet falls through to `prefers-color-scheme`.
@@ -59,9 +68,9 @@ export function Dashboard(): JSX.Element {
 
   async function startSession(): Promise<void> {
     setSessionError(null);
-    setBusy(true);
+    setStarting(true);
     const result = await call('session:start');
-    setBusy(false);
+    setStarting(false);
     if (!result.ok) {
       setSessionError(result.message);
       return;
@@ -73,9 +82,9 @@ export function Dashboard(): JSX.Element {
 
   async function stopSession(): Promise<void> {
     setSessionError(null);
-    setBusy(true);
+    setStopping(true);
     const result = await call('session:stop');
-    setBusy(false);
+    setStopping(false);
     if (!result.ok) setSessionError(result.message);
   }
 
@@ -146,7 +155,7 @@ export function Dashboard(): JSX.Element {
         <button
           type="button"
           data-testid="start-session"
-          disabled={busy || data.session.active}
+          disabled={starting || data.session.active}
           onClick={() => void startSession()}
         >
           Start Session
@@ -154,7 +163,7 @@ export function Dashboard(): JSX.Element {
         <button
           type="button"
           data-testid="stop-session"
-          disabled={busy || !data.session.active}
+          disabled={stopping || !data.session.active}
           onClick={() => void stopSession()}
         >
           Stop Session
@@ -178,6 +187,7 @@ export function Dashboard(): JSX.Element {
         settings={data.settings}
         secrets={data.secrets}
         providers={data.providers}
+        sessionActive={data.session.active}
         onSettingsChanged={data.reloadSettings}
         onSecretsChanged={data.reloadSecrets}
       />
@@ -192,7 +202,7 @@ export function Dashboard(): JSX.Element {
         onSettingsChanged={data.reloadSettings}
       />
 
-      <SessionHistory profiles={data.profiles} sessionRevision={data.session.sessionId} />
+      <SessionHistory profiles={data.profiles} sessionRevision={data.sessionRevision} />
 
       <Hotkeys settings={data.settings} onSettingsChanged={data.reloadSettings} />
 

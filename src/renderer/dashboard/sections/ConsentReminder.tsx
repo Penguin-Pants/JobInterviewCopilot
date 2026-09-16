@@ -51,7 +51,13 @@ export function ConsentReminder({
         data-testid="consent-text"
         rows={5}
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          setText(e.target.value);
+          // "Saved" belonged to the text that was saved. Left standing beside an
+          // edit, it told the user the overlay would show wording the main
+          // process has never been given.
+          setSaved(false);
+        }}
       />
 
       <button type="button" data-testid="consent-save" onClick={() => void write(text)}>

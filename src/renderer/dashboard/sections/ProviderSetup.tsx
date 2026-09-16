@@ -174,6 +174,8 @@ export interface ProviderSetupProps {
   settings: Settings;
   secrets: SecretStatus | null;
   providers: ProvidersState | null;
+  /** A live session binds the providers, as it binds the profile (ADR-013). */
+  sessionActive: boolean;
   onSettingsChanged: () => Promise<void>;
   onSecretsChanged: () => Promise<void>;
 }
@@ -182,6 +184,7 @@ export function ProviderSetup({
   settings,
   secrets,
   providers,
+  sessionActive,
   onSettingsChanged,
   onSecretsChanged,
 }: ProviderSetupProps): JSX.Element {
@@ -233,7 +236,16 @@ export function ProviderSetup({
     .map((m) => latencyConsequence(m))
     .filter((text): text is string => text !== null);
 
-  const blocked = sttConflict !== null || llmConflict !== null;
+  // A save during a live session is refused here, not merely discouraged.
+  // `config:set` rebinds the health registry immediately while `CMP-15` keeps
+  // the STT sockets it already opened on the old choice, so the badge would
+  // report the new configuration while the audio still went to the old one, and
+  // a later failure on an old socket would be raised into a machine bound to a
+  // provider that had never been tried. Closing and reopening the pair
+  // atomically is the session loop's to do; until it does, the safe answer is
+  // that the providers are bound for the session, exactly as the profile is
+  // (ADR-013).
+  const blocked = sttConflict !== null || llmConflict !== null || sessionActive;
 
   function setSttChoice(which: 'primary' | 'backup', choice: ProviderChoice | null): void {
     setSaved(false);
@@ -370,6 +382,13 @@ export function ProviderSetup({
         </div>
       ) : null}
 
+      {sessionActive ? (
+        <p role="status" data-testid="providers-locked">
+          A session is running. The speech-to-text and language model selections are bound for the
+          whole session, so they cannot be changed until it stops.
+        </p>
+      ) : null}
+
       <button
         type="button"
         data-testid="save-providers"
@@ -409,7 +428,14 @@ export function ProviderSetup({
                 type="password"
                 autoComplete="off"
                 value={keys[credentialId] ?? ''}
-                onChange={(e) => setKeys((k) => ({ ...k, [credentialId]: e.target.value }))}
+                onChange={(e) => {
+                  setKeys((k) => ({ ...k, [credentialId]: e.target.value }));
+                  // The verdict belonged to the key that was checked. A passing
+                  // key clears the field, so typing a replacement left "Key
+                  // accepted and saved" beside a value the vault has never
+                  // seen, which reads as though it were already stored.
+                  setKeyStates((st) => ({ ...st, [credentialId]: { kind: 'idle' } }));
+                }}
               />
               <button
                 type="button"

@@ -434,6 +434,13 @@ async function startKnowledgeBase(): Promise<void> {
     );
     if (recovered.length > 0) {
       getLogger().info('recovered sessions from a previous run', { count: recovered.length });
+      // Recovery compacts an orphan `.ndjson` into a session file *after* the
+      // Dashboard has already listed that profile's history, and it changes
+      // neither the profile list nor the session state, so nothing told the
+      // Dashboard to look again: a recovered interview stayed invisible until
+      // the window was reloaded. The state push is what Session History
+      // re-lists on (FR-105, FR-108).
+      pushSessionState();
     }
   } catch (err) {
     getLogger().error('session recovery failed', err);
@@ -527,7 +534,22 @@ function applyContentSecurityPolicy(): void {
  */
 function wireDashboardWindow(): void {
   if (!dashboardWindow) return;
-  dashboardWindow.webContents.on('did-finish-load', () => pushSessionState());
+  /**
+   * Replay the one-shot state to every Dashboard that loads (TASK-042).
+   *
+   * The Dashboard can be closed and reopened (`focusOrRecreateDashboard`), and
+   * a reopened one has missed every earlier push with no channel to ask. The
+   * model state is the one that matters most: `CH-214` fires only on a change
+   * and the initial push happens once at the end of bootstrap, so a rebuilt
+   * Dashboard rendered neither the "not downloaded" state nor its retry button,
+   * which is the only way back when a download is `unavailable` and documents
+   * are waiting on it (ADR-026).
+   */
+  dashboardWindow.webContents.on('did-finish-load', () => {
+    pushSessionState();
+    push(dashboardWindow?.webContents, 'model:download', rag.getModelState());
+    push(dashboardWindow?.webContents, 'state:providers', health.snapshot());
+  });
   dashboardWindow.on('closed', () => {
     dashboardWindow = null;
   });
