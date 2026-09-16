@@ -127,11 +127,46 @@ export class AudioSupervisor {
 
     this.inFlight += 1;
     this.peakInFlight = Math.max(this.peakInFlight, this.inFlight);
-    try {
-      this.onChunk(chunk);
-    } finally {
+    let settled = false;
+    const release = (): void => {
+      if (settled) return;
+      settled = true;
       this.inFlight -= 1;
+    };
+
+    let result: unknown;
+    try {
+      result = this.onChunk(chunk);
+    } catch (err) {
+      // A consumer that throws must not leak the count, and must not have its
+      // error swallowed either: the caller is the only one who can report it.
+      release();
+      throw err;
     }
+
+    // An async consumer is not finished when it returns its promise. Counting
+    // it as finished there would report one chunk in flight while several
+    // requests were genuinely outstanding.
+    if (isPromiseLike(result)) {
+      void Promise.resolve(result).then(release, release);
+      return;
+    }
+    release();
+  }
+
+  /**
+   * Record a stream state the worker reported.
+   *
+   * Without this the supervisor only learned that a stream was running when its
+   * first chunk arrived, up to a second late, and `canStartSession` would
+   * refuse a perfectly healthy stream for that whole second. The worker knows
+   * the moment the graph is connected, so it says so.
+   */
+  noteStreamState(source: TranscriptSource, state: StreamState, error?: string): void {
+    const status = this.status.get(source);
+    if (!status) return;
+    if (state === 'error') status.error = error ?? null;
+    this.setState(source, state);
   }
 
   /**
@@ -186,6 +221,13 @@ export class AudioSupervisor {
    */
   canStartSession(): { ok: boolean; reason?: string } {
     const interviewer = this.status.get('interviewer');
+    // `running` is required, not merely "not error". `start()` resolves as soon
+    // as the worker has been told to start, so `starting` means acquisition is
+    // still in flight and a loopback failure has not been reported yet. Letting
+    // a session begin there is exactly the silently dead interviewer stream
+    // FR-044 forbids: the app would look like one that never suggests anything.
+    if (interviewer?.state === 'running') return { ok: true };
+
     if (interviewer?.state === 'error') {
       return {
         ok: false,
@@ -194,7 +236,13 @@ export class AudioSupervisor {
           'System audio could not be captured, so the interviewer would not be heard.',
       };
     }
-    return { ok: true };
+    if (interviewer?.state === 'starting') {
+      return { ok: false, reason: 'System audio is still starting. Try again in a moment.' };
+    }
+    return {
+      ok: false,
+      reason: 'System audio capture has not started, so the interviewer would not be heard.',
+    };
   }
 
   /** Tear everything down. Releases the worker and resets all state (FR-046). */
@@ -217,4 +265,12 @@ export class AudioSupervisor {
     if (state !== 'error') status.error = null;
     this.onStreamState?.(source, { ...status });
   }
+}
+
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { then?: unknown }).then === 'function'
+  );
 }

@@ -186,14 +186,19 @@ describe('TC-043 the interviewer stream gates a session', () => {
     // Losing the microphone costs context, not the product. Losing system audio
     // means there is nothing to react to at all.
     const supervisor = new AudioSupervisor({ worker, onChunk: () => {} });
+    supervisor.noteStreamState('interviewer', 'running');
     supervisor.markUnavailable('candidate', 'No microphone was found.');
 
     expect(supervisor.canStartSession().ok).toBe(true);
     expect(supervisor.statusFor('candidate').state).toBe('error');
   });
 
-  it('allows a session when both streams are healthy', () => {
+  it('allows a session once the interviewer stream is actually running', () => {
     const supervisor = new AudioSupervisor({ worker, onChunk: () => {} });
+    // Not "has not failed": running. Capture that has not been confirmed is
+    // the case this gate exists for.
+    expect(supervisor.canStartSession().ok).toBe(false);
+    supervisor.noteStreamState('interviewer', 'running');
     expect(supervisor.canStartSession().ok).toBe(true);
   });
 });
@@ -267,5 +272,75 @@ describe('lifecycle guards', () => {
   it('throws on an unknown source rather than guessing', () => {
     const supervisor = new AudioSupervisor({ worker, onChunk: vi.fn() });
     expect(() => supervisor.statusFor('nope' as TranscriptSource)).toThrow(/unknown audio source/i);
+  });
+});
+
+/**
+ * Review findings on the supervisor, all confirmed and fixed.
+ */
+describe('review fixes', () => {
+  it('blocks a session while the interviewer stream is still starting', async () => {
+    const supervisor = new AudioSupervisor({ worker, onChunk: () => {} });
+    await supervisor.start();
+
+    // `start()` resolves as soon as the worker has been told to start, so
+    // `starting` means acquisition is still in flight and a loopback failure
+    // has not been reported yet. Allowing a session here is the silently dead
+    // interviewer stream FR-044 forbids.
+    const blocked = supervisor.canStartSession();
+    expect(blocked.ok).toBe(false);
+    expect(blocked.reason).toMatch(/still starting/);
+
+    supervisor.noteStreamState('interviewer', 'running');
+    expect(supervisor.canStartSession().ok).toBe(true);
+  });
+
+  it('blocks a session before capture has been started at all', () => {
+    const supervisor = new AudioSupervisor({ worker, onChunk: () => {} });
+    const result = supervisor.canStartSession();
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/has not started/);
+  });
+
+  it('still blocks on an error, naming the reason', async () => {
+    const supervisor = new AudioSupervisor({ worker, onChunk: () => {} });
+    await supervisor.start();
+    supervisor.noteStreamState('interviewer', 'error', 'loopback was refused');
+    const result = supervisor.canStartSession();
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('loopback was refused');
+  });
+
+  it('counts an async consumer as in flight until its promise settles', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const supervisor = new AudioSupervisor({ worker, onChunk: () => gate });
+    await supervisor.start();
+
+    supervisor.handleChunk(chunk('interviewer', 1));
+    supervisor.handleChunk(chunk('candidate', 1));
+    // Returning a promise is not finishing. Releasing here would report one
+    // chunk in flight while two requests were genuinely outstanding.
+    expect(supervisor.chunksInFlight).toBe(2);
+    expect(supervisor.peakChunksInFlight).toBeGreaterThanOrEqual(2);
+
+    release();
+    await gate;
+    await Promise.resolve();
+    expect(supervisor.chunksInFlight).toBe(0);
+  });
+
+  it('releases the count when an async consumer rejects', async () => {
+    const supervisor = new AudioSupervisor({
+      worker,
+      onChunk: () => Promise.reject(new Error('stt down')),
+    });
+    await supervisor.start();
+    supervisor.handleChunk(chunk('interviewer', 1));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(supervisor.chunksInFlight).toBe(0);
   });
 });

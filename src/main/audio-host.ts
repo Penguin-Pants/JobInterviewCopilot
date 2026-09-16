@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { BrowserWindow, desktopCapturer, session, type Session } from 'electron';
+import { applyNavigationLockdown } from './windows.js';
 import { getLogger } from './logger.js';
 import type { AudioWorkerHandle } from './audio.js';
 import type { AudioChunk, TranscriptSource } from '../shared/types.js';
@@ -129,6 +130,13 @@ export class ElectronAudioWorkerHost implements AudioWorkerHandle {
     // Content protected as a precaution. It should never be visible to
     // anything, capture included.
     win.setContentProtection(true);
+
+    // The same lockdown every other window gets, and it matters more here.
+    // Without it a redirect to a remote origin would keep this window's preload
+    // bridge and would still be recognized by `owns()` as the media-authorized
+    // worker, handing a remote page the capture and audio IPC surface that
+    // every other renderer is explicitly denied (FR-086).
+    applyNavigationLockdown(win);
 
     win.webContents.on('ipc-message', (_event, channel, ...args) => {
       if (channel === 'audio:streamState') {

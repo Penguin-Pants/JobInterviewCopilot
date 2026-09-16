@@ -153,6 +153,63 @@ Follow-up work found during implementation:
   changed. Harmless, but it touches mtime on every launch.
 
 
+Issues found by code review on PR #4 and fixed in the same branch. All ten were
+real; one had already been fixed when the review landed.
+
+- **A failing installer build reported success.** The step piped `npm run
+  package` into `tee` without `pipefail`, so the pipeline exited with `tee`'s
+  status. The failure-log upload was skipped and the installer upload only
+  warned about a missing `release/*.exe`. Now `set -o pipefail`, plus a separate
+  step that asserts the artifact exists.
+- **`session:start` was allowed while capture was still starting.** The gate
+  refused only on `error`, but `start()` resolves as soon as the worker has been
+  told to start, so a loopback failure was not yet known. It now requires
+  `running`, and the worker reports that state directly instead of the
+  supervisor inferring it from the first chunk a second later (FR-044).
+- **The worklet could never load.** It was fetched from a `blob:` URL, and a
+  module URL is governed by `script-src`, which the audio worker restricts to
+  `'self' file:`; `blob:` is allowed only in `worker-src`. Capture would have
+  failed on every start with no PCM ever emitted. The first fix was worse than
+  it looked: `new URL('./x.js', import.meta.url)` is rewritten by Vite into an
+  inlined `data:` URL, which `script-src` rejects for the same reason. The
+  worklet now ships from `src/renderer/public/` and is resolved against the page
+  URL, and a test reads the build output to prove it is neither form.
+- **An acquired stream leaked when graph setup failed.** Anything that threw
+  after `getDisplayMedia` or `getUserMedia` succeeded left the tracks live and
+  the context open, so the microphone or system audio stayed captured invisibly
+  while the stream reported `error`. Setup is now wrapped and releases both.
+- **The final partial chunk was discarded.** Stopping 1.5 s in emitted the first
+  full chunk and dropped the remaining half second, which TASK-011 requires to
+  be delivered. The processor now takes a `flush` message and emits the
+  remainder at its true length, not padded with silence.
+- **Sequence numbers reset on restart.** The counter lived inside the graph, and
+  a graph is replaced on the recovery path (FR-045), so the first chunk after a
+  restart repeated sequence 1 and the supervisor's gap detection saw a duplicate
+  on the exact path it exists to watch. The counter now lives per source and
+  resets only when the session stops.
+- **Stereo was truncated, not downmixed.** Taking channel 0 alone meant an
+  interviewer whose audio sat mostly in the right channel arrived as
+  near-silence. The channels are averaged.
+- **The audio worker window skipped the navigation lockdown.** A redirect to a
+  remote origin would have kept the window's preload bridge and still counted as
+  the media-authorized worker under `owns()`, handing a remote page the capture
+  and audio IPC surface every other renderer is denied (FR-086).
+- **`chunksInFlight` treated an async consumer as finished when it returned.**
+  The count is released when the promise settles now. The reviewer is also right
+  that the counter cannot detect a consumer that retains the buffer; it measures
+  concurrency, and retention is proved by the direct-reference assertions in
+  `TC-041` and by `TC-137`'s runtime write monitor, not by this number.
+- **The concurrency group did not dedupe push and pull-request runs.** Already
+  fixed before the review landed.
+
+Two process lessons, both fixed rather than noted:
+- The `git grep` guardrails missed untracked files, so a new file passed locally
+  and failed in CI once committed. That is how the Whisper rule was first
+  broken. They now pass `--untracked`, verified by planting a violation.
+- Coverage excluded `src/main/ai/**`, written before the directory existed. It
+  would have hidden every untested adapter.
+
+
 ### TASK-001 Project scaffold
 **Traces** FR-001, FR-086, NFR-006, NFR-015, NFR-016
 **Depends on** nothing

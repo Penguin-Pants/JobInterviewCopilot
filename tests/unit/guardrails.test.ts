@@ -446,10 +446,16 @@ describe('TC-151 no provider id outside the registry and its adapters', () => {
 
   for (const id of PROVIDER_IDS) {
     it(`does not name "${id}" outside the registry, the adapters and the vault`, () => {
-      const out = execSync(`git grep -l -F "'${id}'" -- 'src/*.ts' 'src/*.tsx' || true`, {
-        encoding: 'utf8',
-        cwd: process.cwd(),
-      });
+      // --untracked matters: without it a brand new file passes this guard
+      // locally and only fails in CI once committed, which is exactly how this
+      // rule was first broken.
+      const out = execSync(
+        `git grep -l --untracked -F "'${id}'" -- 'src/*.ts' 'src/*.tsx' || true`,
+        {
+          encoding: 'utf8',
+          cwd: process.cwd(),
+        },
+      );
       const files = out
         .split('\n')
         .filter(Boolean)
@@ -466,7 +472,7 @@ describe('TC-151 no provider id outside the registry and its adapters', () => {
  */
 describe('TC-057 no renderer names a model', () => {
   it('does not mention Whisper outside the registry and its adapter', () => {
-    const out = execSync(`git grep -l -i -F "whisper" -- 'src/*' || true`, {
+    const out = execSync(`git grep -l -i --untracked -F "whisper" -- 'src/*' || true`, {
       encoding: 'utf8',
       cwd: process.cwd(),
     });

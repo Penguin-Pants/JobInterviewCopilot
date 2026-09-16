@@ -2,9 +2,9 @@
  * Provider health and failover (`CMP-12`). Mirrors `docs/02-architecture.md`
  * section 3.5 (ADR-009, ADR-010, ADR-017, ADR-024).
  *
- * Health is keyed by **credential**, not by capability. One OpenAI key serves
- * the realtime transcription socket, Whisper and GPT, so a revoked key is one
- * fact about one credential, not three independent failures. That is why there
+ * Health is keyed by **credential**, not by capability. One key can serve a
+ * realtime transcription socket, a batch endpoint and a chat model at once, so
+ * a revoked key is one fact about one credential, not three separate failures. That is why there
  * is one state machine and one probe timer per credential, and why the
  * Dashboard shows one badge naming every affected capability (TC-143).
  */

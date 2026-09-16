@@ -33,7 +33,7 @@ import {
   translucencyChangeNeedsRecreate,
   windowsBuildNumber,
 } from './windows.js';
-import type { CredentialId, Settings } from '../shared/types.js';
+import type { CredentialId, Settings, StreamState } from '../shared/types.js';
 import { findLlmProvider } from '../shared/registry/llm.js';
 import { findSttProvider } from '../shared/registry/stt.js';
 
@@ -99,6 +99,9 @@ async function bootstrap(): Promise<void> {
   audioHost = new ElectronAudioWorkerHost({
     onChunk: (chunk) => audio.handleChunk(chunk),
     onStreamState: ({ source, state, error }) => {
+      // Tell the supervisor first, so `canStartSession` reflects the worker's
+      // view rather than waiting for the first chunk to prove it.
+      audio.noteStreamState(source, state as StreamState, error);
       if (state === 'error') {
         void audio.handleStreamEnded(source, error ?? 'The audio stream ended.');
       }

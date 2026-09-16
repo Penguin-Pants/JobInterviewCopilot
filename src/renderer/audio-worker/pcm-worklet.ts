@@ -42,56 +42,28 @@ export function floatToInt16(sample: number): number {
   return clamped < 0 ? Math.round(clamped * 0x8000) : Math.round(clamped * 0x7fff);
 }
 
-/** The worklet source. Kept in one string so the tests run exactly this. */
-export const PCM_WORKLET_SOURCE = `
-class PcmFramer extends AudioWorkletProcessor {
-  constructor(options) {
-    super();
-    this.framesPerChunk = options.processorOptions.framesPerChunk;
-    this.buffer = new Int16Array(this.framesPerChunk);
-    this.filled = 0;
-  }
-
-  /**
-   * Mono only. A loopback or microphone stream can arrive with more than one
-   * channel; taking channel 0 rather than averaging keeps this deterministic
-   * and matches what the STT providers are configured to expect (FR-041).
-   */
-  process(inputs) {
-    const input = inputs[0];
-    if (!input || input.length === 0) return true;
-    const channel = input[0];
-    if (!channel) return true;
-
-    for (let i = 0; i < channel.length; i += 1) {
-      const sample = channel[i];
-      const clamped = sample < -1 ? -1 : sample > 1 ? 1 : sample;
-      this.buffer[this.filled] =
-        clamped < 0 ? Math.round(clamped * 0x8000) : Math.round(clamped * 0x7fff);
-      this.filled += 1;
-
-      if (this.filled === this.framesPerChunk) {
-        // A fresh buffer is allocated for the next chunk and the full one is
-        // transferred away, so this processor never holds a reference to a
-        // chunk it has already emitted (FR-043, ADR-027).
-        const full = this.buffer;
-        this.buffer = new Int16Array(this.framesPerChunk);
-        this.filled = 0;
-        this.port.postMessage({ pcm: full.buffer }, [full.buffer]);
-      }
-    }
-    return true;
-  }
-}
-
-registerProcessor(${JSON.stringify(PCM_PROCESSOR_NAME)}, PcmFramer);
-`;
-
 /**
- * Build the Blob URL the AudioContext loads the processor from.
- * The caller revokes it once `addModule` has resolved.
+ * The worklet's module URL.
+ *
+ * `pcm-processor.js` lives in the renderer's `public/` directory, so Vite copies
+ * it to the output verbatim and the packaged app loads it over `file://`, which
+ * the audio worker's `script-src 'self' file:` permits.
+ *
+ * Three things were tried, and only this one works:
+ *  - A `blob:` URL is rejected: a module URL is governed by `script-src`, and
+ *    the policy allows `blob:` only in `worker-src`.
+ *  - `new URL('./pcm-processor.js', import.meta.url)` is rewritten by Vite into
+ *    an inlined `data:` URL, which `script-src` rejects for the same reason.
+ *    That one looks fixed and is not, which is why it is written down here.
+ *  - A copied asset resolved against the page URL, below, stays on the page's
+ *    own origin.
+ *
+ * Resolved against `location.href` rather than `import.meta.url` precisely so
+ * the bundler leaves it alone. The page is `out/renderer/audio-worker/
+ * index.html` and public files land at `out/renderer/`, hence the `../`.
  */
-export function createWorkletModuleUrl(): string {
-  const blob = new Blob([PCM_WORKLET_SOURCE], { type: 'application/javascript' });
-  return URL.createObjectURL(blob);
+export const PCM_PROCESSOR_FILE = '../pcm-processor.js';
+
+export function workletModuleUrl(): string {
+  return new URL(PCM_PROCESSOR_FILE, window.location.href).href;
 }
