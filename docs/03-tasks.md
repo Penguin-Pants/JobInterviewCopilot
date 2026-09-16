@@ -797,7 +797,18 @@ vague intention:
 - No doc-type weighting exists (`ASM-006`). Equal similarity ties, and the
   tie-break is chunk id, so the order is stable across runs rather than depending
   on directory iteration order.
-- `TC-078` measures 5000 chunks at 384 dimensions against a 50 ms budget. Chunk
+- `TC-078` measures 5000 chunks at 384 dimensions against a 50 ms budget. It
+  asserts the **fastest of five** readings, not one. A single wall-clock reading
+  on a shared runner is the intermittent failure the test strategy's determinism
+  rule calls a defect in the test: the scan costs 2 to 3 ms, and one CI reading
+  came back at 54.9 ms, which measured the runner being descheduled rather than
+  the code. A second case pins the property the budget is really about, that the
+  scan is linear in the corpus, and it was checked to fail on a deliberately
+  quadratic scan.
+- `TC-078`'s budget is met with roughly twenty times the headroom, so the
+  score-then-sort implementation stands. A bounded top-k selection was written
+  and measured at about 20 percent faster, then discarded: it returned a
+  different result, because its tie-break disagreed with the documented one. Chunk
   sets are memoized per profile and invalidated on every ingest, so reading 5000
   chunks off disk is not inside the question-to-suggestion budget (`NFR-001`).
 - `query` returns `[]` rather than throwing for an empty question, an unknown
