@@ -1257,7 +1257,21 @@ since Milestone 0.
 at bootstrap, because either window can be rebuilt: the overlay on a
 translucency change (ADR-015), the Dashboard by being closed and reopened. The
 old one-shot push at the end of bootstrap left every rebuilt window without the
-warning, which was a second, quieter bug in the same code.
+warning, which was a second, quieter bug in the same code. Each notice goes to
+**the window that just loaded**, not to both from either handler, so one load
+does not tell a window twice.
+
+That last point uncovered a third. `wireDashboardWindow` was called after
+`await createDashboardWindow(...)`, and `loadFile` resolves from **inside**
+`did-finish-load`, so every replay listener it installed was attached to an
+event that had already been emitted. It had never fired, since `TASK-042`.
+While `reportPlatform` pushed to both windows the overlay's handler masked it;
+pushing per window made it load-bearing, and a Dashboard that cannot hear its
+own load would have had the acrylic option permanently disabled on Windows 11.
+`createDashboardWindow` now takes the `onCreated` callback `createOverlayWindow`
+already had, for the reason `createOverlayWindow`'s own comment gives, and
+`model:download`, `state:providers` and `state:session` are replayed again as a
+result.
 
 **Why neither notice breaks `FR-076`.** `FR-076` bars an **error card**:
 "Provider failures are reported only through the Dashboard status badge."
@@ -1299,10 +1313,27 @@ the surface between that floor and fully opaque. Below the floor the setting
 still does something visible: the frame, the shadow and the idle card follow
 the raw value, because no text is read off them.
 
+The floor is the lowest alpha from which **every** alpha up to 1 clears the
+target, not the first alpha that happens to clear it. Worst-case contrast is not
+monotonic in alpha: the minimum over the two backdrops rises while the card
+covers the hostile one, then falls back toward the card's own contrast at alpha
+1, so the passing set is an interval rather than a suffix of [0, 1]. A search
+that stopped at the first pass could return a floor with a failing band above
+it, and `cardSurfaceAlpha` hands back any user opacity at or above the floor.
+The scan therefore runs downward from 1 and stops at the first failure, which
+makes the band safe by construction rather than by assumption.
+
 `TC-114` drives every theme and every opacity step the slider can produce, and
-asserts separately that the raw minimum **would** fail and that one held colour
-already fails a step below the floor. Without those two the floor could be
-removed, or set well clear of the boundary, and the suite would stay green.
+asserts separately that the raw minimum **would** fail, that one held colour
+already fails a step below the floor, that every alpha from the floor to 1
+clears the target, and that a deliberately non-monotonic palette does not get a
+floor with a failing band above it. Without those the floor could be removed, or
+set well clear of the boundary, and the suite would stay green.
+
+The colours held to the target are the card's text **and** its muted colour,
+because the muted one renders a card's question line and the idle message and a
+user reads those the same way they read a bullet. It is also the binding one:
+both floors are set by `muted`, not by `text`.
 
 **Consequences.** A user who sets 0.3 gets a card more opaque than 0.3. That is
 the cost of the requirement as written, and it is paid on the setting chosen by

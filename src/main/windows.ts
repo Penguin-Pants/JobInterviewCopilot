@@ -105,8 +105,24 @@ async function loadRenderer(win: BrowserWindow, name: string): Promise<void> {
   else if (entry.file) await win.loadFile(entry.file);
 }
 
-/** The Dashboard: a standard resizable window following the theme (FR-080). */
-export async function createDashboardWindow(settings: Settings): Promise<BrowserWindow> {
+/**
+ * The Dashboard: a standard resizable window following the theme (FR-080).
+ *
+ * `onCreated` exists for the reason `createOverlayWindow`'s does, and it is
+ * load-bearing for the same reason. `loadURL` and `loadFile` resolve **from
+ * inside** `did-finish-load`, so a caller that awaits this function and then
+ * attaches a `did-finish-load` listener has attached it to an event that has
+ * already been emitted, and the Dashboard never navigates again. Every replay
+ * `wireDashboardWindow` installs was therefore dead on a reopened window: the
+ * model state, the health snapshot, the session state and, since TASK-043, the
+ * platform notice `FR-089` reads. Registering inside the callback puts the
+ * listener in place before the load it is waiting for, which a caller running
+ * after the await cannot do.
+ */
+export async function createDashboardWindow(
+  settings: Settings,
+  onCreated?: (win: BrowserWindow) => void,
+): Promise<BrowserWindow> {
   const win = new BrowserWindow({
     width: 1120,
     height: 780,
@@ -120,6 +136,7 @@ export async function createDashboardWindow(settings: Settings): Promise<Browser
 
   applyNavigationLockdown(win);
   win.once('ready-to-show', () => win.show());
+  onCreated?.(win);
   await loadRenderer(win, 'dashboard');
   return win;
 }

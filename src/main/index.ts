@@ -9,6 +9,7 @@ import {
   screen,
   session,
   type OpenDialogOptions,
+  type WebContents,
 } from 'electron';
 import { AudioSupervisor } from './audio.js';
 import {
@@ -334,8 +335,13 @@ async function bootstrap(): Promise<void> {
   registerIpcHandlers();
 
   const settings = config.get();
-  dashboardWindow = await createDashboardWindow(settings);
-  wireDashboardWindow();
+  // The callback form, for the reason `createOverlayWindow` uses it: `loadFile`
+  // resolves from inside `did-finish-load`, so wiring after the await attaches
+  // every replay listener to an event that has already fired (TASK-043).
+  await createDashboardWindow(settings, (win) => {
+    dashboardWindow = win;
+    wireDashboardWindow();
+  });
 
   // `onCreated` rather than the returned promise, and it is load-bearing.
   // `createOverlayWindow` constructs the window and then awaits its renderer, so
@@ -455,8 +461,10 @@ async function startKnowledgeBase(): Promise<void> {
 /** Bring the Dashboard forward, creating it again when it has been closed. */
 async function focusOrRecreateDashboard(): Promise<void> {
   if (!dashboardWindow || dashboardWindow.isDestroyed()) {
-    dashboardWindow = await createDashboardWindow(config.get());
-    wireDashboardWindow();
+    await createDashboardWindow(config.get(), (win) => {
+      dashboardWindow = win;
+      wireDashboardWindow();
+    });
     return;
   }
   if (dashboardWindow.isMinimized()) dashboardWindow.restore();
@@ -468,8 +476,10 @@ async function focusOrRecreateDashboard(): Promise<void> {
 async function reopenWindows(): Promise<void> {
   const settings = config.get();
   if (!dashboardWindow || dashboardWindow.isDestroyed()) {
-    dashboardWindow = await createDashboardWindow(settings);
-    wireDashboardWindow();
+    await createDashboardWindow(settings, (win) => {
+      dashboardWindow = win;
+      wireDashboardWindow();
+    });
   }
   if (!overlayWindow || overlayWindow.isDestroyed()) {
     // The callback form, for the reason bootstrap uses it: assigning from the
@@ -552,8 +562,8 @@ function wireDashboardWindow(): void {
     // that was closed and reopened needs them again: `FR-089`'s acrylic gate
     // reads `CH-216`, and `NFR-012`'s warning was pushed once at bootstrap and
     // was therefore missing from every reopened window.
-    reportPlatform();
-    reportCaptureFidelity();
+    reportPlatform(dashboardWindow?.webContents);
+    reportCaptureFidelity(dashboardWindow?.webContents);
   });
   dashboardWindow.on('closed', () => {
     dashboardWindow = null;
@@ -584,8 +594,8 @@ function wireOverlayWindow(): void {
     // the consent reminder. Both are sent before the renderer reports ready,
     // for the same reason the consent text is: the card the warning belongs to
     // has to be able to exist by the time readiness is claimed (ADR-016).
-    reportPlatform();
-    reportCaptureFidelity();
+    reportPlatform(overlayWindow?.webContents);
+    reportCaptureFidelity(overlayWindow?.webContents);
   });
 
   overlayWindow.on('moved', () => {
@@ -701,12 +711,20 @@ function pushOverlayMode(): void {
  * it because `FR-089` reads the build number there and because the overlay card
  * is dismissible, so the Dashboard is where it can still be read afterwards.
  *
- * Called on every renderer load rather than once at bootstrap, because either
- * window can be rebuilt: the overlay on a translucency change (ADR-015), the
- * Dashboard by being closed and reopened. A one-shot push at bootstrap left a
+ * Sent to **the window that just loaded**, rather than to both from either
+ * handler, so a window is not told twice for one load. Both windows can be
+ * rebuilt: the overlay on a translucency change (ADR-015), the Dashboard by
+ * being closed and reopened, and a one-shot push at bootstrap left every
  * rebuilt window with no warning at all.
+ *
+ * `NFR-012`'s "once per session" is about what the user is shown, and the
+ * overlay shows this inside the consent card, which is itself re-shown at each
+ * session boundary and at nothing else. The log line is emitted once per
+ * process, because a rebuilt window is not a new fact about the machine.
  */
-function reportCaptureFidelity(): void {
+let captureFidelityLogged = false;
+
+function reportCaptureFidelity(target: WebContents | undefined): void {
   const build = windowsBuildNumber();
   if (process.platform !== 'win32' || hasTrueCaptureExclusion(build)) return;
 
@@ -715,9 +733,11 @@ function reportCaptureFidelity(): void {
     'The overlay will appear as a black rectangle in screen shares and recordings. ' +
     'Windows 10 build 19041 or later is required for true exclusion.';
 
-  getLogger().warn('capture exclusion degraded', { build });
-  push(dashboardWindow?.webContents, 'notice:captureFidelity', { windowsBuild: build, message });
-  push(overlayWindow?.webContents, 'notice:captureFidelity', { windowsBuild: build, message });
+  if (!captureFidelityLogged) {
+    captureFidelityLogged = true;
+    getLogger().warn('capture exclusion degraded', { build });
+  }
+  push(target, 'notice:captureFidelity', { windowsBuild: build, message });
 }
 
 /**
@@ -738,12 +758,16 @@ function reportCaptureFidelity(): void {
  *
  * Off Windows the build number is 0 and acrylic is unsupported, which is the
  * truth for the development container and keeps every gate falling closed.
+ *
+ * Sent to the window that just loaded, for the reason above: both windows are
+ * rebuildable and each one asks on its own load.
  */
-function reportPlatform(): void {
+function reportPlatform(target: WebContents | undefined): void {
   const build = windowsBuildNumber();
-  const payload = { windowsBuild: build, acrylicSupported: supportsAcrylic(build) };
-  push(dashboardWindow?.webContents, 'notice:platform', payload);
-  push(overlayWindow?.webContents, 'notice:platform', payload);
+  push(target, 'notice:platform', {
+    windowsBuild: build,
+    acrylicSupported: supportsAcrylic(build),
+  });
 }
 
 /**
@@ -979,7 +1003,16 @@ function registerIpcHandlers(): void {
    * this one the same setting rather than two.
    */
   router.handle('overlay:setFontSize', ({ px }) => {
-    const after = config.set({ theme: { ...config.get().theme, overlayFontSizePx: px } });
+    const theme = config.get().theme;
+    // A write that changes nothing is not performed. The Dashboard's control
+    // commits once per adjustment on purpose, because a `config.set` is a
+    // synchronous settings write on the process that also runs the live audio
+    // and STT loop; this control commits once per click, with only the
+    // renderer's own disabled-button logic in front of it. Dropping the no-op
+    // takes the cheapest way to spin that write out of a renderer's reach and
+    // costs nothing a real press would notice.
+    if (px === theme.overlayFontSizePx) return { ok: true as const };
+    const after = config.set({ theme: { ...theme, overlayFontSizePx: px } });
     push(overlayWindow?.webContents, 'overlay:theme', after.theme);
     return { ok: true as const };
   });

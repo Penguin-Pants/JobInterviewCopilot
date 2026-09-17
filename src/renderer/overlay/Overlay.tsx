@@ -1,4 +1,4 @@
-import { AnimatePresence, useReducedMotion } from 'framer-motion';
+import { AnimatePresence } from 'framer-motion';
 import {
   StrictMode,
   useCallback,
@@ -76,18 +76,24 @@ function Overlay(): JSX.Element {
   const reported = useRef(false);
 
   /**
-   * `prefers-reduced-motion` (NFR-010).
+   * `prefers-reduced-motion` (NFR-010, FR-092).
    *
-   * The hook answers null where it cannot know, which is not the same as "no
-   * preference", so the slide is enabled only on an explicit false. Treating
-   * "don't know" as "no preference" would run the exact animation the
-   * preference exists to prevent, on the first reveal, which is the one a user
-   * who set it is most likely to notice.
+   * Read through `matchMedia` and **subscribed**, not through framer-motion's
+   * `useReducedMotion`. That hook takes one snapshot and never updates: it
+   * carries its own "see if people miss automatically updating" note upstream.
+   * A user who turns the preference on mid-interview would keep the slide until
+   * the window was rebuilt, while the colour scheme below it followed the host
+   * immediately. One of those two matched this file's promise and the other did
+   * not, so both are subscribed now.
+   *
+   * Unknown is treated as "reduce": the slide is enabled only where the host
+   * says there is no preference. Guessing the other way runs the exact
+   * animation the preference exists to prevent, on the first reveal, which is
+   * the one a user who set it is most likely to notice.
    */
-  const reduceMotion = useReducedMotion();
-  const slide = reduceMotion === false;
+  const slide = !useMediaPreference('(prefers-reduced-motion: reduce)', true);
 
-  const prefersDark = useSystemPrefersDark();
+  const prefersDark = useMediaPreference('(prefers-color-scheme: dark)', false);
 
   const resolved = useMemo(
     () => resolveOverlayTheme(theme, { prefersDark, acrylicSupported: platform.acrylicSupported }),
@@ -127,7 +133,14 @@ function Overlay(): JSX.Element {
       setPaused(earlyMode.paused);
     }
     const earlySession = lastSeen('state:session');
-    if (earlySession) setSessionActive(earlySession.active);
+    if (earlySession) {
+      setSessionActive(earlySession.active);
+      // `paused` too, as the initialiser above does. `CH-201` carries it, and
+      // re-seeding one of its two fields would leave the overlay showing a live
+      // card stack over a paused trigger if this push were ever to arrive
+      // without a `CH-212` beside it (FR-053).
+      setPaused(earlySession.paused);
+    }
     const earlyPlatform = lastSeen('notice:platform');
     if (earlyPlatform) setPlatform(earlyPlatform);
     const earlyNotice = lastSeen('notice:captureFidelity');
@@ -228,10 +241,25 @@ function Overlay(): JSX.Element {
           <IdleCard paused={paused} sessionActive={sessionActive} />
         ) : (
           <div data-testid="card-stack" className="flex flex-col gap-1">
-            {/* FR-091: a fourth card entering fades the oldest out. The cap
-                lives in `cards.ts`; AnimatePresence is what makes the eviction
-                visible rather than instantaneous (ASM-010). */}
-            <AnimatePresence initial={false}>
+            {/*
+              FR-091: a fourth card entering fades the oldest out. The cap lives
+              in `cards.ts`; AnimatePresence is what makes the eviction visible
+              rather than instantaneous (ASM-010).
+
+              No `initial={false}`. It was here to stop a rebuilt overlay
+              animating a replayed card in, and it cost `FR-092` instead: this
+              AnimatePresence mounts with its first child, because the stack is
+              only rendered once a card exists, and on its first render
+              `initial={false}` is passed down as `initial: false`. That value
+              is memoised on the child's presence context without `initial` as
+              a dependency, so it sticks for that card's whole life and reaches
+              every `BulletReveal` mounted inside it. Measured on the built
+              renderer: the first card of every active period, and all of its
+              bullets, appeared at full opacity with no fade and no slide, while
+              cards two and three animated correctly. It recurred after every
+              pause and every session boundary, because those unmount the stack.
+            */}
+            <AnimatePresence>
               {visible.map((card, position) => (
                 <SuggestionCardView
                   key={card.cardId}
@@ -253,27 +281,32 @@ function Overlay(): JSX.Element {
 }
 
 /**
- * The host's colour-scheme preference, for `theme.mode === 'system'` (FR-029).
+ * One host preference, subscribed (FR-029, NFR-010, FR-085).
  *
- * Subscribed rather than read once: a user who switches Windows to dark mode
- * mid-interview gets the overlay following without a restart, which is the same
- * promise `FR-085` makes for the settings that come over `CH-211`.
+ * Subscribed rather than read once: a user who switches Windows to dark mode,
+ * or turns on reduced motion, mid-interview gets the overlay following without
+ * a restart, which is the same promise `FR-085` makes for the settings that
+ * arrive over `CH-211`.
+ *
+ * `whenUnavailable` is the answer where `matchMedia` is missing, which is a
+ * decision per preference rather than a shared default: not knowing the colour
+ * scheme means light, and not knowing about reduced motion means reduce.
  */
-function useSystemPrefersDark(): boolean {
-  const [prefersDark, setPrefersDark] = useState(
-    () => window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false,
+function useMediaPreference(query: string, whenUnavailable: boolean): boolean {
+  const [matches, setMatches] = useState(
+    () => window.matchMedia?.(query).matches ?? whenUnavailable,
   );
 
   useEffect(() => {
-    const query = window.matchMedia?.('(prefers-color-scheme: dark)');
-    if (!query) return;
-    const onChange = (event: MediaQueryListEvent): void => setPrefersDark(event.matches);
-    query.addEventListener('change', onChange);
-    setPrefersDark(query.matches);
-    return () => query.removeEventListener('change', onChange);
-  }, []);
+    const list = window.matchMedia?.(query);
+    if (!list) return;
+    const onChange = (event: MediaQueryListEvent): void => setMatches(event.matches);
+    list.addEventListener('change', onChange);
+    setMatches(list.matches);
+    return () => list.removeEventListener('change', onChange);
+  }, [query]);
 
-  return prefersDark;
+  return matches;
 }
 
 const container = document.getElementById('root');

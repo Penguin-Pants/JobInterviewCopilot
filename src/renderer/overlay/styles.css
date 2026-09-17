@@ -68,10 +68,18 @@ input,
 }
 
 /*
- * NFR-007: nothing animates while the overlay is idle. The idle card is plain
- * markup with no motion component behind it, and this is the belt to that
- * brace: a transition inherited from anywhere would still be an animation on an
- * idle overlay.
+ * NFR-007: nothing animates while the overlay is idle.
+ *
+ * What actually guarantees it is the tree: going idle unmounts the card stack
+ * and its `AnimatePresence`, and the idle card is plain markup with no motion
+ * component behind it, so nothing motion-driven exists to be running.
+ *
+ * This rule is the narrower belt to that brace, and it is worth being exact
+ * about what it catches. It cancels **CSS**-declared animations and
+ * transitions, which is how a utility class or an inherited rule would sneak
+ * one in. It does not stop framer-motion, which drives WAAPI and writes inline
+ * styles, so a motion component added to the idle card later would still
+ * animate and this rule would not notice.
  */
 [data-overlay-state='idle'] * {
   animation: none !important;

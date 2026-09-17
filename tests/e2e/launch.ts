@@ -54,20 +54,31 @@ export async function launchApp(reuseUserDataDir?: string): Promise<LaunchedApp>
  * makes the returned page usable: bootstrap creates the overlay and awaits its
  * renderer, so the page exists for the whole of that load with nothing in it.
  *
- * A closed page is skipped. A translucency change destroys the overlay and
- * builds a new one (ADR-015), and the old page can still be listed for a moment
- * after its window is gone, so "the first page whose URL says overlay" would
- * hand back a window that no longer exists.
+ * A closed page is skipped, and `replacing` names a page the caller expects to
+ * be replaced. A translucency change destroys the overlay and builds a new one
+ * (ADR-015), and the destroy happens on the far side of a `config:set` round
+ * trip: when `selectOption` returns, the doomed window is still open and still
+ * matches, so "the first page whose URL says overlay" hands back the window
+ * that is about to disappear. Naming it is what makes the wait mean "the new
+ * one" rather than "any one".
  */
-export async function overlayPage(app: ElectronApplication): Promise<Page> {
+export async function overlayPage(app: ElectronApplication, replacing?: Page): Promise<Page> {
   const deadline = Date.now() + 30_000;
   for (;;) {
-    const page = app.windows().find((w) => !w.isClosed() && w.url().includes('overlay'));
+    const page = app
+      .windows()
+      .find((w) => w !== replacing && !w.isClosed() && w.url().includes('overlay'));
     if (page) {
       await page.waitForSelector('[data-testid="overlay"]');
       return page;
     }
-    if (Date.now() > deadline) throw new Error('No overlay window appeared within 30s.');
+    if (Date.now() > deadline) {
+      throw new Error(
+        replacing
+          ? 'The overlay window was not replaced within 30s.'
+          : 'No overlay window appeared within 30s.',
+      );
+    }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
 }

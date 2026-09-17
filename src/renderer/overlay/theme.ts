@@ -142,13 +142,24 @@ export function worstCaseContrast(
 }
 
 /**
- * The smallest card alpha at which every held colour still clears the target.
+ * The lowest alpha from which **every** alpha up to 1 clears the target.
  *
- * Searched on a 0.001 grid rather than solved, because the answer only has to
- * be a safe floor and a search cannot be wrong about a palette a closed form
- * was never checked against. Returns 1 when no alpha below 1 is safe, which
- * makes a palette that cannot be rendered translucently fail `TC-114` loudly
- * instead of shipping a card nobody can read.
+ * Not "the first alpha that passes". Worst-case contrast is not monotonic in
+ * alpha: the minimum over the two backdrops rises while the card covers the
+ * hostile one, then falls back toward the card's own contrast at alpha 1, so
+ * the passing set is an interval rather than a suffix of [0, 1]. A search that
+ * stopped at the first pass could return a floor with a failing band above it,
+ * and `cardSurfaceAlpha` hands back any user opacity at or above the floor.
+ * Surface `rgb(0 0 0)` with a `rgb(117 117 117)` text colour is such a palette:
+ * alpha 0 passes and alpha 0.012 does not.
+ *
+ * So the scan runs **downward from 1** and stops at the first failure, which
+ * makes the whole band above the answer safe by construction rather than by
+ * assumption. Searched on a 0.001 grid rather than solved, because the answer
+ * only has to be a safe floor and a search cannot be wrong about a palette a
+ * closed form was never checked against. Returns 1 when no alpha below 1 is
+ * safe, which makes a palette that cannot be rendered translucently fail
+ * `TC-114` loudly instead of shipping a card nobody can read.
  */
 export function minimumSurfaceAlpha(
   mode: ResolvedMode,
@@ -175,16 +186,31 @@ function searchMinimumSurfaceAlpha(
   palettes: Readonly<Record<ResolvedMode, OverlayPalette>>,
 ): number {
   const palette = palettes[mode];
-  const held: Rgb[] = [palette.text, palette.muted];
-  for (let alpha = 0; alpha <= 1.0005; alpha += 0.001) {
-    const clamped = Math.min(1, alpha);
-    if (held.every((fg) => worstCaseContrast(fg, palette.surface, clamped) >= target)) {
-      // Rounded up to the next hundredth so a floating-point step cannot land
-      // the shipped value a fraction below the one that was proved safe.
-      return Math.min(1, Math.ceil(clamped * 100) / 100);
-    }
+  const passes = (alpha: number): boolean =>
+    heldColours(palette).every((fg) => worstCaseContrast(fg, palette.surface, alpha) >= target);
+
+  if (!passes(1)) return 1;
+
+  let lowestSafe = 1;
+  for (let step = 1000; step >= 0; step -= 1) {
+    const alpha = step / 1000;
+    if (!passes(alpha)) break;
+    lowestSafe = alpha;
   }
-  return 1;
+  // Rounded **up** to the next hundredth, so the shipped value sits inside the
+  // proved-safe band rather than a floating-point step below its edge.
+  return Math.min(1, Math.ceil(lowestSafe * 100) / 100);
+}
+
+/**
+ * The colours held to `CONTRAST_TARGET`.
+ *
+ * `muted` is in the set and is usually the binding one: it renders a card's
+ * question line and the idle message, and a user reads those the same way they
+ * read a bullet.
+ */
+function heldColours(palette: OverlayPalette): Rgb[] {
+  return [palette.text, palette.muted];
 }
 
 /**
@@ -226,7 +252,15 @@ export interface ResolvedOverlayTheme {
   fontSizePx: number;
   surfaceAlpha: number;
   chromeAlpha: number;
-  /** The worst contrast suggestion text reaches, for the record and for tests. */
+  /**
+   * The worst contrast **any** held colour reaches, for the record and for
+   * tests.
+   *
+   * Over the held set, not over `text` alone. `muted` is what the floor is
+   * actually pinned to, so reporting `text` overstated the worst case by about
+   * half again and a palette change that pushed `muted` to 3 to 1 would have
+   * left this number comfortably above the target.
+   */
   textContrast: number;
   vars: Record<string, string>;
 }
@@ -257,7 +291,9 @@ export function resolveOverlayTheme(
     fontSizePx: theme.overlayFontSizePx,
     surfaceAlpha,
     chromeAlpha,
-    textContrast: worstCaseContrast(palette.text, palette.surface, surfaceAlpha),
+    textContrast: Math.min(
+      ...heldColours(palette).map((fg) => worstCaseContrast(fg, palette.surface, surfaceAlpha)),
+    ),
     vars: {
       '--overlay-font-size': `${theme.overlayFontSizePx}px`,
       '--overlay-surface': toCss(palette.surface),

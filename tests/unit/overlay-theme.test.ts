@@ -150,6 +150,59 @@ describe('TC-114 overlay contrast', () => {
     expect(cardSurfaceAlpha('dark', -1)).toBe(minimumSurfaceAlpha('dark'));
   });
 
+  /**
+   * The floor's promise is about the whole band above it, not about one point.
+   *
+   * Worst-case contrast is **not** monotonic in alpha: the minimum over the two
+   * backdrops rises while the card covers the hostile one, then falls back
+   * toward the card's own contrast at alpha 1. A floor found by stopping at the
+   * first passing alpha can therefore have a failing band above it, and
+   * `cardSurfaceAlpha` hands back any user opacity at or above the floor. This
+   * is the assertion that makes the floor mean what its name says.
+   */
+  it('every alpha from the floor to 1 clears the target, not just the floor', () => {
+    for (const mode of MODES) {
+      const palette = OVERLAY_PALETTES[mode];
+      const floor = minimumSurfaceAlpha(mode);
+      for (let alpha = floor; alpha <= 1.0000001; alpha += 0.0005) {
+        const clamped = Math.min(1, alpha);
+        for (const colour of [palette.text, palette.muted]) {
+          expect(
+            worstCaseContrast(colour, palette.surface, clamped),
+            `${mode} at alpha ${clamped.toFixed(4)}`,
+          ).toBeGreaterThanOrEqual(CONTRAST_TARGET);
+        }
+      }
+    }
+  });
+
+  it('does not return a floor with a failing band above it', () => {
+    // A palette where alpha 0 passes and alpha 0.012 does not: the card is
+    // black, so at alpha 0 the "surface" is the desktop itself and the grey
+    // text clears 4.5 against both bounds, then fails as the card fades in.
+    // A search that stopped at the first pass would answer 0 here.
+    const nonMonotonic = {
+      dark: {
+        surface: { r: 0, g: 0, b: 0 },
+        text: { r: 117, g: 117, b: 117 },
+        muted: { r: 117, g: 117, b: 117 },
+        border: { r: 117, g: 117, b: 117 },
+      },
+      light: OVERLAY_PALETTES.light,
+    };
+    const palette = nonMonotonic.dark;
+    expect(worstCaseContrast(palette.text, palette.surface, 0.012)).toBeLessThan(CONTRAST_TARGET);
+
+    const floor = minimumSurfaceAlpha('dark', CONTRAST_TARGET, nonMonotonic);
+    expect(floor).toBeGreaterThan(0.012);
+    for (let alpha = floor; alpha <= 1.0000001; alpha += 0.001) {
+      expect(
+        worstCaseContrast(palette.text, palette.surface, Math.min(1, alpha)),
+        `alpha ${alpha.toFixed(3)}`,
+      ).toBeGreaterThanOrEqual(CONTRAST_TARGET);
+    }
+  });
+
   it('reports 1 for a palette no alpha below 1 can carry', () => {
     // A grey-on-grey palette that cannot clear the target at any alpha. The
     // function must say so rather than return a floor that does not work.
@@ -232,6 +285,24 @@ describe('resolveOverlayTheme (FR-085, TC-116)', () => {
     expect(resolved.chromeAlpha).toBe(0.3);
     expect(resolved.surfaceAlpha).toBe(minimumSurfaceAlpha('dark'));
     expect(resolved.textContrast).toBeGreaterThanOrEqual(CONTRAST_TARGET);
+  });
+
+  /**
+   * `textContrast` is the worst over the held set, not over `text` alone.
+   * `muted` is what the floor is pinned to, so reporting `text` overstated the
+   * worst case by about half again and a palette change that pushed `muted`
+   * below the target would have left the number comfortably above it.
+   */
+  it('reports the worst held colour, which is not the one named text', () => {
+    const palette = OVERLAY_PALETTES.dark;
+    const resolved = resolveOverlayTheme(
+      { ...base, mode: 'dark', overlayOpacity: 0.3 },
+      { prefersDark: false, acrylicSupported: false },
+    );
+    const textOnly = worstCaseContrast(palette.text, palette.surface, resolved.surfaceAlpha);
+    const mutedOnly = worstCaseContrast(palette.muted, palette.surface, resolved.surfaceAlpha);
+    expect(mutedOnly).toBeLessThan(textOnly);
+    expect(resolved.textContrast).toBeCloseTo(mutedOnly, 6);
   });
 
   it('falls back to the theme text colour for an unparseable accent', () => {

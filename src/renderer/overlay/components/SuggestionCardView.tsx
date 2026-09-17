@@ -60,7 +60,12 @@ export function SuggestionCardView({ card, depth, slide }: SuggestionCardViewPro
       animate={slide ? { opacity: depthOpacity(depth), y: 0 } : { opacity: depthOpacity(depth) }}
       exit={{ opacity: 0 }}
       transition={{ duration: CARD_EXIT_DURATION_SECONDS, ease: 'easeOut' }}
-      layout={slide}
+      // Position only. A full layout projection measures every card on every
+      // commit, and a card re-renders on each arriving bullet, so three cards
+      // would re-measure per bullet for a reflow that is mostly vertical
+      // anyway: the stack is anchored to the bottom, so an eviction moves
+      // nothing and only a new card shifts the others (NFR-007).
+      layout={slide ? 'position' : false}
     >
       <p
         data-testid="card-question"

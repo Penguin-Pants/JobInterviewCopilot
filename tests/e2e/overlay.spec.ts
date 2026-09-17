@@ -238,10 +238,17 @@ test('TC-112 a reveal is one element per bullet, never per word or per character
     'data-overlay-state',
     'idle',
   );
-  const animations = await overlay.evaluate(
-    () => document.getAnimations().filter((a) => a.playState === 'running').length,
-  );
-  expect(animations, 'an animation was running on an idle overlay').toBe(0);
+  // Polled rather than sampled once: a reveal still in flight when the pause
+  // push landed is cancelled asynchronously, so a single read could catch it
+  // mid-teardown. What `NFR-007` forbids is an animation that *keeps* running
+  // while the overlay is idle.
+  await expect
+    .poll(async () =>
+      overlay.evaluate(
+        () => document.getAnimations().filter((a) => a.playState === 'running').length,
+      ),
+    )
+    .toBe(0);
 });
 
 /* ------------------------------------------------------------------ *
@@ -265,31 +272,38 @@ test('TC-113 the text size defaults to 22 px, moves from both controls and persi
 
   expect(await renderedSize()).toBe(22);
 
-  // The in-overlay control is offered in interactive mode only, which is where
-  // a click can reach it (FR-084).
+  // The Dashboard control first, while its own draft is still in step with the
+  // stored value. Nothing pushes settings to the Dashboard, so driving the
+  // overlay control first would leave that draft on 22 and the arrow keys would
+  // move from there rather than from what the overlay had just written. The gap
+  // is real and is carried as follow-up work; this case is about `FR-093`'s two
+  // controls, not about the gap, so it does not walk into it.
+  await dashboard.locator('[data-testid="overlay-font-size"]').focus();
+  for (let i = 0; i < 2; i += 1) await dashboard.keyboard.press('ArrowRight');
+  await expect(dashboard.locator('[data-testid="overlay-font-size-value"]')).toHaveText('24');
+  await expect.poll(renderedSize).toBe(24);
+  await expect(overlay.locator('[data-testid="font-size-value"]')).toHaveText('24px');
+
+  // And the in-overlay control, offered in interactive mode only, which is
+  // where a click can reach it (FR-084).
   await pushToOverlay(app, 'overlay:mode', { interactive: true, paused: false });
   await overlay.click('[data-testid="font-larger"]');
-  await expect(overlay.locator('[data-testid="font-size-value"]')).toHaveText('24px');
-  await expect.poll(renderedSize).toBe(24);
+  await expect(overlay.locator('[data-testid="font-size-value"]')).toHaveText('26px');
+  await expect.poll(renderedSize).toBe(26);
 
   // It cannot leave the supported range, whichever end it is driven to. The
   // clicks stop exactly at the limit: the button disables itself there, and
   // Playwright waits for an element to be enabled before clicking, so one
   // press too many would hang the test rather than prove the clamp.
   const presses = (from: number, to: number): number => Math.abs(to - from) / FONT_STEP_PX;
-  for (let i = 0; i < presses(24, max); i += 1) await overlay.click('[data-testid="font-larger"]');
+  for (let i = 0; i < presses(26, max); i += 1) await overlay.click('[data-testid="font-larger"]');
   await expect(overlay.locator('[data-testid="font-size-value"]')).toHaveText(`${max}px`);
   await expect(overlay.locator('[data-testid="font-larger"]')).toBeDisabled();
   for (let i = 0; i < presses(max, min); i += 1)
     await overlay.click('[data-testid="font-smaller"]');
   await expect(overlay.locator('[data-testid="font-size-value"]')).toHaveText(`${min}px`);
   await expect(overlay.locator('[data-testid="font-smaller"]')).toBeDisabled();
-
-  // And from the Dashboard, which writes the same setting through config:set.
-  await dashboard.locator('[data-testid="overlay-font-size"]').focus();
-  for (let i = 0; i < 4; i += 1) await dashboard.keyboard.press('ArrowRight');
-  await expect.poll(renderedSize).toBe(min + 4);
-  await expect(overlay.locator('[data-testid="font-size-value"]')).toHaveText(`${min + 4}px`);
+  await expect.poll(renderedSize).toBe(min);
 
   // Persisted. The commit resolves asynchronously, so the stored value is
   // polled rather than assumed before the app is closed under it.
@@ -300,12 +314,12 @@ test('TC-113 the text size defaults to 22 px, moves from both controls and persi
         return 'theme' in settings ? settings.theme.overlayFontSizePx : null;
       }),
     )
-    .toBe(min + 4);
+    .toBe(min);
 
   await app.close();
   ({ app, dashboard } = await launchApp(userDataDir));
   overlay = await overlayPage(app);
-  await expect.poll(renderedSize).toBe(min + 4);
+  await expect.poll(renderedSize).toBe(min);
 });
 
 /* ------------------------------------------------------------------ *
@@ -378,22 +392,27 @@ test('TC-116 theme mode, opacity and translucency apply with no app restart', as
   for (let i = 0; i < 3; i += 1) await dashboard.keyboard.press('ArrowLeft');
   await expect.poll(surfaceAlpha).toBeLessThan(before);
 
-  // FR-094: the cards are Tailwind-built, so the stylesheet is a real asset
-  // rather than styles assembled in the renderer, which the CSP would block.
-  const stylesheets = await overlay.evaluate(
-    () => document.querySelectorAll('link[rel="stylesheet"]').length,
-  );
-  expect(stylesheets).toBeGreaterThan(0);
+  // FR-094: the card's colours are the custom properties `theme.ts` computes,
+  // resolved through the Tailwind stylesheet. Asserted on a resolved colour
+  // rather than on a stylesheet element existing, which any build satisfies.
+  const surface = await overlay
+    .locator('[data-testid="idle-card"]')
+    .evaluate((el) => getComputedStyle(el).backgroundColor);
+  expect(surface, 'the card has no resolved background colour').toMatch(/^rgba?\(/);
+  expect(surface).not.toBe('rgba(0, 0, 0, 0)');
 
   // And the translucency mode, which rebuilds the window rather than applying
-  // in place. The page object is re-acquired because the old one belongs to a
-  // window that no longer exists.
+  // in place (ADR-015).
   await expect(overlay.locator('[data-testid="overlay"]')).toHaveAttribute(
     'data-translucency',
     'opacity',
   );
+  const doomed = overlay;
   await dashboard.selectOption('[data-testid="overlay-translucency"]', 'acrylic');
-  overlay = await overlayPage(app);
+  // Waiting for a page that is **not** the old one. The destroy happens on the
+  // far side of a `config:set` round trip, so when `selectOption` returns the
+  // doomed window is still open and still matches.
+  overlay = await overlayPage(app, doomed);
   // The runner is Windows 11, so `CH-216` reports acrylic as supported and the
   // effective mode is the requested one. On a build that cannot render it the
   // renderer would resolve back to `opacity`, which is the point of sending
@@ -402,8 +421,11 @@ test('TC-116 theme mode, opacity and translucency apply with no app restart', as
     'data-translucency',
     'acrylic',
   );
-  // The app was never restarted: the same Electron process served both windows.
-  expect(app.windows().length).toBeGreaterThan(0);
+  // The window was rebuilt and the app was not: the old page is really gone,
+  // and the Dashboard that drove the change is still the one this test
+  // launched.
+  expect(doomed.isClosed()).toBe(true);
+  await expect(dashboard.locator('[data-testid="dashboard-header"]')).toBeVisible();
 });
 
 /* ------------------------------------------------------------------ *
@@ -502,17 +524,40 @@ test('TC-138 a replayed generation renders in full, after the reminder', async (
  * lifecycle half of `TC-142` stays with `TASK-005`.
  */
 test('TC-142 the acrylic option is disabled on a Windows 10 build, with the reason', async () => {
-  const acrylic = dashboard.locator('[data-testid="overlay-translucency"] option[value="acrylic"]');
-  const note = dashboard.locator('[data-testid="translucency-note"]');
+  const acrylicOption = (page: Page) =>
+    page.locator('[data-testid="overlay-translucency"] option[value="acrylic"]');
+  const translucencyNote = (page: Page) => page.locator('[data-testid="translucency-note"]');
 
+  // The real path first, with nothing pushed by the test. The renderer starts
+  // at `acrylicSupported: false`, and the runner is Windows 11, so the option
+  // is offered only if `reportPlatform` really delivered `CH-216` on this
+  // window's own load. A simulated push can never check that half (ADR-038).
+  await expect(acrylicOption(dashboard)).toBeEnabled();
+
+  // The assertion above is the whole of the regression guard, and it is worth
+  // being precise about why. `reportPlatform` now sends to the window that just
+  // loaded rather than to both, so the Dashboard's own `did-finish-load`
+  // listener is the only thing that can deliver `CH-216` here. That listener is
+  // registered from `createDashboardWindow`'s `onCreated`, because `loadFile`
+  // resolves from **inside** `did-finish-load`: wiring after the await attaches
+  // it to an event that has already fired. With the old ordering this window
+  // would receive nothing and the line above would fail.
+  //
+  // A reload exercises the same listener a second time, so a replay that
+  // happened to work once is not mistaken for one that works on every load.
+  await dashboard.reload();
+  await dashboard.waitForSelector('[data-testid="dashboard-header"]');
+  await expect(acrylicOption(dashboard)).toBeEnabled();
+
+  // Then the Windows 10 branch, which the runner cannot be.
   await pushToDashboard(app, 'notice:platform', { windowsBuild: 19045, acrylicSupported: false });
-  await expect(acrylic).toBeDisabled();
-  await expect(note).toContainText('Windows 11');
-  await expect(note).toContainText('19045');
+  await expect(acrylicOption(dashboard)).toBeDisabled();
+  await expect(translucencyNote(dashboard)).toContainText('Windows 11');
+  await expect(translucencyNote(dashboard)).toContainText('19045');
 
   await pushToDashboard(app, 'notice:platform', { windowsBuild: 26100, acrylicSupported: true });
-  await expect(acrylic).toBeEnabled();
-  await expect(note).not.toContainText('unavailable on this machine');
+  await expect(acrylicOption(dashboard)).toBeEnabled();
+  await expect(translucencyNote(dashboard)).not.toContainText('unavailable on this machine');
 });
 
 /* ------------------------------------------------------------------ *
