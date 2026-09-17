@@ -1,0 +1,207 @@
+/*
+ * Dashboard styling (FR-080, NFR-010).
+ *
+ * The window follows the theme mode setting: `App.tsx` stamps `data-theme` on
+ * the root element for an explicit light or dark choice and removes it for
+ * `system`, which leaves `prefers-color-scheme` to decide. Every colour is a
+ * token defined on bare `:root`, so no value has its only definition inside a
+ * media query.
+ *
+ * Focus is never hidden. A visible focus ring is what makes Tab navigation
+ * usable, which `NFR-010` requires and `TC-124` checks.
+ */
+
+:root {
+  --accent: #6366f1;
+  --bg: #f7f7f8;
+  --surface: #ffffff;
+  --text: #16161a;
+  --muted: #55555f;
+  --border: #d6d6dd;
+  --alert: #9f1239;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --bg: #121216;
+    --surface: #1c1c22;
+    --text: #f2f2f5;
+    --muted: #a8a8b4;
+    --border: #32323c;
+    --alert: #fda4af;
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme='dark'] {
+  --bg: #121216;
+  --surface: #1c1c22;
+  --text: #f2f2f5;
+  --muted: #a8a8b4;
+  --border: #32323c;
+  --alert: #fda4af;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font:
+    14px/1.5 system-ui,
+    'Segoe UI',
+    sans-serif;
+}
+
+main {
+  margin: 0 auto;
+  max-width: 60rem;
+  padding: 1.5rem 1rem 4rem;
+}
+
+h1 {
+  font-size: 1.5rem;
+  margin: 0 0 0.5rem;
+}
+
+h2 {
+  font-size: 1.15rem;
+  margin: 0 0 0.75rem;
+}
+
+h3 {
+  font-size: 1rem;
+  margin: 1rem 0 0.5rem;
+}
+
+header,
+section {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 1.25rem;
+  padding: 1rem;
+}
+
+p {
+  margin: 0.4rem 0;
+}
+
+label {
+  color: var(--muted);
+  display: inline-block;
+  margin: 0.4rem 0.5rem 0.2rem 0;
+}
+
+input,
+select,
+textarea {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font: inherit;
+  padding: 0.3rem 0.4rem;
+}
+
+textarea {
+  display: block;
+  width: 100%;
+}
+
+button {
+  background: var(--accent);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: #ffffff;
+  cursor: pointer;
+  font: inherit;
+  margin: 0.2rem 0.4rem 0.2rem 0;
+  padding: 0.35rem 0.75rem;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  filter: grayscale(0.7);
+  opacity: 0.55;
+}
+
+:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+ul.rows,
+ul.badges {
+  list-style: none;
+  margin: 0.5rem 0;
+  padding: 0;
+}
+
+ul.rows > li {
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.5rem 0;
+}
+
+[role='alert'] {
+  color: var(--alert);
+}
+
+[data-testid='drop-zone'] {
+  border: 2px dashed var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+  text-align: center;
+}
+
+[data-testid='drop-zone'][data-drop-active='true'] {
+  border-color: var(--accent);
+}
+
+[data-testid='delete-confirm'] {
+  border: 2px solid var(--alert);
+  border-radius: 8px;
+  padding: 0.75rem;
+}
+
+table {
+  border-collapse: collapse;
+  margin: 0.5rem 0;
+  width: 100%;
+}
+
+caption {
+  color: var(--muted);
+  text-align: left;
+}
+
+th,
+td {
+  border-bottom: 1px solid var(--border);
+  padding: 0.25rem 0.5rem;
+  text-align: left;
+}
+
+dl {
+  display: grid;
+  gap: 0.25rem 1rem;
+  grid-template-columns: max-content 1fr;
+  margin: 0.5rem 0;
+}
+
+dt {
+  color: var(--muted);
+}
+
+dd {
+  margin: 0;
+}

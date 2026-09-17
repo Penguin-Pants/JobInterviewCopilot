@@ -721,6 +721,7 @@ payload is rejected and logged, never passed through.
 | CH-122 | `overlay:ready` | none | `{ ok: true }` |
 | CH-123 | `doc:retry` | `{ docId, profileId }` | `DocumentRecord` |
 | CH-124 | `model:ensure` | none | `ModelDownloadState` |
+| CH-125 | `doc:pickFiles` | `{ profileId }` | `DocumentRecord[]` |
 
 **Changes made in Milestone 2 (ADR-030, DoD 9).** `CH-121` and `CH-122` landed
 in Milestone 0 and are recorded here for the first time. The rest are new:
@@ -739,6 +740,23 @@ in Milestone 0 and are recorded here for the first time. The rest are new:
 - `CH-124` `model:ensure` is the retry action behind the "embedding model not
   downloaded" state (`ADR-026`, `TC-161`). `CH-214` pushes progress; this channel
   is how the renderer asks for an attempt and learns the outcome.
+
+**Changes made in Milestone 4 (ADR-037, DoD 9).**
+
+- `CH-125` `doc:pickFiles` runs the file dialog in the **main** process and
+  imports what was chosen, so the Add documents button never hands the main
+  process a path a renderer picked. It answers `[]` when the dialog is
+  cancelled, which is not an error. `CH-109` `doc:import` still takes renderer
+  supplied paths, because drag and drop is the one case where only the renderer
+  knows what was dropped. What bounds that path is the extension allowlist in
+  `CMP-06`, not `basename`: `basename` decides the name the copy lands under
+  inside `kb/`, it does not decide what may be read.
+- The Dashboard preload gains one non-channel member,
+  `pathForFile(file): string`, which wraps Electron's `webUtils.getPathForFile`.
+  `File.path` no longer exists in a renderer, so a drop has no other way to name
+  a file on disk, and `webUtils` is reachable from a preload only. It is
+  optional on `CopilotBridge` and absent from the overlay preload, which accepts
+  no drops.
 
 ### Main to renderer, push (`webContents.send`)
 
@@ -1215,6 +1233,14 @@ src/
     audioWorker.ts
   renderer/
     dashboard/         CMP-13
+      main.tsx         mount only
+      App.tsx          the shell, the header and the section order
+      state.ts         one hook per push channel, no second copy of main's state
+      call.ts          the one invoke wrapper, so an IpcError cannot be ignored
+      format.ts        timer, money and size formats
+      styles.css       theme tokens, light and dark
+      sections/        ProviderSetup, CompanyProfiles, SessionHistory,
+                       Hotkeys, CostAndUsage, ConsentReminder, OverlayAppearance
     overlay/           CMP-14
       Overlay.tsx
     audio-worker/      CMP-03b
@@ -1224,6 +1250,7 @@ src/
   shared/
     registry/stt.ts    ADR-022 STT provider + model registry
     registry/llm.ts    ADR-022 LLM provider + model registry
+    registry/selection.ts  TASK-042, the Dashboard's selection rules, pure
     ipc.ts             channel ids + zod schemas
     types.ts           the data model in section 2
 tests/

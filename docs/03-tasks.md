@@ -447,8 +447,9 @@ Two process lessons, both fixed rather than noted:
   handoff.
 - **Deferred to TASK-014:** health keyed by credential, and failover. The error
   classes and `retryable` flag this needs are in place and tested.
-- **Deferred to TASK-042:** the Dashboard model picker that reads the registry.
-  Selection is registry-driven at the model layer; no renderer exists yet.
+- ~~**Deferred to TASK-042:** the Dashboard model picker that reads the
+  registry.~~ **Done in TASK-042.** Provider Setup builds both pickers from
+  `STT_REGISTRY` and `LLM_REGISTRY` and names no provider and no model.
 **Verified by** TC-050, TC-051, TC-052, TC-053, TC-054, TC-056, TC-151, TC-152, TC-153, TC-155, TC-156, TC-159
 
 ### TASK-013 Non-streaming STT class and the Whisper adapter — COMPLETE
@@ -481,7 +482,9 @@ Two process lessons, both fixed rather than noted:
   named only the latency cost.
 - `TC-057`'s "no renderer names Whisper" half is enforced as a real `git grep`,
   verified by planting a violation in a renderer and watching it fail. Its
-  Dashboard half waits on TASK-042, which builds the first model picker.
+  ~~Dashboard half waits on TASK-042, which builds the first model picker.~~
+  **Done in TASK-042.** The badge text and the `NFR-017` sentence are both
+  built from the registry entry by `shared/registry/selection.ts`.
 - `TC-150`'s registry half is covered here. The end-to-end latency harness
   needs the trigger and the LLM, so it lands with TASK-032; real numbers come
   from MW-11.
@@ -540,8 +543,10 @@ Two process lessons, both fixed rather than noted:
 - **Deferred to TASK-040:** calling `noteCleanBoundary` at real turn boundaries,
   and routing live STT and LLM requests through `runFor`. The session manager
   owns both; the contract and its guards are in place and tested.
-- **Deferred to TASK-042:** the Dashboard badge that groups by `credentialId`.
-  The payload carries what it needs.
+- ~~**Deferred to TASK-042:** the Dashboard badge that groups by
+  `credentialId`.~~ **Done in TASK-042.** `healthByCredential` in
+  `ProviderSetup.tsx` renders one badge per credential and shows the worse of
+  the two states when one key serves both capabilities.
 **Verified by** TC-100, TC-101, TC-102, TC-103, TC-143, TC-144, TC-162
 
 ---
@@ -639,12 +644,12 @@ vague intention:
 |---|---|---|
 | `TC-071`'s "`session:start` still succeeds during the download" half | `session:start` does not exist yet. The ingestion-blocking half and the determinate-progress half are covered now, in `tests/integration/rag-model-gate.test.ts` | TASK-044 |
 | Calling `RagEngine.query` from the prompt builder | The trigger and the prompt do not exist yet. `query(profileId, text, k=3)` is the contract they will call | TASK-031 |
-| The Dashboard's document manager: the best-effort hover, the doc-type picker, the error retry button, the "model not downloaded" state, and the `2 MB / 200 chunks` ceiling text `FR-068` requires on screen | No renderer exists. `KB_CEILING`, `withinReembedCeiling`, `CH-123` and `CH-124` are the API it consumes | TASK-042 |
+| ~~The Dashboard's document manager: the best-effort hover, the doc-type picker, the error retry button, the "model not downloaded" state, and the `2 MB / 200 chunks` ceiling text `FR-068` requires on screen~~ **Done in TASK-042.** All five are in `CompanyProfiles.tsx`, and the ceiling sentence is built from `KB_CEILING` rather than written out | `KB_CEILING`, `withinReembedCeiling`, `CH-123` and `CH-124` are the API it consumes | TASK-042 |
 | Prove the unpacked modules load from the **installed** app, not just that the installer builds | The `package` job builds the installer and asserts the `.exe` exists, which it does with or without a correct `asarUnpack` path: nothing launches the packaged app. A `.node` binary cannot be `dlopen`ed from inside an asar and Electron's asar shim does not cover Node's ESM loader, so both failures appear only at runtime. Needs either a packaged smoke launch in the `package` job or a new manual check; `MW-01` to `MW-13` cover none of it | TASK-051 |
 | `readChunkSet` reads one `readFloatLE` per value | Measured at 19 ms for a full 5000-chunk profile against a 2500 ms `NFR-001` p50, loaded once per profile per process and then cached. A typed-array copy is 4.2 ms but adds an endianness branch. Not a defect, so not fixed under a "fix now" heading | TASK-050 |
 | `reconcile` rewrites `profile.json` once per removed record | O(N) writes when a user deletes many files at once. Correct, just wasteful | TASK-050 |
 | A document's bytes are read twice and hashed twice per ingest, and a PDF is held in memory three times over | `rag.ts` reads the file, `convert.ts` reads it again, and `new Uint8Array(buffer)` copies it a third time. Correct, and a 200 MB PDF costs about 600 MB of RSS before pdfjs allocates anything | TASK-050 |
-| `doc:import` takes an unbounded array of renderer-supplied absolute paths | There is no main-process `showOpenDialog` yet, so file selection is renderer-trusted. `basename` already stops the target escaping `kb/`; what is missing is the main-process dialog that should be choosing the paths | TASK-042 |
+| `doc:import` takes an unbounded array of renderer-supplied absolute paths | **Half done in TASK-042.** `CH-125 doc:pickFiles` runs the dialog in the main process and imports what it chose, so the Add documents button supplies no path at all (ADR-037). Drag and drop still reaches `doc:import` with renderer-supplied paths, because only the renderer knows what was dropped; `basename` remains what keeps the target inside `kb/` | TASK-050 |
 | The `RULES` table in `autotag.ts` gives each doc type exactly one filename pattern, so the `break` guarding a second match is unreachable | Harmless, and the guard is correct if a second pattern is ever added | TASK-050 |
 
 ### TASK-020 Document import and conversion — COMPLETE
@@ -692,9 +697,10 @@ vague intention:
   treated a heading as an open line, so `# Experience` swallowed `Acme Corp` and
   the section boundary the chunker splits on was destroyed. Fixed and pinned by a
   case in `tests/unit/convert.test.ts`.
-- **Deferred to TASK-042:** the Dashboard row that shows `extractionQuality:
-  'best-effort'` with its hover explanation. The record carries the field and
-  `TC-062` asserts it; no renderer exists yet.
+- ~~**Deferred to TASK-042:** the Dashboard row that shows `extractionQuality:
+  'best-effort'` with its hover explanation.~~ **Done in TASK-042.** The
+  document row carries a "Best effort text" marker with the explanation on its
+  `title`.
 **Verified by** TC-060, TC-061, TC-062, TC-063, TC-160
 
 ### TASK-021 Chunking — COMPLETE
@@ -780,9 +786,9 @@ vague intention:
   `electron-builder.yml` and the `package` job proves the installer still builds
   with it, but nothing launches the packaged app, so that the binary really loads
   from the unpacked path is unproven and carried to TASK-051.
-- **Deferred to TASK-042:** the "embedding model not downloaded" UI and its retry
-  button. `CH-124` and `CH-214` carry what it needs and `TC-161` asserts the
-  states.
+- ~~**Deferred to TASK-042:** the "embedding model not downloaded" UI and its
+  retry button.~~ **Done in TASK-042.** `ModelGate` in `CompanyProfiles.tsx`
+  renders all four states and calls `CH-124` from the retry button.
 **Verified by** TC-068, TC-069, TC-070, TC-071, TC-161
 
 ### TASK-023 Auto-tagging and user override — COMPLETE
@@ -1049,9 +1055,9 @@ vague intention:
 
 ## Milestone 4 — Sessions, cost, UI
 
-**Status: IN PROGRESS.** `TASK-040`, `TASK-041` and `TASK-044` are complete.
-`TASK-044` is the live loop, split out of `TASK-042` by `ADR-034`. `TASK-042`
-and `TASK-043` are not started.
+**Status: IN PROGRESS.** `TASK-040`, `TASK-041`, `TASK-044` and `TASK-042` are
+complete. `TASK-044` is the live loop, split out of `TASK-042` by `ADR-034`.
+`TASK-043`, the Overlay UI, is the only task of this milestone not started.
 
 ### TASK-040 Session manager and transcript — COMPLETE
 **Traces** FR-088, FR-101, FR-105, FR-106, FR-107, FR-108, ADR-003, ADR-013, ADR-018
@@ -1134,8 +1140,8 @@ instead of stopping.
 | Start audio capture and the STT sessions on `session:start`, feed `CH-206` into the trigger, and answer `onFire` with `RagEngine.query` plus `runGeneration` through the overlay gate | The Session Manager is the file writer, not the orchestrator. The loop is a task of its own, so that the first end-to-end suggestion is provable before any renderer exists (ADR-034) | TASK-044 |
 | `TC-071`'s "`session:start` still succeeds during the model download" half, carried out of Milestone 2 | `session:start` exists now, but the assertion belongs with the live-session harness rather than with a manager that has no audio behind it. Re-carried by TASK-041 for the same reason | TASK-044 |
 | ~~Usage is an in-memory snapshot the Session Manager stores and writes at compaction. Nothing sets it yet~~ **Done in TASK-041.** `CMP-09` calls `noteUsage` on every tick and once more at stop | `noteUsage` is the contract the Cost Meter calls | TASK-041 |
-| `session:read` and `session:delete` scan every profile to find a session by id | The channels name a session but not its profile. One directory read per profile is correct and bounded; carrying `profileId` on the payload would be the faster fix and is a contract change | TASK-042 |
-| Profile switching is not yet disabled in the Dashboard during a live session | `ADR-013` binds the profile at start and the main process already snapshots it, so the transcript is safe. The control that must be disabled is a renderer that does not exist | TASK-042 |
+| `session:read` and `session:delete` scan every profile to find a session by id | The channels name a session but not its profile. One directory read per profile is correct and bounded; carrying `profileId` on the payload would be the faster fix and is a contract change. TASK-042 built Session History on the channels as they are and found no reason to change them: the renderer already knows the profile, so the change is an optimization, not a fix | TASK-050 |
+| ~~Profile switching is not yet disabled in the Dashboard during a live session~~ **Done in TASK-042.** Switching and deleting are both disabled for the whole of a session, and the section says why | `ADR-013` binds the profile at start and the main process already snapshots it | TASK-042 |
 
 ### TASK-041 Cost meter — COMPLETE
 **Traces** FR-103, FR-109, ASM-011
@@ -1205,7 +1211,7 @@ Covered by `tests/unit/cost.test.ts` (36 cases), `tests/integration/cost-session
 |---|---|---|
 | Nothing calls `noteAudio` or `noteGeneration` yet: the meter is wired to the session lifecycle but not to a live loop, so a real session accounts zero | The feed is audio capture, the STT sessions and the generation loop, which is the live-loop work TASK-040 carried and which is now a task of its own (ADR-034) | TASK-044 |
 | `TC-071`'s "`session:start` still succeeds during the model download" half, carried from Milestone 2 and then from TASK-040 | Still the same reason: the assertion belongs with a live-session harness, and there is still no audio behind `session:start` | TASK-044 |
-| The Dashboard's Cost and Usage panel: the live timer, the spend estimate, the price table version beside it and the `estimateIncomplete` label | No renderer exists. `CH-204`, `CH-205` and `estimateIncomplete` are the API it consumes | TASK-042 |
+| ~~The Dashboard's Cost and Usage panel: the live timer, the spend estimate, the price table version beside it and the `estimateIncomplete` label~~ **Done in TASK-042.** All four render from `CH-204`, and nothing in the renderer recomputes an estimate of its own | `CH-204`, `CH-205` and `estimateIncomplete` are the API it consumes | TASK-042 |
 | Usage accounted after `cost.stop()` and before the next `start()` is kept in the maps rather than refused | Harmless: `start()` clears every accumulator, and the only caller that could do it is an in-flight generation the trigger has already aborted. Refusing it would silently lose a late report instead | TASK-050 |
 | `estimate()` is recomputed up to three times per tick | O(models consumed), which is at most four, once a second. Measurably free, and caching it adds an invalidation rule to get wrong | TASK-050 |
 
@@ -1329,9 +1335,9 @@ collaborator's signature implied rather than what the collaborator does.
 | ~~An STT socket that dies mid-session is logged, and not reopened~~ **Done in this task.** The Codex review showed it was not a separate lifecycle but the *only* way a streaming adapter reports a failed connection at all, so leaving it would have left failover dead (ADR-036) | The `error` event is the contract | TASK-044 |
 | A prompt-assembly failure inside an adapter is classified as a provider failure | `buildMessages` runs inside `provider.generate`, so a malformed retrieved chunk surfaces as a generation error and spends the whole retry ladder against a healthy credential. Pre-existing in `runGeneration`; the loop only made it reachable | TASK-050 |
 | ~~A batch STT model's final buffer is billed although it is never posted~~ **Done in this task.** The Codex review found the same mistake with a worse consequence on the streaming path, where a reconnect drops queued chunks, so the boundary moved to `sentBytes` and both cases are right (ADR-036) | `SttSession.sentBytes` is the contract | TASK-044 |
-| Profile switching is not disabled in the Dashboard during a live session | The loop binds `profileId` at start and answers every turn from it, so the transcript and the retrieval are both safe. The control that must be disabled is a renderer that does not exist | TASK-042 |
+| ~~Profile switching is not disabled in the Dashboard during a live session~~ **Done in TASK-042.** `state:session` disables both controls and the section states the reason | The loop binds `profileId` at start and answers every turn from it | TASK-042 |
 
-### TASK-042 Dashboard UI
+### TASK-042 Dashboard UI — COMPLETE
 **Traces** FR-023, FR-024, FR-025, FR-026, FR-027, FR-028, FR-029, FR-030, FR-031, FR-032, FR-038, FR-080, FR-087, FR-088, FR-110, NFR-010, NFR-014
 **Depends on** TASK-003, TASK-004, TASK-014, TASK-025, TASK-041, TASK-044
 **Acceptance criteria**
@@ -1365,6 +1371,120 @@ collaborator's signature implied rather than what the collaborator does.
   default states that an unencrypted local text transcript is kept for the
   session (FR-007, FR-110).
 - Every interactive element is reachable and operable by keyboard.
+
+**Implementation notes**
+
+The Dashboard is `src/renderer/dashboard/`: `App.tsx` holds the header and the
+section order, `state.ts` holds one piece of state per push channel, `call.ts`
+is the only place `window.copilot.invoke` is called, and `sections/` holds the
+six sections `FR-087` names plus an Overlay and appearance section.
+
+- **The six sections are the six `FR-087` names.** The seventh, Overlay and
+  appearance, holds the theme, translucency, opacity and overlay text size
+  `FR-029` requires and the Reset Overlay control `FR-009` has had since
+  Milestone 0. `FR-087` lists sections that must exist, not an exclusive set,
+  and none of the six is a home for a window setting.
+- **Nothing in the renderer names a provider or a model.** Both pickers, the
+  price and streaming columns, the `NFR-017` consequence and the shared-key
+  sentence are built from the registries by `src/shared/registry/selection.ts`.
+  `TC-057`'s `git grep` covers the renderer, and the rules themselves are unit
+  tested in `tests/unit/selection.test.ts` because `src/renderer/**` is verified
+  by E2E and E2E runs on Windows only.
+- **The `NFR-017` consequence is shown before a save, not after one.** Provider
+  Setup edits a draft and saves on an explicit action, so "before the selection
+  is saved" is literal rather than a claim about ordering inside one handler.
+- **`FR-026`'s 10 seconds is enforced in the main process.** No adapter carried
+  a deadline, and a timeout in the renderer cannot stop an in-flight call from
+  saving a key the user has already been told was refused. `validateWithinDeadline`
+  sits in front of `secrets.set`, so a check that does not answer in time saves
+  nothing and returns a named failure (ADR-037).
+- **Drag and drop needed a path source.** `File.path` no longer exists in an
+  Electron renderer, so the Dashboard preload exposes `pathForFile`, wrapping
+  `webUtils.getPathForFile`. It is optional on `CopilotBridge` and absent from
+  the overlay preload, which accepts no drops (ADR-037).
+- **`CH-125 doc:pickFiles` closes half of Milestone 2's renderer-trusted-paths
+  follow-up.** The dialog and the import are one channel, so the Add documents
+  button supplies no path at all. Drag and drop cannot work that way and still
+  uses `CH-109`. What bounds a renderer-supplied source path there is the
+  extension allowlist in `CMP-06`, not `basename`, so the remainder is carried
+  rather than declared closed (ADR-037).
+- **`FR-088` gained an E2E case of its own,** for the live half of the session
+  controls. `TC-120` asserts the idle half, Start offered and Stop unavailable,
+  and two defects lived in the half no case covered.
+- **`FR-029` gained an E2E case of its own.** It is traced by this task, but
+  `TC-030`, `TC-033` and `TC-116` all live elsewhere, so nothing exercised the
+  Dashboard controls that write the theme. The new case is named for the
+  requirement rather than for a TC, because it builds no new test case: the
+  verification map is unchanged.
+- **`src/main/index.ts` is excluded from coverage and cannot be imported by a
+  unit test,** so the three behaviours this task added to it, the profile gate,
+  the validation deadline and the file dialog, are pinned by source guardrails
+  in `tests/unit/guardrails.test.ts`, which is how every other `index.ts`
+  behaviour in this repository is pinned.
+
+**Bugs found while implementing, each pinned by a test**
+
+| Defect | Consequence | Fix |
+|---|---|---|
+| **The Dashboard's first `profile:list` raced bootstrap.** `startKnowledgeBase` is deliberately not awaited, so the windows are created while `ensureActiveProfile` is still running | `profile:list` answered `[]` and `config:get` answered an empty `activeProfileId`. Nothing pushes a profile list, so that empty answer stood for the life of the window: a fresh install showed no profiles and no active profile over a profile that existed | `profile:list` awaits a `profilesReady` promise released the moment the profiles exist, and the renderer loads the profiles before the settings. The promise is created at **module scope**: created inside `bootstrap` it was still the resolved placeholder when the first call arrived, so the gate existed and the race went straight through it |
+| **The replayed pushes could arrive before React subscribed.** `state:session` is replayed on `did-finish-load` and the model state is pushed once at the end of bootstrap. Both are one-shot, and an effect can run after the page's `load` event | A Dashboard that loaded during a live session rendered it as inactive, with Stop Session disabled over a running interview and no way to ask for the real state | `earlyPushes.ts` subscribes at module evaluation, which happens while the document is still loading, and `state.ts` seeds its initial state from what it caught. No new channel |
+| **A settings reload wiped an unsaved draft.** Provider Setup, Hotkeys and Overlay and appearance synced their drafts on the settings object's identity, and `config:get` answers with a fresh object every time | Saving the consent reminder, or any other section, threw away a provider selection or a captured hotkey the user had not applied yet | All three sync on the stored **value** instead |
+| **A drop with no active profile did nothing at all** | Indistinguishable from an import that had silently failed | It says which action to take first |
+| **`pathForFile` was read off the bridge and called detached** | A member of a `contextBridge` object is not guaranteed to stay callable once detached, so drag and drop could throw where it had been tested by hand | Called on the bridge |
+| **The profile gate could be left unreleased, and the wait was unbounded.** `markProfilesReady` was called only from `startKnowledgeBase`, which runs on bootstrap's last line | A bootstrap that threw earlier, a rejected overlay `loadFile` among them, left every `profile:list` awaiting a promise nothing would settle. Neither the router nor the bridge has a timeout, so the invoke never settled and Company Profiles rendered nothing, forever, with no error to show. Strictly worse than the empty list it replaced | The gate is released from bootstrap's failure path too, **and** the wait is bounded: an answer that may be incomplete beats no answer. Pinned by three guardrails |
+| **Every reload discarded its `IpcError` branch.** `invoke` resolves with an error rather than rejecting (CMP-10), and all three reloads acted only on success | A failed `config:get` left "Loading settings…" on screen for the life of the window with nothing to press. A failed `profile:list` read as "there are no profiles yet" over profiles that existed, and a failed `secrets:status` put "(not saved)" beside keys that were saved. The exact class of defect `call.ts` exists to prevent, in the one file that is the state boundary | Every reload records the reason, the shell renders it with a retry, and an unknown secret status says so instead of claiming "not saved" |
+| **A failed `session:list` became "0 sessions" in the delete confirmation** | The dialog told the user nothing would be lost and then deleted every transcript in the profile. `FR-028` asks the confirmation to name the counts; a silent zero is worse than no number | An unreadable list is named as unknown, never as zero |
+| **Session History rendered a failed list as an empty one** | "No sessions in this profile" over transcripts that are still on disk, which contradicts `FR-110`'s promise on screen | The failure is an alert in the group it belongs to, and the section already had the slot for it |
+| **A usage warning was deduped for the life of the window, not per session** | `FR-103` and `FR-109` allow one of each **per session**. The first interview's warning suppressed the second interview's and kept the first one's numbers on screen | Warnings and the live usage are both cleared when a new session starts. A stopped session keeps its final numbers, which are the answer to "what did that cost" |
+| **The shared health badge was not a severity comparison.** Only `using-primary` counted as better | One key serving both capabilities, failing over for one and needing reconfiguration for the other, showed the failover and hid the sentence that said what to fix. The badge also attributed a failed-over capability to the primary's credential, pointing at a key that was working | An explicit severity order, and the credential is the one actually serving |
+| **Every slider step was a write and a read.** The `range` and `color` inputs wrote on each `change`, and each write was followed by a `config:get` that re-seeded the control | Dragging opacity issued a dozen unordered write-then-read pairs. The last *response* won the slider and the last *write* won the disk, and the two need not be the same one, so the control jumped backwards. It also rewrote the settings file once per pointer step | Continuous controls move locally and commit on release. Discrete ones still commit immediately |
+| **"Bound" survived a new capture in Hotkeys** | Capturing a second combination left the previous verdict beside it, so the UI asserted a binding that was not registered: the one thing that section exists to prevent | A capture clears the verdict and the previous rejection |
+| **`model:ensure`'s result was thrown away** | An `IpcError` never reaches `CH-214`, so the retry button re-enabled itself and said nothing | The result is checked and the reason is shown |
+| **The delete confirmation had no session guard** | The dialog is not modal, so a session could start while it was open, and "Delete it" then contradicted the sentence next to it saying deleting was disabled | The confirm button carries the same guard as the row, and a session starting closes the dialog |
+| **The file dialog repeated the supported extensions** | A private copy had already drifted: one supported extension imported by drag and drop and by a copy into `kb/`, and was greyed out in the picker (`FR-060`) | The list is re-exported from the `CMP-06` facade and read |
+| **`ADR-037` and two comments gave `basename` as the reason `doc:import` is safe** | `basename` constrains the destination name, not which file may be read. The real bound is the extension allowlist in `CMP-06`. A true conclusion with the wrong reason would have misled whoever closed the follow-up | Corrected in the ADR, the architecture document and both comments, and the remainder is carried to TASK-050 rather than declared closed |
+| **`FR-063` was cited for drag-and-drop import in three places** | `FR-063` is about chunk metadata. No requirement mandates drag and drop; it comes from this task's acceptance criteria. DoD 8 asks TSDoc to name the requirement it implements, so a wrong one is worse than none | All three cite `TASK-042` |
+| **`TC-125` claimed more than it proved.** It asserted elapsed wall-clock around two pushes it sent itself | It would have passed against a main process whose meter never ticked. The cadence is `TC-108`'s, driven directly in `tests/unit/cost.test.ts` | The Dashboard half is asserted for what it is: both numbers are a pure function of `CH-204`, and the panel does not move between pushes |
+| **`sharedCredentialNotice` named the language half from the speech provider's descriptor** | Right only while the two descriptors sharing a credential are named the same, which is the assumption its own TSDoc promised not to make | Each half is named from its own descriptor, and a test builds the case where they differ |
+| **A side effect inside a React state updater.** The first fix for the slider write storm recorded the pending value from inside `setTheme`'s updater | An updater runs when React processes the update, after the caller has returned, so a discrete control that committed on the next line found nothing pending and wrote **nothing at all**. An updater is also re-invoked under StrictMode, so it is the wrong place for a side effect either way. Found by re-reviewing the fix rather than the original code | The next value is computed in the handler, where one event carries one change |
+| **`FR-029`'s Dashboard controls had no test of any kind.** Its three test cases are two settings-store tests and one overlay test | The commit-on-release path cannot be reached from a store test, and the defect above would have shipped silently | An `FR-029` E2E case drives the theme select and the size control from the keyboard and asserts both survive a reload. It first raced its own write, which is the same asynchrony the section has, so it polls the stored value rather than reloading straight after the key press |
+
+**Defects found by the Codex review on the pull request, and fixed**
+
+Twelve findings, one P1 and eleven P2. Ten were confirmed and fixed; two need a
+contract change and are carried below with the reason.
+
+| Defect | Consequence | Fix |
+|---|---|---|
+| **P1. Stop was disabled while a session started.** One `busy` flag covered both controls | `session:start` pushes `state:session` **active before** awaiting the loop, on purpose, because bringing capture and two sockets up takes long enough that a Dashboard told afterwards would render a live session as inactive. The shared flag re-imposed exactly that on the Stop control, so a slow permission prompt or a wedged socket left a running interview with no way to stop it | Separate start and stop pending flags. Stop is available the moment `state:session` says the session is live (`FR-088`) |
+| **A reopened Dashboard got no model state.** `CH-214` fires only on a change and the initial push happens once at the end of bootstrap | The Dashboard can be closed and reopened. A reopened one rendered neither the model state nor its retry button, which is the only way back when a download is `unavailable` and documents are waiting on it (ADR-026) | `wireDashboardWindow` replays the model state and the health snapshot on every load, beside the session state it already replayed |
+| **A later success erased an earlier failure.** One shared `loadError` slot | A failed `profile:list` followed by a successful `config:get` left an empty profile list with nothing on screen to say why and no retry: the exact failure the error handling was added to prevent, reintroduced by the shape of the fix | One slot per resource, joined for display |
+| **A watcher-adopted document was invisible until it finished.** The reload fired only on `ready` or `error` | A file copied into `kb/` has no record in the current snapshot, so its `pending`, `converting` and `embedding` pushes named an id with no row to render. The user saw nothing at all during a potentially long import | The key is every document's state, not only the settled ones, so the first push gives the row something to show progress on |
+| **A document deleted in `kb/` stayed on screen.** `removeByPath` sends no `CH-213` on purpose and its own comment says "the Dashboard re-reads `profile:list`" | Nothing told it to, so `CMP-06`'s stated expectation was never honored | The profile list is re-read when the window regains focus, which is when a change made in Explorer becomes visible. One in-memory list, not a poll |
+| **Applying one hotkey discarded the other's capture.** The draft synced as a whole | Applying reloads the settings, and both fields were replaced, so a combination captured for the other action and not yet applied was silently lost | Only the actions the user has not captured are synced |
+| **A recovered session stayed invisible.** Crash recovery compacts an orphan transcript after Session History has already listed that profile | Recovery changes neither the profile list nor the session id, so nothing told the Dashboard to look again and the recovered interview was missing until the window was reloaded (`FR-105`, `FR-108`) | Recovery re-pushes the session state, and Session History re-lists on a revision counter rather than on the session id, which does not change |
+| **"Saved" outlived the text it belonged to** in the consent reminder | The user could start a session believing the overlay would show wording the main process has never been given (`FR-032`) | An edit clears the verdict |
+| **A key verdict outlived the key it belonged to.** A passing key clears the field | Typing a replacement left "Key accepted and saved" beside a value the vault has never seen, which reads as though it were already stored (`FR-026`) | Typing resets that credential to idle |
+| **Provider selection was writable during a live session** | `config:set` rebinds the health registry immediately while `CMP-15` keeps the STT sockets it already opened on the old choice. The badge would describe a configuration the audio is not using, and a later failure on an old socket would be raised into a machine bound to a provider that had never been tried | The providers are bound for the session, as the profile is (ADR-013). The save is refused with the reason on screen, and the atomic close-and-reopen that would allow it is carried below |
+| **Two translucency changes could race the overlay rebuild** | The second stores the newer setting but finds no window to act on; the first then finishes building a window from the older settings, leaving the overlay in one mode while the settings and the Dashboard say the other (ADR-015) | The renderer serializes its own commits and disables the control while one is in flight. The main-process half is carried below |
+
+**Deferred, with an owner**
+
+| Item | Why it is not done here | Owner |
+|---|---|---|
+| `FR-025` is enforced in the Dashboard only. `config:set` still accepts a backup from the primary's provider | `FR-025` says the Dashboard must prevent the selection, which it does, and `TC-121` proves it. A second check in `config:set` is defense in depth against a renderer that is already compromised, which is the resilience task's subject | TASK-050 |
+| `FR-089`'s "on Windows 10 the acrylic option must be disabled in the Dashboard with an explanatory note" | No channel carries the Windows build to the Dashboard except `CH-215`, which fires only when the capture-fidelity notice does. `FR-089` is traced by TASK-005 and TASK-043, not by this task, and the option carries the note today without being disabled | TASK-043 |
+| `doc:import` still takes renderer-supplied paths for drag and drop | Unavoidable: only the renderer knows what was dropped. `CH-125` removes the button path and `basename` keeps the target inside `kb/` (ADR-037) | TASK-050 |
+| A read-only way for a renderer to ask for the current session state | `earlyPushes.ts` closes the practical race without a contract change, and a `CH-1xx session:get` is a contract change with no acceptance criterion in this task. It is the right fix if a second renderer ever needs the state mid-session | TASK-050 |
+| Nothing aborts an in-flight key validation once its deadline has passed | `validateWithinDeadline` stops the **save**, which is what `FR-026` is about, but the request and its socket stay alive until they settle, and each retry adds another. Threading an `AbortSignal` through `validateCredential` and every adapter's `validateKey` is a change to four adapters with no acceptance criterion here | TASK-050 |
+| The 10 second deadline is measured before the IPC round trip, so the user sees the answer marginally after 10 s | Measuring from the renderer would need the deadline to live where it cannot stop the save (ADR-037). The overshoot is the round trip, in single-digit milliseconds | TASK-050 |
+| `doc:pickFiles` and `pathForFile` are pinned by source guardrails, not by behavioural tests | Neither a native file dialog nor a real OS drag can be driven from the Playwright Electron runner, and `src/preload/**` is outside the coverage `include`. The guardrails assert what the handler does, including that a cancel answers `[]`; a manual check belongs on the release checklist | TASK-051 |
+| The Dashboard button text is white on the user's chosen accent color, which `config:set` validates only as a six-digit hex | A light accent gives an unreadable button. `NFR-010` is about keyboard operation and `TC-113`'s contrast ratio is the overlay's, so nothing in this task's criteria covers it | TASK-050 |
+| A health state other than `config-required` cannot be attributed to the credential that caused it | `CH-202` carries one `HealthState` per capability, and `stateOf` reports the worst state among every credential that capability depends on, its backup included. Only `config-required` names its credential, which is why the architecture's own "the Dashboard groups by that id" holds for that state and for no other. Where one credential is one capability's backup and another's primary, a `retrying` or `degraded` state is attributed to the serving choice and can name the wrong key. The renderer cannot fix this: the payload has to carry the responsible credential, which is a contract change with no acceptance criterion here (ADR-017) | TASK-050 |
+| A rebuilt overlay is not reconciled against the newest settings | The renderer now serializes its own theme commits, so it can no longer start two rebuilds. A rebuild racing a settings change from anywhere else still ends with a window built from older settings. The fix belongs where the window is rebuilt (ADR-015) | TASK-050 |
+| Changing the STT selection during a live session | Refused in the Dashboard for now, because rebinding health while `CMP-15` holds sockets on the old choice puts the badge and the audio out of step. Allowing it means closing and reopening the STT pair together with the health rebind, at a boundary with no audio in flight, which is the session loop's work and the same shape as the `noteCleanBoundary` item TASK-044 carried | TASK-050 |
+| `session:read` and `session:delete` still scan every profile | Carried from TASK-040. Session History was built on the channels as they stand and found no reason to change them, so it is an optimization | TASK-050 |
+
 **Verified by** TC-120, TC-121, TC-122, TC-123, TC-124, TC-125, TC-154, TC-158
 
 ### TASK-043 Overlay UI

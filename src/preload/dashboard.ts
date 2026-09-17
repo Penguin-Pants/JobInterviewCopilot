@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { CopilotBridge } from '../shared/bridge.js';
 import type { InvokeChannel, PushChannel, PushPayload } from '../shared/ipc.js';
 
@@ -29,6 +29,7 @@ const ALLOWED_INVOKE: readonly InvokeChannel[] = [
   'doc:setType',
   'doc:delete',
   'doc:retry',
+  'doc:pickFiles',
   'model:ensure',
   'session:start',
   'session:stop',
@@ -71,6 +72,26 @@ const bridge: CopilotBridge = {
       listener(payload as PushPayload<typeof channel>);
     ipcRenderer.on(channel, wrapped);
     return () => ipcRenderer.removeListener(channel, wrapped);
+  },
+  /**
+   * Resolve a dropped file to its path on disk (ADR-037, TASK-042).
+   *
+   * `File.path` no longer exists in Electron's renderer, and `webUtils` is
+   * reachable from a preload only, so drag and drop import has nowhere else to
+   * get a path. Exposed on the Dashboard alone: the overlay accepts no drops.
+   *
+   * It resolves, it does not read. The bytes are still opened by the main
+   * process, which is where `doc:import` already validates the path.
+   */
+  pathForFile: (file) => {
+    try {
+      return webUtils.getPathForFile(file);
+    } catch {
+      // A drop that is not a file on disk has no path. An empty string is the
+      // caller's signal to skip it; throwing would abandon the whole drop
+      // because one item of it was a text selection.
+      return '';
+    }
   },
 };
 

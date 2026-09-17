@@ -411,12 +411,47 @@ describe('TASK-040 session wiring', () => {
   /** A renderer that loads mid-session has no channel to ask for CH-201. */
   it('replays the session state to each renderer when it loads', () => {
     const text = source();
+    // Sliced to the end of the handler rather than to a fixed width. The
+    // original 400-character window broke the moment the handler grew a
+    // doc comment, which made the test about the formatting rather than the
+    // behavior.
     const dashboard = text.slice(text.indexOf('function wireDashboardWindow'));
-    expect(dashboard.slice(0, 400)).toContain('pushSessionState()');
+    const onLoad = dashboard.slice(0, dashboard.indexOf("dashboardWindow.on('closed'"));
+    expect(onLoad).toContain('pushSessionState()');
 
     const overlay = text.slice(text.indexOf('function wireOverlayWindow'));
     const didFinishLoad = overlay.slice(0, overlay.indexOf("overlayWindow.on('moved'"));
     expect(didFinishLoad).toContain('pushSessionState()');
+  });
+
+  /**
+   * TASK-042. The Dashboard can be closed and reopened, and a reopened one has
+   * missed every one-shot push with no channel to ask for it. The model state
+   * is the one with a control behind it: without it, a download that is
+   * `unavailable` shows neither its reason nor the retry that is the only way
+   * back for the documents waiting on it (ADR-026).
+   */
+  it('replays the model and provider state to a Dashboard that loads', () => {
+    const text = source();
+    const dashboard = text.slice(text.indexOf('function wireDashboardWindow'));
+    const onLoad = dashboard.slice(0, dashboard.indexOf("dashboardWindow.on('closed'"));
+    expect(onLoad).toContain("'model:download'");
+    expect(onLoad).toContain("'state:providers'");
+  });
+
+  /**
+   * TASK-042. Recovery compacts an orphan transcript after the Dashboard has
+   * already listed that profile's history, and changes neither the profile list
+   * nor the session id, so without a push the recovered interview stayed
+   * invisible until the window was reloaded (FR-105, FR-108).
+   */
+  it('tells the Dashboard to look again once crash recovery has compacted', () => {
+    const text = source();
+    const recovery = text.slice(
+      text.indexOf('recovered sessions from a previous run'),
+      text.indexOf("push(dashboardWindow?.webContents, 'model:download', rag.getModelState())"),
+    );
+    expect(recovery).toContain('pushSessionState()');
   });
 });
 
@@ -953,5 +988,83 @@ describe('TASK-044 live loop wiring', () => {
     const loop = readFileSync('src/main/live.ts', 'utf8');
     expect(loop).not.toMatch(/from '(node:)?fs/);
     expect(loop).not.toMatch(/from 'electron'/);
+  });
+});
+
+/**
+ * TASK-042. Three main-process behaviours the Dashboard depends on.
+ *
+ * `src/main/index.ts` is excluded from coverage and is not importable from a
+ * unit test, so this file is where its behaviour is pinned. Each of these was a
+ * defect found in review rather than a convention.
+ */
+describe('TASK-042 the main-process half of the Dashboard', () => {
+  const source = (): string => readFileSync(join(process.cwd(), 'src', 'main', 'index.ts'), 'utf8');
+
+  function handlerBody(channel: string): string {
+    const text = source();
+    const start = text.indexOf(`router.handle('${channel}'`);
+    expect(start, `${channel} has no handler`).toBeGreaterThan(-1);
+    const next = text.indexOf('router.handle(', start + 1);
+    return text.slice(start, next === -1 ? undefined : next);
+  }
+
+  /**
+   * The Dashboard's first `profile:list` used to race bootstrap and get `[]`,
+   * which stood for the life of the window because nothing pushes a profile
+   * list. The gate that fixed it must exist before the windows do.
+   */
+  it('creates the profile gate at module scope, not inside bootstrap', () => {
+    const text = source();
+    const gate = text.indexOf('const profilesReady: Promise<void>');
+    const boot = text.indexOf('async function bootstrap(');
+    expect(gate, 'profilesReady is not declared').toBeGreaterThan(-1);
+    expect(gate, 'the gate is created after bootstrap is defined').toBeLessThan(boot);
+    // A promise assigned inside bootstrap is still the placeholder when the
+    // first call arrives, so the gate exists and the race goes through it.
+    expect(text).not.toMatch(/profilesReady = new Promise/);
+  });
+
+  it('waits for the gate in profile:list, and bounds the wait', () => {
+    expect(handlerBody('profile:list')).toContain('profilesReadyWithin');
+    // The router has no timeout and neither does the renderer's bridge, so an
+    // unreleased gate would be an invoke that never settles: Company Profiles
+    // renders nothing, forever, with no error to show.
+    expect(source()).toContain('Promise.race([profilesReady, deadline])');
+  });
+
+  it('releases the gate when bootstrap itself fails', () => {
+    const text = source();
+    const call = text.slice(
+      text.indexOf('void bootstrap()'),
+      text.indexOf('async function bootstrap('),
+    );
+    expect(call, 'a bootstrap failure leaves profile:list awaiting forever').toContain(
+      'markProfilesReady()',
+    );
+  });
+
+  /** FR-026: an inline pass or fail within 10 seconds, every time. */
+  it('bounds key validation in front of the save, not in the renderer', () => {
+    const text = source();
+    expect(handlerBody('secrets:set')).toContain('validateWithinDeadline');
+    expect(text).toContain('KEY_VALIDATION_DEADLINE_MS = 10_000');
+    // A renderer-side timeout cannot stop an in-flight call from saving a key
+    // the user has already been told was refused.
+    expect(text).toMatch(/Promise\.race\(\[validateCredential\(credentialId, key\), deadline\]\)/);
+  });
+
+  /** ADR-037: the dialog runs in main, and it asks the engine what it accepts. */
+  it('picks files in the main process, for a profile it has asserted', () => {
+    const body = handlerBody('doc:pickFiles');
+    expect(body).toContain('assertProfile(profileId)');
+    expect(body).toContain('dialog.showOpenDialog');
+    // A cancel is an answer, not a failure, and the Dashboard must not render
+    // it as one.
+    expect(body).toContain('if (picked.canceled || picked.filePaths.length === 0) return []');
+    // The extension list is read, never repeated: a private copy had already
+    // drifted and hid one supported extension from the picker.
+    expect(body).toContain('SUPPORTED_EXTENSIONS');
+    expect(body).not.toMatch(/extensions: \['/);
   });
 });
