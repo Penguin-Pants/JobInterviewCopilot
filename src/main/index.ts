@@ -599,6 +599,32 @@ function wireOverlayWindow(): void {
     reportCaptureFidelity(overlayWindow?.webContents);
   });
 
+  /**
+   * A document reload closes the gate as surely as the window closing does
+   * (FR-008, ADR-016).
+   *
+   * `closed` fires when the **window** goes away. It does not fire when the
+   * document is replaced under a window that stays, and the gate's invariant is
+   * about the document: `ready` means *this renderer* has painted the consent
+   * reminder. A new document reaches `overlay:ready` two animation frames after
+   * it mounts, and a gate still holding the old document's answer delivers into
+   * that interval: the messages reach a page with no subscription, `delivered`
+   * advances past them, and the begin is then never replayed, so the lines that
+   * follow arrive with no card to render them on.
+   *
+   * Nothing in this app reloads the overlay today, which is why this is an
+   * invariant repaired rather than a bug reproduced. A renderer that crashes, a
+   * reload from tooling, and `TC-115`, which reloads the overlay to pick up an
+   * emulated `prefers-reduced-motion`, all take the same path.
+   *
+   * `noteClosed` is exactly the right call: it keeps the card and resets only
+   * how much of it this renderer has been sent, so a generation streaming
+   * across the reload is replayed in full to the new document (ADR-015).
+   */
+  overlayWindow.webContents.on('did-start-loading', () => {
+    overlayGate.noteClosed();
+  });
+
   overlayWindow.on('moved', () => {
     if (overlayWindow) saveOverlayPosition(overlayWindow, config);
   });
@@ -978,6 +1004,11 @@ function registerIpcHandlers(): void {
       assertProfile(patch.activeProfileId);
     }
     const after = config.set(patch);
+    // A queued `CH-126` write is older than this one, and the throttle would
+    // otherwise re-read the theme this call just stored and put its own stale
+    // size back over it, reversing the user's last action. Only the newest
+    // writer may commit, so the pending one is dropped rather than delayed.
+    if (patch.theme !== undefined) overlayFontSizeWrites.cancel();
     await applyThemeChange(before, after);
     bindHealthFromSettings(after);
     // The trigger holds its own copy of the gap and the guard, so a settings

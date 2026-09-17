@@ -240,6 +240,59 @@ describe('ADR-016 consent renders before readiness is reported', () => {
 });
 
 /**
+ * FR-008, ADR-016, TASK-043. The readiness gate is closed by a document
+ * reload, not only by the window closing.
+ *
+ * `closed` fires when the window goes away. The gate's invariant is about the
+ * **document**: `ready` means this renderer has painted the consent reminder.
+ * A document replaced under a window that stays leaves the gate holding the old
+ * document's answer, and the two animation frames before the new one reports
+ * ready are an interval the gate would deliver into: `delivered` advances past
+ * messages nothing received, and the begin is then never replayed.
+ *
+ * Pinned here because `src/main/index.ts` is excluded from coverage and cannot
+ * be imported by a unit test, which is how every other behaviour in that file
+ * is pinned.
+ */
+describe('FR-008 an overlay reload re-arms the readiness gate', () => {
+  const source = readFileSync('src/main/index.ts', 'utf8');
+
+  it('closes the gate when the overlay document starts loading', () => {
+    const wiring = source.slice(
+      source.indexOf('function wireOverlayWindow'),
+      source.indexOf('function registerHotkeys'),
+    );
+    expect(wiring).toContain("overlayWindow.webContents.on('did-start-loading'");
+    const handler = wiring.slice(wiring.indexOf("on('did-start-loading'"));
+    expect(handler.slice(0, 200)).toContain('overlayGate.noteClosed()');
+  });
+
+  it('still closes it when the window itself goes away', () => {
+    const wiring = source.slice(
+      source.indexOf('function wireOverlayWindow'),
+      source.indexOf('function registerHotkeys'),
+    );
+    const handler = wiring.slice(wiring.indexOf("overlayWindow.on('closed'"));
+    expect(handler.slice(0, 400)).toContain('overlayGate.noteClosed()');
+  });
+
+  /**
+   * FR-093, TASK-043. A queued `CH-126` write is older than any `config:set`
+   * that follows it, and the throttle re-reads the theme when it fires. Without
+   * this the overlay's stale size would be written back over a Dashboard change
+   * made in the meantime, reversing the user's last action.
+   */
+  it('drops a queued overlay font write when a newer theme is stored', () => {
+    const handler = source.slice(
+      source.indexOf("router.handle('config:set'"),
+      source.indexOf("router.handle('secrets:set'"),
+    );
+    expect(handler).toContain('overlayFontSizeWrites.cancel()');
+    expect(handler).toMatch(/patch\.theme !== undefined/);
+  });
+});
+
+/**
  * FR-089, TASK-043. The acrylic build number is written in two places.
  *
  * `MIN_BUILD_FOR_ACRYLIC` in `src/main/windows.ts` is the authority, and the
