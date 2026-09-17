@@ -265,15 +265,21 @@ On every pull request, in order, fail fast:
 6. `npm run test:integration`
 7. `npm run test:e2e` on a `windows-latest` runner
 8. `npm run build`
+9. `npm run package`, on a `windows-latest` runner. Listed as a nightly when
+   this section was written; it has run on every pull request since Milestone 0
+   as the `package` job, which is stricter. It builds the installer and then
+   asserts the `.exe` exists, because the build succeeding and the artifact
+   existing are two different claims.
 
-Nightly, additionally: `npm run test:soak` (TC-131) and `npm run package`.
+Nightly, additionally: `npm run test:soak` (TC-131).
 
 `.github/workflows/nightly.yml` runs the soak on a schedule and on demand. It
 has its own config, `vitest.soak.config.ts`, rather than a third project in
 `vitest.config.ts`: `vitest run --coverage` runs every project, and a pull
 request must not wait an hour for it. `SOAK_MINUTES` shortens the run for a
-local smoke check and defaults to the full hour `NFR-004` names. The `package`
-half of this line is still outstanding and belongs to TASK-051.
+local smoke check and defaults to the full hour `NFR-004` names. It treats the
+empty string as unset, which is what a `workflow_dispatch` input evaluates to
+on a scheduled run.
 
 ---
 

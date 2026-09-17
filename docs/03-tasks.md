@@ -1737,9 +1737,12 @@ Deferred, deliberately, and not part of this task:
 - `MW-06`'s end-to-end `NFR-001` numbers need real providers on a real
   connection. `TC-133` measures the app's own share of that budget and records
   it; the rest is `TASK-051`'s release checklist.
-- The nightly `npm run package` job named in `04-test-strategy.md` section 5.
-  `.github/workflows/nightly.yml` carries the soak only. Packaging is
-  `TASK-051`'s first acceptance criterion and the job belongs with it.
+- Nothing, for packaging. `04-test-strategy.md` section 5 lists `npm run
+  package` as a nightly, but the `package` job in `ci.yml` has built and
+  verified the installer on **every pull request** since Milestone 0, which is
+  stricter than the line asks for. Section 5 is corrected rather than a job
+  added. Whether the installer runs on a clean Windows 11 machine is still
+  `TASK-051`'s, and no CI stage covers it (`04-test-strategy.md` section 7).
 - `NFR-005`, average CPU under 15 percent, is traced to this task and is not
   measured here. A CI runner's CPU share is not the 4-core machine the
   requirement names, so the number would be meaningless. It stays with the
@@ -1764,9 +1767,11 @@ Deferred, deliberately, and not part of this task:
 **Status: NOT STARTED.** Three follow-ups handed over by `TASK-050`, to be
 closed by this task rather than tracked separately:
 
-- Add the nightly `npm run package` job to `.github/workflows/nightly.yml`.
-  The workflow exists and carries `TC-131`'s soak; the packaging half of
-  `04-test-strategy.md` section 5 is still missing.
+- Confirm the installer installs and launches on a clean Windows 11 virtual
+  machine. `ci.yml`'s `package` job builds it and asserts the `.exe` exists on
+  every pull request, which is as far as CI goes: section 7 records the clean
+  machine as deliberately untested, and this task's second acceptance criterion
+  is the only thing that closes it.
 - Record `MW-06`'s and `MW-11`'s end-to-end latency numbers against the tag.
   `TC-133` measures the app's own share of the `NFR-001` budget in CI and
   records it; neither the real network nor a real provider is reachable there.
