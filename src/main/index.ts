@@ -31,7 +31,9 @@ import { LiveSessionLoop } from './live.js';
 import { getLogger, initLogger } from './logger.js';
 import { OverlayGate, type GatedMessage } from './overlay-gate.js';
 import { RagEngine, SUPPORTED_EXTENSIONS } from './rag.js';
+import { installGlobalHandlers, useAppOwnedTempDir } from './resilience.js';
 import { SecretVaultStore } from './secrets.js';
+import { SessionNoticeHolder } from './session-notice.js';
 import {
   SessionManager,
   SessionStartRefused,
@@ -85,6 +87,15 @@ let overlayGate: OverlayGate;
 let sessions: SessionManager;
 let cost: CostMeter;
 let live: LiveSessionLoop;
+
+/**
+ * The fault standing against the live session (`CH-217`, NFR-008, TASK-050).
+ *
+ * Constructed at module scope rather than in `bootstrap`, alongside the windows
+ * it outlives: a Dashboard closed and reopened mid-session must get its warning
+ * back, and holding it anywhere the window owns would lose it with the window.
+ */
+const sessionNotices = new SessionNoticeHolder();
 
 /**
  * Resolves when crash recovery has finished (`FR-105`, `FR-108`).
@@ -182,9 +193,13 @@ async function bootstrap(): Promise<void> {
   const userData = app.getPath('userData');
   initLogger({ dir: join(userData, 'logs'), console: !app.isPackaged });
 
-  // A live session must survive a stray rejection (NFR-009).
-  process.on('uncaughtException', (err) => getLogger().error('uncaughtException', err));
-  process.on('unhandledRejection', (reason) => getLogger().error('unhandledRejection', reason));
+  // A live session must survive a stray rejection (NFR-009, TASK-050).
+  installGlobalHandlers({ onFault: (kind, value) => getLogger().error(kind, value) });
+
+  // Before anything that could spool a request body. Every temporary file a
+  // dependency writes now lands somewhere the app owns, which is what lets
+  // TC-137 assert the place is empty at session end (NFR-002, ADR-019).
+  useAppOwnedTempDir(userData);
 
   config = new ConfigStore({
     dir: userData,
@@ -327,7 +342,22 @@ async function bootstrap(): Promise<void> {
     // batch window, because health can put the session on the backup and the
     // two models can disagree about both.
     onSttChoice: (choice) => trigger.setConfig(triggerConfigFrom(config.get(), choice)),
-    onError: (message, detail) => getLogger().error(message, detail),
+    // Logged and shown. Every fault CMP-15 survives used to reach main.log and
+    // stop there, which left the one that matters most invisible: a session
+    // that starts with no usable speech-to-text model runs, records and bills
+    // while transcribing nothing. NFR-008 requires a session start with no
+    // network to warn, and a log file the user will never open is not a
+    // warning (CH-217, TASK-050, TC-132).
+    //
+    // The detail stays in the log. It is a provider error object, and the
+    // renderer has no use for one it cannot act on (FR-034, NFR-003).
+    onError: (message, detail) => {
+      getLogger().error(message, detail);
+      // Retained as well as pushed, so a Dashboard closed and reopened during
+      // the session gets it back (CH-217, TC-132).
+      const notice = sessionNotices.note(sessions.current?.id, message);
+      if (notice) push(dashboardWindow?.webContents, 'notice:session', notice);
+    },
     onInfo: (message, detail) => getLogger().info(message, detail),
   });
 
@@ -565,6 +595,11 @@ function wireDashboardWindow(): void {
     // was therefore missing from every reopened window.
     reportPlatform(dashboardWindow?.webContents);
     reportCaptureFidelity(dashboardWindow?.webContents);
+    // And the fault standing against the session now running. Without this a
+    // Dashboard reopened mid-session renders it as active with no warning
+    // beside it, which is the silent failure CH-217 exists to end (NFR-008).
+    const notice = sessionNotices.noticeFor(sessions.current?.id);
+    if (notice) push(dashboardWindow?.webContents, 'notice:session', notice);
   });
   dashboardWindow.on('closed', () => {
     dashboardWindow = null;

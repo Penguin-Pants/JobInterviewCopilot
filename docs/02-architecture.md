@@ -779,6 +779,7 @@ in Milestone 0 and are recorded here for the first time. The rest are new:
 | CH-214 | `model:download` | dashboard | `ModelDownloadState` |
 | CH-215 | `notice:captureFidelity` | both | `{ windowsBuild, message }` |
 | CH-216 | `notice:platform` | both | `{ windowsBuild, acrylicSupported }` |
+| CH-217 | `notice:session` | dashboard | `{ sessionId, message }` |
 
 `CH-215` landed in Milestone 0 with `NFR-012`, the pre-19041 capture warning
 shown once per session next to the consent reminder. It is recorded here for the
@@ -801,6 +802,20 @@ directions, so a channel cannot be added in code and left undocumented again.
   `acrylicSupported` to know whether the acrylic it asked for is the window it
   actually got, because `overlayWindowOptions` silently falls back to a
   transparent window when it cannot be rendered.
+- `CH-217` `notice:session` is new (TASK-050). `CMP-15` reports every failure it
+  survives through `onError`, and all of it went to `main.log` and stopped
+  there. One of those failures must not: a session that starts with no usable
+  speech-to-text model runs, records and bills while transcribing nothing.
+  `NFR-008` requires a session start with no network to **warn**, and a log file
+  the user will never open is not a warning. It is not on the health badges,
+  which `ADR-017` keys by credential and which describe a provider that is
+  failing; a model missing from the registry and a key that was never saved
+  never reach a provider, and routing them through `runFor` would take a good
+  key to `CONFIG_REQUIRED` (`ADR-024`). Dashboard only: the overlay never shows
+  a failure (`FR-076`). The payload names its session so the renderer shows it
+  only while that session is live, which is what keeps it clear of the session
+  boundary: `session:start` pushes `CH-201` before it brings the loop up, so a
+  clear-on-boundary effect would race the notice and wipe it.
 - `CH-126` `overlay:setFontSize` is new. `FR-093` requires the overlay's text
   size to be adjustable from an in-overlay control and to persist. `config:set`
   cannot be the way: the overlay's invoke allowlist exists so a compromised

@@ -170,12 +170,33 @@ function healthByCredential(
   return [...grouped.values()];
 }
 
+/**
+ * A `CMP-15` message as a sentence (`CH-217`).
+ *
+ * The loop writes for the log, where a lowercase fragment is the convention, and
+ * `CH-217` carries the same string to the screen rather than a second one that
+ * could drift from it. Capitalizing here is the whole of the difference.
+ */
+function sentence(message: string): string {
+  return message.charAt(0).toUpperCase() + message.slice(1);
+}
+
 export interface ProviderSetupProps {
   settings: Settings;
   secrets: SecretStatus | null;
   providers: ProvidersState | null;
   /** A live session binds the providers, as it binds the profile (ADR-013). */
   sessionActive: boolean;
+  /**
+   * A fault in the session now running, or null (`CH-217`, NFR-008).
+   *
+   * It sits here rather than beside the session controls because every fault
+   * this channel carries is about a provider that could not be used, which is
+   * what this panel is for. Unlike the health badges it is not keyed by
+   * credential: a model missing from the registry and a key that was never
+   * saved never reach a provider at all (ADR-024).
+   */
+  sessionNotice: string | null;
   onSettingsChanged: () => Promise<void>;
   onSecretsChanged: () => Promise<void>;
 }
@@ -185,6 +206,7 @@ export function ProviderSetup({
   secrets,
   providers,
   sessionActive,
+  sessionNotice,
   onSettingsChanged,
   onSecretsChanged,
 }: ProviderSetupProps): JSX.Element {
@@ -322,6 +344,12 @@ export function ProviderSetup({
       <h2 id="provider-setup-heading">Provider Setup</h2>
 
       <p data-testid="shared-credential-notice">{sharedCredentialNotice()}</p>
+
+      {sessionNotice ? (
+        <p role="alert" data-testid="session-notice">
+          {sentence(sessionNotice)} The session is still running.
+        </p>
+      ) : null}
 
       {providers ? (
         <ul data-testid="provider-health" className="badges">

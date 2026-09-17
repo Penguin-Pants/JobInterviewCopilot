@@ -1675,7 +1675,9 @@ a comment or a component that claimed a guarantee the code does not make.
 
 ## Milestone 5 — Hardening and release
 
-### TASK-050 Global resilience
+**Status: IN PROGRESS.** `TASK-050` is complete. `TASK-051` has not started.
+
+### TASK-050 Global resilience — COMPLETE
 **Traces** NFR-001, NFR-002, NFR-004, NFR-005, NFR-008, NFR-009
 **Depends on** all of Milestone 4
 **Acceptance criteria**
@@ -1683,7 +1685,8 @@ a comment or a component that claimed a guarantee the code does not make.
   main log and continue. A test injects a rejection during a session and
   asserts the session stays active.
 - A 60-minute soak test with synthetic transcript events keeps main-process RSS
-  under 600 MB with no upward trend over the last 30 minutes.
+  under 600 MB with no upward trend over the last 30 minutes (`NFR-004`), and
+  mean main-process CPU under 15 percent of one core (`NFR-005`).
 - A filesystem write monitor runs a synthetic session with Whisper active and
   asserts no write contains PCM. The app-owned temp directory is empty at
   session end (NFR-002, ADR-019).
@@ -1692,7 +1695,62 @@ a comment or a component that claimed a guarantee the code does not make.
 - App-side overhead on the turn-end to first-line path is under 150 ms with
   scripted fakes (TC-133). The end-to-end `NFR-001` budget (p50 under 2.5 s,
   p95 under 4.0 s) is measured and recorded by MW-06 before release.
-**Verified by** TC-130, TC-131, TC-132, TC-133, TC-137, MW-06
+**Verified by** TC-130, TC-131, TC-132, TC-133, TC-137, MW-06, MW-14
+
+**Status: COMPLETE, 2026-09-17.** `npm run typecheck`, `npm run lint`,
+`npm run format:check`, `npm run licenses`, `npm run trace` and 913 unit and
+integration tests all pass. Line coverage is 96.3 percent against an 80 percent
+floor; `src/main/resilience.ts`, the one new production module, is at 100
+percent lines.
+
+What landed:
+
+| Criterion | Where it lives | Verified |
+|---|---|---|
+| Global handlers log and continue | `src/main/resilience.ts`, called from `bootstrap` | `TC-130`, `tests/integration/resilience.test.ts` |
+| 60-minute soak, RSS under 600 MB, no upward trend | `tests/soak/session-soak.test.ts`, `vitest.soak.config.ts`, `npm run test:soak` | `TC-131`, nightly workflow |
+| Filesystem write monitor, no PCM, temp directory empty | `tests/fakes/fs-monitor.ts`, `tests/integration/audio-privacy.test.ts` | `TC-137` |
+| Offline with a cached model; session start warns | `tests/integration/offline.test.ts`, `CH-217` | `TC-132` |
+| App-side overhead under 150 ms | `tests/integration/latency.test.ts` | `TC-133` |
+
+Three things were found during the task rather than planned into it, and all
+three are landed rather than deferred:
+
+- **The handlers were in `index.ts` and therefore untestable.** `TC-130` asks
+  for a test that injects a rejection during a session. `index.ts` cannot be
+  imported without an Electron app, and it is the one file excluded from
+  coverage. The handlers moved to `src/main/resilience.ts` behind an injected
+  emitter, so the wiring, the real runtime behavior and the in-session behavior
+  are each asserted separately.
+- **`ADR-019`'s temp-directory clause had never been implemented.** The ADR says
+  the app points `TMPDIR` and `TEMP` at a directory it owns so a third-party
+  spool can be caught. Nothing did. `useAppOwnedTempDir` does, and `TC-137`
+  asserts the directory is empty at session end with `os.tmpdir()` genuinely
+  pointed at it, so the assertion can fail.
+- **The transcription warning reached `main.log` and stopped there.** `CMP-15`
+  reported it through `onError`, which `index.ts` only logged. `NFR-008`
+  requires a session start with no network to *warn*, and a log file the user
+  will never open is not a warning. `CH-217` `notice:session` carries it to the
+  Dashboard, tagged with the session it belongs to.
+
+Deferred, deliberately, and not part of this task:
+
+- `MW-06`'s end-to-end `NFR-001` numbers need real providers on a real
+  connection. `TC-133` measures the app's own share of that budget and records
+  it; the rest is `TASK-051`'s release checklist.
+- Nothing, for packaging. `04-test-strategy.md` section 5 lists `npm run
+  package` as a nightly, but the `package` job in `ci.yml` has built and
+  verified the installer on **every pull request** since Milestone 0, which is
+  stricter than the line asks for. Section 5 is corrected rather than a job
+  added. Whether the installer runs on a clean Windows 11 machine is still
+  `TASK-051`'s, and no CI stage covers it (`04-test-strategy.md` section 7).
+- Nothing, for `NFR-005`. The soak measures mean main-process CPU as a share of
+  one core and asserts the 15 percent ceiling; it read 2.1 percent mean and 2.8
+  percent peak on a two-minute run. What it cannot be is the *all-processes*
+  figure on a 4-core machine, because the soak runs no renderers and runs inside
+  the test runner. Both differences inflate the number rather than flatter it, so
+  the CI measurement is evidence rather than proof, and `MW-14` takes the whole-app
+  number on real hardware.
 
 ### TASK-051 Release pipeline
 **Traces** NFR-011, NFR-013, NFR-015
@@ -1709,3 +1767,18 @@ a comment or a component that claimed a guarantee the code does not make.
   MW-11 latency numbers included. MW-12 confirms a documented limitation and
   cannot fail the release.
 **Verified by** TC-001, MW-01 to MW-13
+
+**Status: NOT STARTED.** Three follow-ups handed over by `TASK-050`, to be
+closed by this task rather than tracked separately:
+
+- Confirm the installer installs and launches on a clean Windows 11 virtual
+  machine. `ci.yml`'s `package` job builds it and asserts the `.exe` exists on
+  every pull request, which is as far as CI goes: section 7 records the clean
+  machine as deliberately untested, and this task's second acceptance criterion
+  is the only thing that closes it.
+- Record `MW-06`'s and `MW-11`'s end-to-end latency numbers against the tag.
+  `TC-133` measures the app's own share of the `NFR-001` budget in CI and
+  records it; neither the real network nor a real provider is reachable there.
+- Record `MW-14`, the all-processes CPU figure, against the tag. `TC-131`
+  measures the main process in CI and holds the ceiling; the whole-app number on
+  a 4-core machine is only observable on real hardware.

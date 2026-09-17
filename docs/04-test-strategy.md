@@ -197,7 +197,7 @@ All trigger tests run on fake timers with the pure state-machine module.
 | ID | Level | Case | Pass condition |
 |---|---|---|---|
 | TC-130 | I | Unhandled rejection | An injected unhandled rejection during a session is logged and the session stays active |
-| TC-131 | I | Soak | A 60-minute synthetic session keeps main-process RSS under 600 MB with no upward trend over the last 30 minutes |
+| TC-131 | I | Soak | A 60-minute synthetic session keeps main-process RSS under 600 MB with no upward trend over the last 30 minutes (`NFR-004`), and mean main-process CPU under 15 percent of one core (`NFR-005`). The all-processes figure on real hardware is MW-14 |
 | TC-132 | I | Offline with a cached model | With the network disabled **and the model already cached**, the app starts, imports documents and embeds. `session:start` warns that transcription is unavailable |
 | TC-133 | I | Latency harness | With scripted fakes at fixed delays, the measured turn-end to first-line path adds under 150 ms of app-side overhead. Real end-to-end `NFR-001` numbers come from MW-06 |
 
@@ -265,8 +265,21 @@ On every pull request, in order, fail fast:
 6. `npm run test:integration`
 7. `npm run test:e2e` on a `windows-latest` runner
 8. `npm run build`
+9. `npm run package`, on a `windows-latest` runner. Listed as a nightly when
+   this section was written; it has run on every pull request since Milestone 0
+   as the `package` job, which is stricter. It builds the installer and then
+   asserts the `.exe` exists, because the build succeeding and the artifact
+   existing are two different claims.
 
-Nightly, additionally: `npm run test:soak` (TC-131) and `npm run package`.
+Nightly, additionally: `npm run test:soak` (TC-131).
+
+`.github/workflows/nightly.yml` runs the soak on a schedule and on demand. It
+has its own config, `vitest.soak.config.ts`, rather than a third project in
+`vitest.config.ts`: `vitest run --coverage` runs every project, and a pull
+request must not wait an hour for it. `SOAK_MINUTES` shortens the run for a
+local smoke check and defaults to the full hour `NFR-004` names. It treats the
+empty string as unset, which is what a `workflow_dispatch` input evaluates to
+on a scheduled run.
 
 ---
 
@@ -288,6 +301,7 @@ Record the result against the release tag. A failure blocks the release.
 | MW-09 | Unplug the network mid-session | The Dashboard badge turns red, the overlay stays idle with no error card, and the session continues when the network returns |
 | MW-10 | Kill the process mid-session, relaunch | The transcript up to the last flushed entry appears in Session History as `crash-recovered`. No torn line breaks recovery, and the next session starts without a stale lock |
 | MW-11 | Non-streaming rehearsal with `whisper-1`, 20 turns | Latency is inside `NFR-017` (p50 under 7.0 s, p95 under 10.0 s) and the badge states the latency cost |
+| MW-14 | Watch Task Manager across a 20-minute rehearsal | Average CPU across every app process stays under 15 percent of one core on a 4-core machine, excluding the first-run model download (`NFR-005`). TC-131 measures the main process in CI; this is the whole-app number on real hardware |
 | MW-13 | Rehearsal on each streaming STT provider, 10 turns each: Deepgram `nova-3`, OpenAI `gpt-4o-transcribe`, ElevenLabs `scribe-v2-realtime` | All three transcribe real interviewer speech correctly and all three stay inside `NFR-001` |
 | MW-12 | Play music and fire a desktop notification during a session | Both are transcribed onto the interviewer stream, as `ADR-021` predicts. The session-prep note advising the user to close other audio sources is present. This check confirms the documented limitation, it does not fail on it |
 

@@ -114,7 +114,7 @@ is broken. A test that merely runs nearby code does not count.
 | NFR-002 | TC-042, TC-137 |
 | NFR-003 | TC-022, TC-023, TC-139 |
 | NFR-004 | TC-131 |
-| NFR-005 | TC-131 |
+| NFR-005 | TC-131, MW-14 |
 | NFR-006 | TC-001 |
 | NFR-007 | TC-112 |
 | NFR-008 | TC-132, TC-161 |

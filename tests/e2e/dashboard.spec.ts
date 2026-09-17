@@ -365,6 +365,49 @@ test('TC-125 the timer and the spend estimate render every usage tick, and inven
 });
 
 /* ------------------------------------------------------------------ *
+ * TC-132  the session warning reaches the screen
+ * ------------------------------------------------------------------ */
+
+test('TC-132 a session-level fault is shown, and only while its session is live', async () => {
+  const notice = dashboard.locator('[data-testid="session-notice"]');
+  await expect(notice).toHaveCount(0);
+
+  await pushToDashboard(app, 'state:session', {
+    active: true,
+    sessionId: 'e2e-notice-1',
+    profileName: 'My profile',
+    startedAt: '2026-01-02T10:00:00.000Z',
+    paused: false,
+  });
+
+  // The sentence CMP-15 produces when no speech-to-text model can be opened.
+  // NFR-008 requires a session start with no network to warn, and until CH-217
+  // existed this reached main.log and stopped there.
+  const message =
+    'transcription is unavailable: the speech-to-text model is not usable. ' +
+    'The session is running, but nothing will be transcribed.';
+  await pushToDashboard(app, 'notice:session', { sessionId: 'e2e-notice-1', message });
+
+  await expect(notice).toBeVisible();
+  // Capitalized for the screen; the loop writes lowercase for the log.
+  await expect(notice).toContainText('Transcription is unavailable');
+  // Warned, not stopped (FR-102, ADR-032).
+  await expect(notice).toContainText('The session is still running.');
+  await expect(notice).toHaveAttribute('role', 'alert');
+
+  // A notice belongs to the session it names. The next session starts clean
+  // rather than inheriting the last one's fault.
+  await pushToDashboard(app, 'state:session', {
+    active: true,
+    sessionId: 'e2e-notice-2',
+    profileName: 'My profile',
+    startedAt: '2026-01-02T11:00:00.000Z',
+    paused: false,
+  });
+  await expect(notice).toHaveCount(0);
+});
+
+/* ------------------------------------------------------------------ *
  * TC-158  profile lifecycle
  * ------------------------------------------------------------------ */
 
