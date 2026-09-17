@@ -33,6 +33,25 @@ test.afterEach(async () => {
   await app.close();
 });
 
+/**
+ * The alpha of a computed `background-color`, whichever way it serialises.
+ *
+ * `color(srgb r g b / a)` and `rgba(r, g, b, a)` carry it in the last position;
+ * `color(srgb r g b)` and `rgb(r, g, b)` carry none and are opaque, so a
+ * missing component reads as 1. Reading the number rather than matching a
+ * string keeps the assertion true when the browser changes how it serialises,
+ * which it already has once for `color-mix`.
+ */
+function surfaceAlpha(computed: string): number {
+  const asNumber = (raw: string): number =>
+    raw.endsWith('%') ? Number.parseFloat(raw) / 100 : Number.parseFloat(raw);
+  const slash = /\/\s*([\d.]+%?)\s*\)$/.exec(computed);
+  if (slash?.[1] !== undefined) return asNumber(slash[1]);
+  const rgba = /^rgba\(\s*[\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+\s*,\s*([\d.]+%?)\s*\)$/.exec(computed);
+  if (rgba?.[1] !== undefined) return asNumber(rgba[1]);
+  return 1;
+}
+
 /** One generation, as the three channels really deliver it. */
 async function generate(id: string, question: string, lines: string[]): Promise<void> {
   await pushToOverlay(app, 'suggestion:begin', {
@@ -625,9 +644,18 @@ test('TC-117 click-through and interactive render a visibly different state', as
   const controlSurface = await overlay
     .locator('[data-testid="font-size-surface"]')
     .evaluate((el) => getComputedStyle(el).backgroundColor);
-  expect(controlSurface, 'the text size control has no surface behind it').not.toMatch(
-    /rgba\(0, 0, 0, 0\)|transparent/,
+  expect(controlSurface, 'the control has no resolved background colour').toMatch(
+    /^(rgba?|color)\(/,
   );
+  // The alpha is read as a number, not matched as text. `.overlay-surface` is a
+  // `color-mix(in srgb, …)`, which current Chromium serialises as
+  // `color(srgb r g b / a)` rather than as `rgba(…)`, as TC-116 above notes. A
+  // regex written for `rgba(0, 0, 0, 0)` alone therefore passes over a fully
+  // transparent control, which is the one thing this case exists to catch.
+  expect(
+    surfaceAlpha(controlSurface),
+    'the text size control is fully transparent',
+  ).toBeGreaterThan(0);
 });
 
 /* ------------------------------------------------------------------ *

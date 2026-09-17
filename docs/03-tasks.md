@@ -1499,7 +1499,7 @@ contract change and are carried below with the reason.
 **Defects found by a local review round after the merge, and fixed**
 
 A second reading of the whole `TASK-042` and `TASK-043` diff, against the
-acceptance criteria and then against itself. Four findings in this task's files
+acceptance criteria and then against itself. Five findings in this task's files
 were confirmed by the code and fixed; the rest are carried below.
 
 | Defect | Consequence | Fix |
