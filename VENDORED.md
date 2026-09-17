@@ -27,27 +27,65 @@ about it.
 
 | File | Source | Version or commit | License |
 |---|---|---|---|
-| _(none)_ | | | |
+| `src/renderer/overlay/vendor/blur-fade.tsx` | https://github.com/magicuidesign/magicui — `apps/www/registry/magicui/blur-fade.tsx` | `52bc69354621e5cd7c9bc84a0e42b42f2d0c07b1` | MIT |
 
-## Why Magic UI is not here
+### Adaptations
 
-`TASK-043` was expected to add the Magic UI card components to the table above.
-It did not, and the empty table is the accurate record rather than an oversight.
+Vendored files are kept byte-identical to upstream apart from the changes
+listed here, each marked inline at its site, so an upstream fix can be
+re-applied by re-copying the file and redoing them. `.prettierignore` excludes
+`src/renderer/**/vendor` for the same reason: reformatting to this
+repository's style would make every future diff against upstream unreadable.
 
-Magic UI's source could not be obtained in the build environment:
-`magicui.design`, `raw.githubusercontent.com`, `cdn.jsdelivr.net` and
-`unpkg.com` are all refused by the network egress proxy, and the two Magic UI
-packages on npm (`@magicuidesign/cli`, `@magicuidesign/mcp`) are thin clients
-that fetch the component registry from `magicui.design` at run time and carry no
-component source of their own.
+**`blur-fade.tsx`** — four lines, none of which changes runtime behaviour:
 
-A row here names a source URL, a version and a license for a file copied from
-that source. Writing one for code that was not copied from there would be a
-false statement in the one file `NFR-016` exists to make trustworthy, and
-`scripts/check-licenses.mjs` reads this file as its input rather than as
-documentation about itself. So the overlay's cards are first-party components
-under `src/renderer/overlay/components/`, built on Tailwind and styled from the
-`FR-029` theme tokens, which is the rest of what `FR-094` asks for.
+1. The import is rewritten from `motion/react` to `framer-motion`, the package
+   this repository declares. `useInView`, `AnimatePresence`, `motion` and the
+   `MotionProps` / `UseInViewOptions` / `Variants` types are all exported by
+   framer-motion 13.
+2. `BlurFadeProps` also extends `Omit<ComponentPropsWithoutRef<'div'>, keyof
+   MotionProps>`, so ordinary DOM attributes type-check. They already worked at
+   runtime: upstream spreads `...props` onto the `motion.div`.
+3. `variant?: Variants` replaces `variant?: { hidden: { y: number }; visible: {
+   y: number } }`. The body assigns it to `combinedVariants` and hands it to
+   framer-motion as `Variants`, so the narrower type rejected variants the
+   component accepts — a fade with no `y`, which is how `NFR-010` drops the
+   slide under `prefers-reduced-motion`.
+4. `getFilter` accepts `undefined`. This repository compiles with
+   `noUncheckedIndexedAccess`, under which `combinedVariants.hidden` is
+   `Variant | undefined`; the body already returned undefined for anything
+   without a `.filter`.
 
-`FR-094` is therefore partially met. The remainder is carried to `TASK-051`
-with this reason. See ADR-040.
+It is used by `src/renderer/overlay/components/BulletReveal.tsx`, which drives
+it through its public props only.
+
+## What is not vendored, and why
+
+`MagicCard` is the Magic UI component that would have been the obvious choice
+for the suggestion card, and it is deliberately not used. The reasons are this
+application's requirements rather than anything wrong with the component:
+
+- It is a **pointer-tracking hover effect**: a radial gradient that follows the
+  cursor, driven by `onPointerMove` / `onPointerEnter`. The overlay is
+  click-through by default and forwards mouse events to whatever is behind it
+  (`FR-083`), which is the mode a user spends an entire interview in. The effect
+  would be dead for almost all of the window's life.
+- It draws its surface from shadcn theme tokens (`var(--color-background)`,
+  `bg-background`, `var(--color-border)`). `FR-094` requires the cards to be
+  styled from the `FR-029` tokens, which here are the custom properties
+  `theme.ts` computes, including the alpha floor `FR-093`'s contrast depends on
+  (ADR-039). Its surface is a gradient border, not a background that can be
+  held to a contrast ratio.
+- It imports `next-themes` and a shadcn `@/lib/utils`, neither of which this
+  application has, and adding a Next.js theming package to an Electron app to
+  get a hover gradient is not a trade worth making.
+- Its orb mode animates a large blurred element with `willChange`. `NFR-007`
+  holds this window to 60 fps on integrated graphics.
+
+`AnimatedList` was considered for the card stack and does not fit either: it
+reveals its children on a `setTimeout` interval, whereas the stack is driven by
+`CH-207` arriving over IPC, and its `scale: 0` entry and exit would move text a
+user may be halfway through reading.
+
+So the card surface is a first-party component on Tailwind, styled from the
+`FR-029` tokens, and the reveal that `FR-092` specifies is Magic UI's.

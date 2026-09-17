@@ -74,13 +74,19 @@ export function SuggestionCardView({ card, depth, slide }: SuggestionCardViewPro
       >
         {card.question}
       </p>
-      <ul data-testid="card-lines" className="m-0 mt-[0.35em] list-none p-0">
+      {/*
+        A list by role, not by tag. The bullets are Magic UI `BlurFade` divs
+        (FR-094), and a `div` is not valid inside a `ul`, so the roles carry the
+        semantics a screen reader needs while each bullet stays a single element
+        with a single text node, which is what `TC-112` counts.
+      */}
+      <div role="list" data-testid="card-lines" className="m-0 mt-[0.35em] list-none p-0">
         {card.lines.map((line) => (
           <BulletReveal key={line.index} slide={slide}>
             {line.text}
           </BulletReveal>
         ))}
-      </ul>
+      </div>
     </motion.article>
   );
 }

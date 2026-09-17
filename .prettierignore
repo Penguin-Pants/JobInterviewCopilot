@@ -6,3 +6,9 @@ coverage
 docs
 *.md
 package-lock.json
+
+# Vendored third-party code is kept byte-identical to its upstream, so that an
+# upstream fix can be re-applied by re-copying the file and redoing the few
+# adaptations VENDORED.md records. Reformatting it to this repository's style
+# would make every future diff against upstream unreadable (NFR-016).
+src/renderer/**/vendor
