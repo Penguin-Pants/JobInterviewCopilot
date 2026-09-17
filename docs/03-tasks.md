@@ -1675,7 +1675,9 @@ a comment or a component that claimed a guarantee the code does not make.
 
 ## Milestone 5 — Hardening and release
 
-**Status: IN PROGRESS.** `TASK-050` is complete. `TASK-051` has not started.
+**Status: IN PROGRESS.** `TASK-050` is complete. `TASK-051`'s automation is
+complete; its manual checklist needs Windows hardware and is the only thing
+outstanding in the milestone.
 
 ### TASK-050 Global resilience — COMPLETE
 **Traces** NFR-001, NFR-002, NFR-004, NFR-005, NFR-008, NFR-009
@@ -1752,7 +1754,7 @@ Deferred, deliberately, and not part of this task:
   the CI measurement is evidence rather than proof, and `MW-14` takes the whole-app
   number on real hardware.
 
-### TASK-051 Release pipeline
+### TASK-051 Release pipeline — AUTOMATION COMPLETE, MANUAL EXECUTION OUTSTANDING
 **Traces** NFR-011, NFR-013, NFR-015
 **Depends on** TASK-050
 **Acceptance criteria**
@@ -1766,19 +1768,58 @@ Deferred, deliberately, and not part of this task:
   recorded before a tag is cut. Any single failure blocks the tag, MW-06 and
   MW-11 latency numbers included. MW-12 confirms a documented limitation and
   cannot fail the release.
-**Verified by** TC-001, MW-01 to MW-13
+**Verified by** TC-001, TC-165, TC-166, MW-01 to MW-14
 
-**Status: NOT STARTED.** Three follow-ups handed over by `TASK-050`, to be
-closed by this task rather than tracked separately:
+**Status: AUTOMATION COMPLETE, 2026-09-17. MANUAL EXECUTION OUTSTANDING.**
 
-- Confirm the installer installs and launches on a clean Windows 11 virtual
-  machine. `ci.yml`'s `package` job builds it and asserts the `.exe` exists on
-  every pull request, which is as far as CI goes: section 7 records the clean
-  machine as deliberately untested, and this task's second acceptance criterion
-  is the only thing that closes it.
-- Record `MW-06`'s and `MW-11`'s end-to-end latency numbers against the tag.
-  `TC-133` measures the app's own share of the `NFR-001` budget in CI and
-  records it; neither the real network nor a real provider is reachable there.
-- Record `MW-14`, the all-processes CPU figure, against the tag. `TC-131`
-  measures the main process in CI and holds the ceiling; the whole-app number on
-  a 4-core machine is only observable on real hardware.
+This task has two halves and only one of them is software. Everything that can
+be automated is built, tested and running in CI. The other half is a person
+running a checklist on two Windows machines, and **it has not been done**: this
+work was carried out in a Linux container with no Windows hardware, no audio
+device, no second monitor and no provider credentials. The task is therefore
+**not** marked COMPLETE, and no release record has been written. Writing one
+would be fabricating test results.
+
+| Criterion | State | Where |
+|---|---|---|
+| CI runs typecheck, lint, unit, integration, licenses on every PR, and the Playwright E2E suite on a Windows runner | **Done**, and already true before this task | `.github/workflows/ci.yml` |
+| `npm run package` produces an x64 NSIS installer | **Done**, and now verified rather than assumed | `check:packaged` |
+| …that **launches** | **Done in CI**, on the unpacked build | `smoke:packaged` |
+| …that **installs on a clean Windows 11 machine** | **Outstanding.** No CI stage can close it (section 7) | `MW-01` to `MW-14` |
+| Reproducible from a clean checkout with one documented command | **Done** | `README.md`, `docs/07-release-checklist.md` |
+| The checklist is **recorded** before a tag, and any failure **blocks** | **Done** | `releases/`, `scripts/check-release-record.mjs`, `.github/workflows/release.yml` |
+| …and **executed** | **Outstanding** | needs the two machines |
+
+Three things were built that the task does not name but that its criteria need:
+
+- **`scripts/check-packaged.mjs`.** The `package` job built the installer and
+  checked the `.exe` existed, which is true with or without a correct
+  `asarUnpack` path. This closes the TASK-025 follow-up carried open since
+  Milestone 2: `onnxruntime-node`'s native addon cannot be `dlopen`ed from
+  inside an asar, and Electron's asar shim does not cover Node's ESM loader for
+  `chokidar`, so both failures appear only at runtime and neither is visible on
+  Linux. Seven cases drive it against packaged trees that must fail.
+- **`scripts/smoke-packaged.mjs`.** Launches the packaged app on the Windows
+  runner and waits for a painted Dashboard and an answered profile list, the
+  first thing that needs the knowledge base and therefore `chokidar`.
+- **`scripts/check-release-record.mjs` and `releases/`.** A checklist that lives
+  only in someone's memory of having run it is not a gate. The required ids are
+  read out of `04-test-strategy.md` section 6, so a checklist that grows a row
+  does not leave the gate behind still requiring the old set. Sixteen cases
+  cover it, including every way a record can be waved through.
+
+Outstanding, each needing hardware this environment does not have:
+
+- Execute `MW-01` to `MW-14` on a Windows 10 machine (build 19041 or later) and
+  a Windows 11 machine, and commit the record as `releases/v<version>.md`.
+  `MW-06` and `MW-11` must carry measured `p50` and `p95` numbers, and `MW-14`
+  the all-processes CPU figure `TC-131` cannot measure.
+- Install the NSIS package on a **clean** Windows 11 machine and launch it.
+- Cut the tag only once that record is merged and `npm run check:release`
+  passes on it.
+
+One note for whoever does this: a tag-triggered workflow runs **after** a tag
+exists, so nothing in CI can stop `git tag` being typed. `release.yml` refuses to
+build or publish anything for a tag whose record is missing or failing, and
+`ci.yml` checks any record in the tree on every pull request, which is where a
+bad record is actually caught. A tag with no release behind it is inert.

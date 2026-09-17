@@ -235,6 +235,8 @@ All trigger tests run on fake timers with the pure state-machine module.
 | TC-162 | U | Non-retryable is terminal without a backup | With no backup, an `auth` failure enters `CONFIG_REQUIRED` and sends zero further requests for the rest of the session. A `network` failure enters `DEGRADED` and keeps retrying with backoff capped at 10 s. Saving a new valid key clears `CONFIG_REQUIRED` |
 | TC-163 | I | Re-embed SLA is bounded | A document within the 2 MB and 200-chunk ceiling is queryable within 5 s of settling. A document above the ceiling still completes, is exempt from the 5 s target, and reports progress |
 | TC-164 | I | Live session loop end to end | `session:start` opens one `SttSession` per stream and starts capture. An injected audio chunk is pushed to the provider session and its seconds reach the Cost Meter. An interviewer final followed by the gap runs retrieval and one generation, whose lines reach the overlay only through the readiness gate, whose outcome reaches `appendSuggestion` and whose usage reaches `noteGeneration`. A second turn mid-generation appends the cancelled entry before the replacement's. `session:stop` closes both sessions and stops capture, and no append lands on a closed handle |
+| TC-165 | I | Packaged app is loadable | The packaged output carries an x64 installer named for the version, and `onnxruntime-node`, `chokidar` and `readdirp` are unpacked as real files rather than left inside `app.asar`. A packaged tree missing any of them fails the check. On Windows the packaged app launches and paints a Dashboard with an answered profile list |
+| TC-166 | I | Release record gates the release | A record that is missing, is for another tag, omits a checklist id, records one twice, carries a result with no evidence, or fails any check other than MW-12 blocks the release. MW-12 failing does not block. MW-06 and MW-11 passing without measured p50 and p95 numbers blocks |
 | TC-150 | I | Non-streaming latency harness | With a non-streaming model active and scripted fakes at fixed delays, the measured path is inside the `NFR-017` budget. Which budget applies is read from the registry entry. Real numbers come from MW-11 |
 
 ---
@@ -287,6 +289,14 @@ on a scheduled run.
 
 Run on one Windows 10 machine (build 19041 or later) and one Windows 11 machine.
 Record the result against the release tag. A failure blocks the release.
+
+The record is a file, not a memory of having run it: copy `releases/TEMPLATE.md`
+to `releases/<tag>.md` and fill in every row. `npm run check:release` reads it
+and refuses a release whose record is missing, incomplete or failing, and it
+runs on every pull request so a bad record is caught before the tag rather than
+after. `MW-06` and `MW-11` must carry measured `p50` and `p95` numbers rather
+than a bare verdict. `MW-12` is the only check that cannot block. The procedure
+is `docs/07-release-checklist.md`.
 
 | ID | Check | Expected |
 |---|---|---|
