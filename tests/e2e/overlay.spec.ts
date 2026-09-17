@@ -52,48 +52,111 @@ async function generate(id: string, question: string, lines: string[]): Promise<
 }
 
 /**
- * Watch a bullet's opacity and transform from **before** it exists.
+ * Watch the first bullet's reveal, from **before** it exists.
  *
  * A settled assertion cannot tell a fade from no fade: a bullet that was never
- * animated also ends at opacity 1, so `toHaveText`/`toBe('1')` pass either way.
- * Sampling after the push is racy in the other direction, because the element
- * may not be there yet and a 250 ms reveal is easy to miss.
+ * animated also ends at opacity 1, so `toBe('1')` passes either way.
  *
- * So the sampler is installed first and runs every frame, recording the lowest
- * opacity and whether any non-identity transform was ever applied. Whatever the
- * timing, the frames are observed rather than guessed at.
+ * Driven by a `MutationObserver` rather than by `requestAnimationFrame`. The
+ * overlay window is never shown during this suite, because nothing here starts
+ * a real session and `showInactive` is what reveals it, and a window that is
+ * not on screen does not get frames at a dependable rate: an rAF sampler
+ * recorded the reveal on every local run and reported "never faded" on the
+ * runner. Mutation records are delivered on the microtask checkpoint instead,
+ * so they arrive whether or not the compositor is running, and watching the
+ * `style` attribute makes every write framer-motion performs one of them.
+ *
+ * Three kinds of evidence, so the assertion does not rest on catching a
+ * particular frame: the computed opacity and transform actually rendered, and
+ * the lowest opacity in the **declared** animation, which exists from the
+ * moment it starts and needs no frame to have elapsed at all.
  */
+interface RevealEvidence {
+  minOpacity: number;
+  sawTransform: boolean;
+  minKeyframeOpacity: number;
+  inspections: number;
+}
+
+type RevealProbe = RevealEvidence & { observer?: MutationObserver };
+
 async function watchFirstBullet(): Promise<void> {
   await overlay.evaluate(() => {
     const probe = window as unknown as {
-      __reveal?: { minOpacity: number; sawTransform: boolean; raf?: number };
+      __reveal?: {
+        minOpacity: number;
+        sawTransform: boolean;
+        minKeyframeOpacity: number;
+        inspections: number;
+        observer?: MutationObserver;
+      };
     };
-    if (probe.__reveal?.raf !== undefined) cancelAnimationFrame(probe.__reveal.raf);
-    const state = { minOpacity: 1, sawTransform: false, raf: 0 };
+    probe.__reveal?.observer?.disconnect();
+
+    const state = {
+      minOpacity: 1,
+      sawTransform: false,
+      minKeyframeOpacity: 1,
+      inspections: 0,
+      observer: undefined as MutationObserver | undefined,
+    };
     probe.__reveal = state;
+
     const identity = new Set(['none', 'matrix(1, 0, 0, 1, 0, 0)']);
-    const tick = (): void => {
+    const inspect = (): void => {
       const el = document.querySelector('[data-testid="bullet"]');
-      if (el) {
-        const style = getComputedStyle(el);
-        const opacity = Number.parseFloat(style.opacity);
-        if (Number.isFinite(opacity)) state.minOpacity = Math.min(state.minOpacity, opacity);
-        if (!identity.has(style.transform)) state.sawTransform = true;
+      if (!el) return;
+      state.inspections += 1;
+      const style = getComputedStyle(el);
+      const opacity = Number.parseFloat(style.opacity);
+      if (Number.isFinite(opacity)) state.minOpacity = Math.min(state.minOpacity, opacity);
+      if (!identity.has(style.transform)) state.sawTransform = true;
+      for (const animation of el.getAnimations?.() ?? []) {
+        // `AnimationEffect` does not declare `getKeyframes`; `KeyframeEffect`
+        // does, and that is what a WAAPI animation carries here. Probed rather
+        // than cast to it, so an effect without keyframes contributes nothing
+        // instead of throwing.
+        const effect = animation.effect as { getKeyframes?: () => Keyframe[] } | null;
+        for (const frame of effect?.getKeyframes?.() ?? []) {
+          if (frame.opacity !== undefined) {
+            state.minKeyframeOpacity = Math.min(state.minKeyframeOpacity, Number(frame.opacity));
+          }
+        }
       }
-      state.raf = requestAnimationFrame(tick);
     };
-    tick();
+
+    // Twice per record: once as delivered, and once after the microtask queue
+    // drains, because an element can be inserted a tick before its animation is
+    // started on it.
+    state.observer = new MutationObserver(() => {
+      inspect();
+      queueMicrotask(inspect);
+    });
+    state.observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['style'],
+    });
   });
 }
 
-async function revealObserved(): Promise<{ minOpacity: number; sawTransform: boolean }> {
-  return overlay.evaluate(() => {
-    const probe = window as unknown as {
-      __reveal: { minOpacity: number; sawTransform: boolean; raf: number };
-    };
-    cancelAnimationFrame(probe.__reveal.raf);
-    return { minOpacity: probe.__reveal.minOpacity, sawTransform: probe.__reveal.sawTransform };
+async function revealObserved(): Promise<RevealEvidence> {
+  const evidence = await overlay.evaluate(() => {
+    const probe = window as unknown as { __reveal: RevealProbe };
+    probe.__reveal.observer?.disconnect();
+    const { minOpacity, sawTransform, minKeyframeOpacity, inspections } = probe.__reveal;
+    return { minOpacity, sawTransform, minKeyframeOpacity, inspections };
   });
+  // A run that observed nothing proves nothing either way, and would make the
+  // assertions below vacuous rather than failing honestly.
+  expect(evidence.inspections, 'the reveal was never observed at all').toBeGreaterThan(0);
+  return evidence;
+}
+
+/** Whether the bullet was ever below full opacity, rendered or declared. */
+function faded(evidence: RevealEvidence): boolean {
+  return Math.min(evidence.minOpacity, evidence.minKeyframeOpacity) < 1;
 }
 
 /**
@@ -309,7 +372,7 @@ test('TC-112 a reveal is one element per bullet, never per word or per character
   // than inferred from where the bullet ended up. A build with no animation at
   // all settles exactly where an animated one does.
   const reveal = await revealObserved();
-  expect(reveal.minOpacity, 'the bullet never faded in').toBeLessThan(1);
+  expect(faded(reveal), 'the bullet never faded in').toBe(true);
   expect(reveal.sawTransform, 'the bullet never slid').toBe(true);
 
   // NFR-007: nothing animates while idle. With no card on screen there is no
@@ -447,7 +510,7 @@ test('TC-115 reduced motion drops the slide and keeps the fade', async () => {
   await expect.poll(async () => bullet.evaluate((el) => getComputedStyle(el).opacity)).toBe('1');
 
   const reveal = await revealObserved();
-  expect(reveal.minOpacity, 'reduced motion dropped the fade as well as the slide').toBeLessThan(1);
+  expect(faded(reveal), 'reduced motion dropped the fade as well as the slide').toBe(true);
   expect(reveal.sawTransform, 'reduced motion still moved the text').toBe(false);
 });
 
