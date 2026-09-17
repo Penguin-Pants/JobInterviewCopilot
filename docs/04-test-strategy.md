@@ -313,6 +313,7 @@ is `docs/07-release-checklist.md`.
 | MW-11 | Non-streaming rehearsal with `whisper-1`, 20 turns | Latency is inside `NFR-017` (p50 under 7.0 s, p95 under 10.0 s) and the badge states the latency cost |
 | MW-14 | Watch Task Manager across a 20-minute rehearsal | Average CPU across every app process stays under 15 percent of one core on a 4-core machine, excluding the first-run model download (`NFR-005`). TC-131 measures the main process in CI; this is the whole-app number on real hardware |
 | MW-13 | Rehearsal on each streaming STT provider, 10 turns each: Deepgram `nova-3`, OpenAI `gpt-4o-transcribe`, ElevenLabs `scribe-v2-realtime` | All three transcribe real interviewer speech correctly and all three stay inside `NFR-001` |
+| MW-15 | Install the NSIS package on a **clean** Windows 11 machine and launch it | The installer runs, the app launches, the Dashboard renders, and a document imports and embeds. The only check that exercises the **installed** app: `TC-001` builds the installer and `TC-165` launches the unpacked build, and neither runs the installer. This is TASK-051's clean-install acceptance criterion |
 | MW-12 | Play music and fire a desktop notification during a session | Both are transcribed onto the interviewer stream, as `ADR-021` predicts. The session-prep note advising the user to close other audio sources is present. This check confirms the documented limitation, it does not fail on it |
 
 ---

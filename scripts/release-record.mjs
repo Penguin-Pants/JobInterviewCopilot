@@ -34,17 +34,38 @@ export const RESULTS = ['PASS', 'FAIL', 'NOTED'];
 export const NON_BLOCKING = new Set(['MW-12']);
 
 /**
- * Checks whose evidence must carry measured numbers, not just a verdict.
+ * Checks whose evidence must carry measured numbers, and the budget each one is
+ * measured against.
  *
- * `MW-06` and `MW-11` are the latency budgets (`NFR-001`, `NFR-017`). A bare
- * PASS on a number nobody wrote down is how a budget quietly stops being
- * measured, and TASK-051 names both explicitly.
+ * A bare PASS on a number nobody wrote down is how a budget quietly stops being
+ * measured, and TASK-051 names both of these explicitly. Recording the number
+ * is not enough either: a record reading `p50 99 s` beside the word PASS is a
+ * tester's slip, and a gate that reads the verdict rather than the measurement
+ * would ship on it. The numbers are parsed and compared.
  */
-export const NEEDS_NUMBERS = new Set(['MW-06', 'MW-11']);
+export const LATENCY_BUDGETS = {
+  'MW-06': { p50: 2.5, p95: 4.0, requirement: 'NFR-001' },
+  'MW-11': { p50: 7.0, p95: 10.0, requirement: 'NFR-017' },
+};
 
-/** `p50 1.9 s` and `p95 3.4 s`, in either order, units optional. */
-const P50 = /\bp50\b[^0-9]{0,12}[0-9]+(?:\.[0-9]+)?/i;
-const P95 = /\bp95\b[^0-9]{0,12}[0-9]+(?:\.[0-9]+)?/i;
+export const NEEDS_NUMBERS = new Set(Object.keys(LATENCY_BUDGETS));
+
+/**
+ * `p50 1.9 s` or `p95 3400 ms`. The unit is required.
+ *
+ * Without it, `p50 1900` is ambiguous between a comfortable pass in
+ * milliseconds and a catastrophic one in seconds, and guessing which would be
+ * worse than asking.
+ */
+function measured(evidence, label) {
+  const match = new RegExp(
+    `\\b${label}\\b[^0-9]{0,12}([0-9]+(?:\\.[0-9]+)?)\\s*(ms|s)\\b`,
+    'i',
+  ).exec(evidence ?? '');
+  if (!match) return null;
+  const value = Number(match[1]);
+  return match[2].toLowerCase() === 'ms' ? value / 1000 : value;
+}
 
 /**
  * Every check id the release record must account for.
@@ -104,6 +125,10 @@ export function parseRecord(markdown) {
     commit: field('Commit'),
     tester: field('Tester'),
     date: field('Date'),
+    // `NFR-011` is Windows 10 **and** 11, and section 6 says run on both. A
+    // record that names neither machine cannot be shown to have done so.
+    windows10: field('Windows 10 machine'),
+    windows11: field('Windows 11 machine'),
     rows,
   };
 }
@@ -113,18 +138,56 @@ export function parseRecord(markdown) {
  *
  * @returns `{ blockers, warnings }`. A release proceeds only on no blockers.
  */
-export function validateRecord(record, required, expectedTag) {
+export function validateRecord(record, required, expectedTag, options = {}) {
   const blockers = [];
   const warnings = [];
 
-  for (const name of ['tag', 'commit', 'tester', 'date']) {
-    if (!record[name]) blockers.push(`The record has no **${name}** field.`);
+  for (const name of ['tag', 'commit', 'tester', 'date', 'windows10', 'windows11']) {
+    if (!record[name]) blockers.push(`The record has no **${FIELD_LABELS[name]}** field.`);
   }
 
   // A record for a different tag is not this release's evidence. It is the
   // easiest mistake to make when copying the previous one.
   if (expectedTag && record.tag && record.tag !== expectedTag) {
     blockers.push(`The record is for ${record.tag}, but the release is ${expectedTag}.`);
+  }
+
+  // A commit field reading `TBD` is not a record of what was tested, and a
+  // release built from a commit the checklist never ran against is the failure
+  // this whole file exists to prevent.
+  if (record.commit && !/^[0-9a-f]{40}$/i.test(record.commit)) {
+    blockers.push(
+      `The commit "${record.commit}" is not a full 40-character sha. ` +
+        'Record the commit the installer was built from.',
+    );
+  }
+  if (
+    options.expectedCommit &&
+    record.commit &&
+    !sameCommit(record.commit, options.expectedCommit)
+  ) {
+    blockers.push(
+      `The checklist was run against ${record.commit}, but ${options.expectedCommit} is being ` +
+        'released. Re-run the checklist against the commit being tagged.',
+    );
+  }
+
+  // Section 6 says one Windows 10 machine on build 19041 or later. Below that,
+  // capture exclusion is a black rectangle rather than invisibility (NFR-012),
+  // so MW-01 on such a machine is testing something else.
+  if (record.windows10) {
+    const build = /\b(\d{5,})\b/.exec(record.windows10);
+    if (!build) {
+      blockers.push(
+        `The Windows 10 machine "${record.windows10}" names no build number. ` +
+          'Section 6 requires build 19041 or later.',
+      );
+    } else if (Number(build[1]) < MIN_WINDOWS_10_BUILD) {
+      blockers.push(
+        `The Windows 10 machine is build ${build[1]}, below ${MIN_WINDOWS_10_BUILD}. ` +
+          'Capture exclusion degrades below it (NFR-012), so MW-01 would test something else.',
+      );
+    }
   }
 
   const seen = new Map();
@@ -136,7 +199,13 @@ export function validateRecord(record, required, expectedTag) {
     seen.set(row.id, row);
   }
 
-  for (const id of required) {
+  // The full checklist is required of the release being prepared. A sweep over
+  // records already merged checks only what each one claims: a checklist that
+  // grows a row must not retroactively invalidate every release before it and
+  // fail every pull request until someone invents evidence for old binaries.
+  const ids = options.requireAll === false ? [...seen.keys()] : required;
+
+  for (const id of ids) {
     const row = seen.get(id);
     if (!row) {
       blockers.push(`${id} has no row. Every check is recorded, including the ones that passed.`);
@@ -170,12 +239,7 @@ export function validateRecord(record, required, expectedTag) {
     }
 
     if (NEEDS_NUMBERS.has(id) && row.result === 'PASS') {
-      if (!P50.test(row.evidence ?? '') || !P95.test(row.evidence ?? '')) {
-        blockers.push(
-          `${id} must record measured p50 and p95 numbers, not just a verdict ` +
-            `(TASK-051, NFR-001, NFR-017). Got: ${row.evidence || 'nothing'}`,
-        );
-      }
+      blockers.push(...latencyBlockers(id, row.evidence));
     }
   }
 
@@ -186,4 +250,47 @@ export function validateRecord(record, required, expectedTag) {
   }
 
   return { blockers, warnings };
+}
+
+/** Human names for the header fields, for the message above. */
+const FIELD_LABELS = {
+  tag: 'Tag',
+  commit: 'Commit',
+  tester: 'Tester',
+  date: 'Date',
+  windows10: 'Windows 10 machine',
+  windows11: 'Windows 11 machine',
+};
+
+/** Section 6's floor, which is `NFR-012`'s capture-exclusion build. */
+export const MIN_WINDOWS_10_BUILD = 19041;
+
+/** A record may abbreviate a sha; the release passes a full one. */
+function sameCommit(recorded, expected) {
+  const a = recorded.toLowerCase();
+  const b = expected.toLowerCase();
+  return a.startsWith(b) || b.startsWith(a);
+}
+
+/** Every way a latency row can fail to hold its budget. */
+function latencyBlockers(id, evidence) {
+  const budget = LATENCY_BUDGETS[id];
+  const out = [];
+  for (const label of ['p50', 'p95']) {
+    const seconds = measured(evidence, label);
+    if (seconds === null) {
+      out.push(
+        `${id} must record a measured ${label} with a unit, such as "${label} 1.9 s" or ` +
+          `"${label} 1900 ms" (TASK-051, ${budget.requirement}). Got: ${evidence || 'nothing'}`,
+      );
+      continue;
+    }
+    if (seconds >= budget[label]) {
+      out.push(
+        `${id} records ${label} ${seconds} s against a ${budget[label]} s budget ` +
+          `(${budget.requirement}). A PASS beside a number over budget is not a pass.`,
+      );
+    }
+  }
+  return out;
 }

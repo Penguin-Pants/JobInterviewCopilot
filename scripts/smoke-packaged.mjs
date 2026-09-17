@@ -69,13 +69,50 @@ try {
   await dashboard.waitForSelector('[data-testid="dashboard"]', { timeout: 30_000 });
   await dashboard.waitForSelector('[data-testid="dashboard-header"]', { timeout: 30_000 });
 
-  // A renderer that loaded is not the whole claim: bootstrap has to have run
-  // far enough to answer the Dashboard. The profile list is the first thing it
-  // answers that needs the knowledge base, which is where `chokidar` is pulled
-  // in through the ESM `import()` that asar cannot serve.
   await dashboard.waitForSelector('[data-testid="profile-list"] > li', { timeout: 30_000 });
 
-  console.log(`Packaged app smoke test passed: ${exe} launched and rendered the Dashboard.`);
+  // The Dashboard rendering is not the claim that matters. `startKnowledgeBase`
+  // calls `markProfilesReady()` *before* awaiting `rag.start()`, and catches
+  // what that throws, so the profile row appears whether or not the watcher
+  // ever loaded. Waiting for it proves bootstrap ran, and nothing more.
+  //
+  // So the two modules are loaded here, in the packaged main process, by the
+  // same mechanisms production uses: a dynamic `import()` for the ESM-only
+  // watcher and `require` for the native addon. This is what distinguishes
+  // "the files are on disk", which `check-packaged.mjs` already proved, from
+  // "the loader can actually reach and open them" (ADR-019 is a different
+  // guarantee; this one is TASK-025's follow-up and TC-165).
+  const loaded = await app.evaluate(async () => {
+    const attempt = async (name, load) => {
+      try {
+        await load();
+        return { name, ok: true };
+      } catch (err) {
+        return { name, ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    };
+    return [
+      // ESM-only, reached through import(). Electron's asar shim patches
+      // CommonJS require and not Node's ESM loader.
+      await attempt('chokidar', () => import('chokidar')),
+      // A native addon. process.dlopen cannot open a file inside an archive,
+      // and a wrong-ABI binary fails here rather than at file-existence time.
+      await attempt('onnxruntime-node', () => Promise.resolve(require('onnxruntime-node'))),
+    ];
+  });
+
+  const broken = loaded.filter((m) => !m.ok);
+  if (broken.length > 0) {
+    throw new Error(
+      `the packaged app could not load ${broken.map((m) => m.name).join(' or ')}: ` +
+        broken.map((m) => `${m.name}: ${m.error}`).join('; '),
+    );
+  }
+
+  console.log(
+    `Packaged app smoke test passed: ${exe} launched, rendered the Dashboard, and loaded ` +
+      `${loaded.map((m) => m.name).join(' and ')} from outside the asar.`,
+  );
 } catch (err) {
   console.error('The packaged app did not come up:');
   console.error(`  ${err instanceof Error ? err.message : String(err)}`);

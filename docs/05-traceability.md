@@ -9,7 +9,7 @@ so a requirement could report coverage with no test that would fail if it
 broke. The script exits non-zero on any gap, so CI fails when the documents
 drift.
 
-Coverage: 107 requirements, 27 tasks, 133 automated test cases, 14 manual checks.
+Coverage: 107 requirements, 27 tasks, 133 automated test cases, 15 manual checks.
 
 ## Requirement to task to test
 
@@ -115,9 +115,9 @@ Coverage: 107 requirements, 27 tasks, 133 automated test cases, 14 manual checks
 | NFR-008 | TASK-050 | TC-132, TC-161 |
 | NFR-009 | TASK-050 | TC-130 |
 | NFR-010 | TASK-042, TASK-043 | TC-115, TC-124 |
-| NFR-011 | TASK-051 | TC-001, TC-165, MW-01 |
+| NFR-011 | TASK-051 | TC-001, TC-165, MW-01, MW-15 |
 | NFR-012 | TASK-005, TASK-043 | TC-005, MW-01 |
-| NFR-013 | TASK-051 | TC-001, TC-165, TC-166 |
+| NFR-013 | TASK-051 | TC-001, TC-165, TC-166, MW-15 |
 | NFR-014 | TASK-042 | TC-120 |
 | NFR-015 | TASK-001, TASK-051 | TC-001 |
 | NFR-016 | TASK-001 | TC-146 |
@@ -153,4 +153,4 @@ Coverage: 107 requirements, 27 tasks, 133 automated test cases, 14 manual checks
 | TASK-042 | Dashboard UI — COMPLETE | FR-023, FR-024, FR-025, FR-026, FR-027, FR-028, FR-029, FR-030, FR-031, FR-032, FR-038, FR-080, FR-087, FR-088, FR-110, NFR-010, NFR-014 | TC-120, TC-121, TC-122, TC-123, TC-124, TC-125, TC-154, TC-158 |
 | TASK-043 | Overlay UI — COMPLETE | FR-006, FR-007, FR-008, FR-076, FR-085, FR-089, FR-090, FR-091, FR-092, FR-093, FR-094, FR-102, NFR-007, NFR-010, NFR-012 | TC-006, TC-110, TC-111, TC-112, TC-113, TC-114, TC-115, TC-116, TC-117, TC-138, TC-142 |
 | TASK-050 | Global resilience — COMPLETE | NFR-001, NFR-002, NFR-004, NFR-005, NFR-008, NFR-009 | TC-130, TC-131, TC-132, TC-133, TC-137, MW-06, MW-14 |
-| TASK-051 | Release pipeline — AUTOMATION COMPLETE, MANUAL EXECUTION OUTSTANDING | NFR-011, NFR-013, NFR-015 | TC-001, TC-165, TC-166, MW-01, MW-02, MW-03, MW-04, MW-05, MW-06, MW-07, MW-08, MW-09, MW-10, MW-11, MW-12, MW-13, MW-14 |
+| TASK-051 | Release pipeline — AUTOMATION COMPLETE, MANUAL EXECUTION OUTSTANDING | NFR-011, NFR-013, NFR-015 | TC-001, TC-165, TC-166, MW-01, MW-02, MW-03, MW-04, MW-05, MW-06, MW-07, MW-08, MW-09, MW-10, MW-11, MW-12, MW-13, MW-14, MW-15 |

@@ -1768,7 +1768,7 @@ Deferred, deliberately, and not part of this task:
   recorded before a tag is cut. Any single failure blocks the tag, MW-06 and
   MW-11 latency numbers included. MW-12 confirms a documented limitation and
   cannot fail the release.
-**Verified by** TC-001, TC-165, TC-166, MW-01 to MW-14
+**Verified by** TC-001, TC-165, TC-166, MW-01 to MW-15
 
 **Status: AUTOMATION COMPLETE, 2026-09-17. MANUAL EXECUTION OUTSTANDING.**
 
@@ -1785,7 +1785,7 @@ would be fabricating test results.
 | CI runs typecheck, lint, unit, integration, licenses on every PR, and the Playwright E2E suite on a Windows runner | **Done**, and already true before this task | `.github/workflows/ci.yml` |
 | `npm run package` produces an x64 NSIS installer | **Done**, and now verified rather than assumed | `check:packaged` |
 | …that **launches** | **Done in CI**, on the unpacked build | `smoke:packaged` |
-| …that **installs on a clean Windows 11 machine** | **Outstanding.** No CI stage can close it (section 7) | `MW-01` to `MW-14` |
+| …that **installs on a clean Windows 11 machine** | **Outstanding.** No CI stage can close it (section 7). `MW-15` now exists for it and every record requires it | `MW-15` |
 | Reproducible from a clean checkout with one documented command | **Done** | `README.md`, `docs/07-release-checklist.md` |
 | The checklist is **recorded** before a tag, and any failure **blocks** | **Done** | `releases/`, `scripts/check-release-record.mjs`, `.github/workflows/release.yml` |
 | …and **executed** | **Outstanding** | needs the two machines |
@@ -1810,7 +1810,7 @@ Three things were built that the task does not name but that its criteria need:
 
 Outstanding, each needing hardware this environment does not have:
 
-- Execute `MW-01` to `MW-14` on a Windows 10 machine (build 19041 or later) and
+- Execute `MW-01` to `MW-15` on a Windows 10 machine (build 19041 or later) and
   a Windows 11 machine, and commit the record as `releases/v<version>.md`.
   `MW-06` and `MW-11` must carry measured `p50` and `p95` numbers, and `MW-14`
   the all-processes CPU figure `TC-131` cannot measure.

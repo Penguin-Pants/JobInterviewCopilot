@@ -30,14 +30,21 @@ Two checks run against the output, in CI and available locally:
 | Command | What it proves |
 |---|---|
 | `npm run check:packaged` | The installer exists, carries the version and `x64`, and the modules that cannot live inside an asar are real files on disk |
-| `npm run smoke:packaged` | The packaged app launches and paints a Dashboard (Windows only; it skips elsewhere rather than passing vacuously) |
+| `npm run smoke:packaged` | The packaged app launches, paints a Dashboard, and **loads** `chokidar` and `onnxruntime-node` in its own main process (Windows only; it skips elsewhere rather than passing vacuously) |
 
-Why the first one exists: `onnxruntime-node` ships a native addon, which
-`process.dlopen` cannot open from inside an asar archive, and `chokidar` 5 is
-ESM-only, reached through `import()`, which Electron's asar shim does not cover.
+Why both exist: `onnxruntime-node` ships a native addon, which `process.dlopen`
+cannot open from inside an asar archive, and `chokidar` 5 is ESM-only, reached
+through `import()`, which Electron's asar shim does not cover.
 `electron-builder.yml` unpacks both. A wrong glob there still builds a green
-installer; the app only breaks when it is run, on a machine nobody in CI is
-watching.
+installer; the app only breaks when it is run.
+
+The two checks answer different questions, and the second is the one that
+matters. `check:packaged` proves the files are on disk where the loader will
+look. `smoke:packaged` proves the loader can actually reach and open them,
+which is also the only thing that catches a wrong-ABI native binary. Waiting on
+the Dashboard alone would not have: `startKnowledgeBase` marks profiles ready
+**before** awaiting `rag.start()` and catches what it throws, so the Dashboard
+renders whether or not the watcher ever loaded.
 
 ---
 
@@ -56,12 +63,32 @@ Each release carries a record at `releases/<tag>.md`.
 `npm run check:release` blocks on any of:
 
 - a missing record, or a record for a different tag,
-- a missing `Tag`, `Commit`, `Tester` or `Date` field,
+- a missing `Tag`, `Commit`, `Tester`, `Date`, `Windows 10 machine` or
+  `Windows 11 machine` field,
+- a `Commit` that is not a full 40-character sha, or that is not the commit
+  being released,
+- a Windows 10 machine naming no build, or a build below 19041, which is where
+  capture exclusion degrades (`NFR-012`) and therefore where `MW-01` stops
+  testing what it says,
 - any checklist id with no row, or with a row recorded twice,
 - any `FAIL` other than `MW-12`,
 - `NOTED` on anything other than `MW-12`,
 - a row with a result and no evidence,
-- `MW-06` or `MW-11` passing without measured `p50` and `p95` numbers.
+- `MW-06` or `MW-11` passing without `p50` and `p95` **with units**, or with a
+  number **over its budget**.
+
+That last one is worth stating plainly: the verdict is the tester's, the number
+is the measurement, and they can disagree. A record reading `PASS` beside
+`p50 99 s` is a slip, and the gate reads the number. `NFR-001` puts `MW-06` at
+p50 under 2.5 s and p95 under 4.0 s; `NFR-017` puts `MW-11` at 7.0 s and 10.0 s.
+
+Units are required because `p50 1900` is a comfortable pass in milliseconds and
+a catastrophe in seconds, and guessing which would be worse than asking.
+
+The full checklist is required of the release being prepared, named by tag. The
+sweep that runs on every pull request checks each merged record against what it
+claims rather than against today's list, so adding a check later does not
+retroactively invalidate every release before it.
 
 The required ids are read out of `04-test-strategy.md` section 6 rather than
 listed in the checker, the same way `scripts/traceability.py` derives its
@@ -93,7 +120,7 @@ that admits its edges:
 
 | Not covered | Why | Covered by |
 |---|---|---|
-| Installing from the NSIS package onto a clean Windows 11 machine | No clean-VM stage in v1 (`04-test-strategy.md` section 7). CI builds and launches the unpacked app; it never runs the installer | `MW-01` to `MW-14`, on real hardware |
+| Installing from the NSIS package onto a clean Windows 11 machine | No clean-VM stage in v1 (`04-test-strategy.md` section 7). CI builds and launches the unpacked app; it never runs the installer | `MW-15`, which exists for exactly this and is required of every record |
 | Real loopback and microphone capture | No virtual audio device on a runner (`ADR-004`) | `MW-02`, `MW-03`, `MW-04` |
 | Real screen-capture exclusion | Cannot be asserted from inside the process | `MW-01` |
 | Real provider latency, accuracy and cost | Non-deterministic and paid. `TC-133` measures the app's own share of the budget; the end-to-end numbers need a real network | `MW-05`, `MW-06`, `MW-11`, `MW-13` |

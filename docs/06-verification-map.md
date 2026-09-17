@@ -120,9 +120,9 @@ is broken. A test that merely runs nearby code does not count.
 | NFR-008 | TC-132, TC-161 |
 | NFR-009 | TC-130 |
 | NFR-010 | TC-115, TC-124 |
-| NFR-011 | TC-001, TC-165, MW-01 |
+| NFR-011 | TC-001, TC-165, MW-01, MW-15 |
 | NFR-012 | TC-005, MW-01 |
-| NFR-013 | TC-001, TC-165, TC-166 |
+| NFR-013 | TC-001, TC-165, TC-166, MW-15 |
 | NFR-014 | TC-120 |
 | NFR-015 | TC-001 |
 | NFR-016 | TC-146 |

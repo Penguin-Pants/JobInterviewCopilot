@@ -6,6 +6,7 @@
  *   node scripts/check-release-record.mjs v0.1.0
  *   node scripts/check-release-record.mjs            # checks every record present
  *   node scripts/check-release-record.mjs v0.1.0 --dir=<path>   # for the test fixtures
+ *   node scripts/check-release-record.mjs v0.1.0 --commit=<sha> # bind to the tagged source
  *
  * Exit 0 when the record is complete and passing, 1 otherwise, naming every
  * reason rather than the first.
@@ -29,6 +30,8 @@ const recordsDir = dirFlag ? resolve(dirFlag.slice('--dir='.length)) : join(root
 const required = requiredIds(readFileSync(strategy, 'utf8'));
 
 const tag = process.argv.slice(2).find((a) => !a.startsWith('--'));
+const commitFlag = process.argv.find((a) => a.startsWith('--commit='));
+const expectedCommit = commitFlag ? commitFlag.slice('--commit='.length).trim() : undefined;
 const targets = tag ? [`${tag}.md`] : recordsFound();
 
 function recordsFound() {
@@ -63,7 +66,14 @@ for (const name of targets) {
   }
 
   const record = parseRecord(readFileSync(path, 'utf8'));
-  const { blockers, warnings } = validateRecord(record, required, expectedTag);
+  // A named tag is the release being prepared, so the whole checklist is
+  // required of it. The no-tag sweep runs on every pull request over records
+  // already merged, and only checks what each one claims: a checklist that
+  // grows a row must not retroactively invalidate every release before it.
+  const { blockers, warnings } = validateRecord(record, required, expectedTag, {
+    requireAll: Boolean(tag),
+    ...(expectedCommit ? { expectedCommit } : {}),
+  });
 
   for (const warning of warnings) console.warn(`  note  ${expectedTag}: ${warning}`);
 
@@ -72,7 +82,8 @@ for (const name of targets) {
     for (const blocker of blockers) console.error(`  - ${blocker}`);
     failed = true;
   } else {
-    console.log(`OK ${expectedTag}: ${required.length} checks recorded, none blocking.`);
+    const counted = tag ? required.length : record.rows.length;
+    console.log(`OK ${expectedTag}: ${counted} checks recorded, none blocking.`);
   }
 }
 

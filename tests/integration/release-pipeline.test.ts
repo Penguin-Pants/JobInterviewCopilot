@@ -179,6 +179,8 @@ function requiredIds(): string[] {
 
 interface RecordShape {
   tag?: string;
+  commit?: string;
+  windows10?: string;
   omitField?: string;
   results?: Record<string, string>;
   evidence?: Record<string, string>;
@@ -192,9 +194,11 @@ function fakeRecord(tag: string, shape: RecordShape = {}): string {
   const lines: string[] = ['# Release record', ''];
   for (const [name, value] of [
     ['Tag', shape.tag ?? tag],
-    ['Commit', 'a'.repeat(40)],
+    ['Commit', shape.commit ?? 'a'.repeat(40)],
     ['Tester', 'A Person'],
     ['Date', '2026-09-17'],
+    ['Windows 10 machine', shape.windows10 ?? '19045'],
+    ['Windows 11 machine', '22631'],
   ]) {
     if (shape.omitField === name) continue;
     lines.push(`**${name}** ${value}`);
@@ -272,14 +276,98 @@ describe('TC-166 a release is gated on its recorded checklist', () => {
     const dir = fakeRecord('v1.0.0', { evidence: { 'MW-06': 'felt fast enough' } });
     const { code, output } = run(CHECK_RECORD, ['v1.0.0', `--dir=${dir}`]);
     expect(code).toBe(1);
-    expect(output).toContain('MW-06 must record measured p50 and p95');
+    expect(output).toContain('MW-06 must record a measured p50');
   });
 
   it('blocks when MW-11 records only a p50', () => {
     const dir = fakeRecord('v1.0.0', { evidence: { 'MW-11': 'p50 5.8 s over 20 turns' } });
     const { code, output } = run(CHECK_RECORD, ['v1.0.0', `--dir=${dir}`]);
     expect(code).toBe(1);
-    expect(output).toContain('MW-11 must record measured p50 and p95');
+    expect(output).toContain('MW-11 must record a measured p95');
+  });
+
+  it('blocks a latency number recorded without a unit', () => {
+    // `p50 1900` is a comfortable pass in milliseconds and a catastrophe in
+    // seconds. Guessing which would be worse than asking.
+    const dir = fakeRecord('v1.0.0', { evidence: { 'MW-06': 'p50 1900, p95 3400' } });
+    const { code, output } = run(CHECK_RECORD, ['v1.0.0', `--dir=${dir}`]);
+    expect(code).toBe(1);
+    expect(output).toContain('with a unit');
+  });
+
+  it('blocks a PASS recorded beside a number over its budget', () => {
+    // The verdict is the tester's; the number is the measurement. NFR-001 puts
+    // MW-06's p50 under 2.5 s, so a PASS on 99 s is a slip the gate catches.
+    const dir = fakeRecord('v1.0.0', {
+      evidence: { 'MW-06': 'p50 99 s, p95 120 s over 20 turns' },
+    });
+    const { code, output } = run(CHECK_RECORD, ['v1.0.0', `--dir=${dir}`]);
+    expect(code).toBe(1);
+    expect(output).toContain('against a 2.5 s budget');
+  });
+
+  it('accepts latency recorded in milliseconds', () => {
+    const dir = fakeRecord('v1.0.0', {
+      evidence: { 'MW-06': 'p50 1900 ms, p95 3400 ms over 20 turns' },
+    });
+    const { code } = run(CHECK_RECORD, ['v1.0.0', `--dir=${dir}`]);
+    expect(code).toBe(0);
+  });
+
+  it('blocks a commit field that is not a full sha', () => {
+    const dir = fakeRecord('v1.0.0', { commit: 'TBD' });
+    const { code, output } = run(CHECK_RECORD, ['v1.0.0', `--dir=${dir}`]);
+    expect(code).toBe(1);
+    expect(output).toContain('is not a full 40-character sha');
+  });
+
+  it('blocks when the tested commit is not the one being released', () => {
+    // Code changed after the checklist ran. Releasing the newer commit would
+    // ship an installer the recorded Windows checks never exercised.
+    const dir = fakeRecord('v1.0.0', { commit: 'a'.repeat(40) });
+    const { code, output } = run(CHECK_RECORD, [
+      'v1.0.0',
+      `--dir=${dir}`,
+      `--commit=${'b'.repeat(40)}`,
+    ]);
+    expect(code).toBe(1);
+    expect(output).toContain('is being released');
+  });
+
+  it('accepts the record when the tested commit is the one being released', () => {
+    const dir = fakeRecord('v1.0.0', { commit: 'a'.repeat(40) });
+    const { code } = run(CHECK_RECORD, ['v1.0.0', `--dir=${dir}`, `--commit=${'a'.repeat(40)}`]);
+    expect(code).toBe(0);
+  });
+
+  it('blocks a record naming no Windows 10 build', () => {
+    const dir = fakeRecord('v1.0.0', { windows10: 'a laptop' });
+    const { code, output } = run(CHECK_RECORD, ['v1.0.0', `--dir=${dir}`]);
+    expect(code).toBe(1);
+    expect(output).toContain('names no build number');
+  });
+
+  it('blocks a Windows 10 build below the capture-exclusion floor', () => {
+    // Below 19041 the overlay is a black rectangle rather than invisible
+    // (NFR-012), so MW-01 on such a machine is testing something else.
+    const dir = fakeRecord('v1.0.0', { windows10: '18363' });
+    const { code, output } = run(CHECK_RECORD, ['v1.0.0', `--dir=${dir}`]);
+    expect(code).toBe(1);
+    expect(output).toContain('below 19041');
+  });
+
+  it('does not retroactively invalidate a merged record when the checklist grows', () => {
+    // The sweep that runs on every pull request checks what each record claims.
+    // Requiring today's full list of yesterday's record would fail every pull
+    // request until someone invented evidence for an old binary.
+    const dir = fakeRecord('v1.0.0', { omitRows: ['MW-15'] });
+    const { code } = run(CHECK_RECORD, [`--dir=${dir}`]);
+    expect(code).toBe(0);
+
+    // Named as the release being prepared, the same record is held to all of it.
+    const named = run(CHECK_RECORD, ['v1.0.0', `--dir=${dir}`]);
+    expect(named.code).toBe(1);
+    expect(named.output).toContain('MW-15 has no row');
   });
 
   it('blocks a record copied from the previous release', () => {
@@ -300,7 +388,7 @@ describe('TC-166 a release is gated on its recorded checklist', () => {
     const dir = fakeRecord('v1.0.0', { omitField: 'Tester' });
     const { code, output } = run(CHECK_RECORD, ['v1.0.0', `--dir=${dir}`]);
     expect(code).toBe(1);
-    expect(output).toContain('no **tester** field');
+    expect(output).toContain('no **Tester** field');
   });
 
   it('blocks a check recorded twice, which leaves the outcome ambiguous', () => {
