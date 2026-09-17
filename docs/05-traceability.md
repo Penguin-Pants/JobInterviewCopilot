@@ -9,7 +9,7 @@ so a requirement could report coverage with no test that would fail if it
 broke. The script exits non-zero on any gap, so CI fails when the documents
 drift.
 
-Coverage: 107 requirements, 27 tasks, 131 automated test cases, 13 manual checks.
+Coverage: 107 requirements, 27 tasks, 131 automated test cases, 14 manual checks.
 
 ## Requirement to task to test
 
@@ -109,7 +109,7 @@ Coverage: 107 requirements, 27 tasks, 131 automated test cases, 13 manual checks
 | NFR-002 | TASK-011, TASK-050 | TC-042, TC-137 |
 | NFR-003 | TASK-004 | TC-022, TC-023, TC-139 |
 | NFR-004 | TASK-050 | TC-131 |
-| NFR-005 | TASK-050 | TC-131 |
+| NFR-005 | TASK-050 | TC-131, MW-14 |
 | NFR-006 | TASK-001 | TC-001 |
 | NFR-007 | TASK-043 | TC-112 |
 | NFR-008 | TASK-050 | TC-132, TC-161 |
@@ -152,5 +152,5 @@ Coverage: 107 requirements, 27 tasks, 131 automated test cases, 13 manual checks
 | TASK-044 | Live session loop — COMPLETE | FR-008, FR-046, FR-047, FR-050, FR-051, FR-052, FR-053, FR-054, FR-055, FR-072, FR-075, FR-076, FR-100, FR-101, FR-102, FR-103, FR-105, FR-106 | TC-071, TC-080, TC-086, TC-087, TC-088, TC-164 |
 | TASK-042 | Dashboard UI — COMPLETE | FR-023, FR-024, FR-025, FR-026, FR-027, FR-028, FR-029, FR-030, FR-031, FR-032, FR-038, FR-080, FR-087, FR-088, FR-110, NFR-010, NFR-014 | TC-120, TC-121, TC-122, TC-123, TC-124, TC-125, TC-154, TC-158 |
 | TASK-043 | Overlay UI — COMPLETE | FR-006, FR-007, FR-008, FR-076, FR-085, FR-089, FR-090, FR-091, FR-092, FR-093, FR-094, FR-102, NFR-007, NFR-010, NFR-012 | TC-006, TC-110, TC-111, TC-112, TC-113, TC-114, TC-115, TC-116, TC-117, TC-138, TC-142 |
-| TASK-050 | Global resilience — COMPLETE | NFR-001, NFR-002, NFR-004, NFR-005, NFR-008, NFR-009 | TC-130, TC-131, TC-132, TC-133, TC-137, MW-06 |
-| TASK-051 | Release pipeline | NFR-011, NFR-013, NFR-015 | MW-01, MW-02, MW-03, MW-04, MW-05, MW-06, MW-07, MW-08, MW-09, MW-10, MW-11, MW-12, MW-13 |
+| TASK-050 | Global resilience — COMPLETE | NFR-001, NFR-002, NFR-004, NFR-005, NFR-008, NFR-009 | TC-130, TC-131, TC-132, TC-133, TC-137, MW-06, MW-14 |
+| TASK-051 | Release pipeline | NFR-011, NFR-013, NFR-015 | MW-01, MW-02, MW-03, MW-04, MW-05, MW-06, MW-07, MW-08, MW-09, MW-10, MW-11, MW-12, MW-13, MW-14 |

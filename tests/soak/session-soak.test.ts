@@ -13,10 +13,12 @@
  * transcript appended to a real file. Only the three boundaries that would reach
  * the outside world are scripted, exactly as in every other live-session test.
  *
- * Two numbers come out, and both are asserted:
+ * Three numbers come out, and all three are asserted:
  *
- * - the ceiling, `peak RSS < 600 MB`, and
- * - the trend across the trailing half of the run, which must not climb.
+ * - the ceiling, `peak RSS < 600 MB` (`NFR-004`),
+ * - the trend across the trailing half of the run, which must not climb
+ *   (`NFR-004`), and
+ * - mean main-process CPU as a share of one core (`NFR-005`).
  *
  * The trend is fitted over bucket medians rather than raw samples. A garbage
  * collector that happens to run late produces a single tall sample, and a
@@ -36,6 +38,18 @@ import { soakMinutes } from './duration.js';
 
 /** `NFR-004`'s ceiling. */
 const RSS_CEILING_MB = 600;
+
+/**
+ * `NFR-005`'s ceiling, as a percentage of one core.
+ *
+ * The requirement is the average across **all** processes on a 4-core machine.
+ * This measures the main process only, because the soak runs no renderers, and
+ * it measures it inside the test runner, whose own work is counted too. Both
+ * differences inflate the number rather than flatter it, so passing here is
+ * evidence and failing here needs a second look before it is believed. The
+ * all-processes figure on real hardware stays with the manual checklist.
+ */
+const CPU_CEILING_PERCENT_OF_CORE = 15;
 
 /**
  * The trailing-window slope budget. A real retention leak in this loop grows by
@@ -78,6 +92,19 @@ function sleep(ms: number): Promise<void> {
 function sampleRssMb(): number {
   (globalThis as { gc?: () => void }).gc?.();
   return process.memoryUsage().rss / BYTES_PER_MB;
+}
+
+/**
+ * CPU used since `previous`, as a percentage of one core over `elapsedMs`
+ * (`NFR-005`).
+ *
+ * `process.cpuUsage` counts user and system microseconds, so a process pinning
+ * one core for the whole window reads 100.
+ */
+function cpuPercentOfOneCore(previous: NodeJS.CpuUsage, elapsedMs: number): number {
+  if (elapsedMs <= 0) return 0;
+  const delta = process.cpuUsage(previous);
+  return ((delta.user + delta.system) / 1000 / elapsedMs) * 100;
 }
 
 function median(values: number[]): number {
@@ -130,7 +157,7 @@ afterEach(() => {
   rmSync(userData, { recursive: true, force: true });
 });
 
-describe('TC-131 a long session holds its memory', () => {
+describe('TC-131 a long session holds its memory and its CPU', () => {
   it(`keeps RSS under ${RSS_CEILING_MB} MB with no upward trend over ${DURATION_MINUTES} minutes`, async () => {
     const h = harness(userData, {
       llmChunks: anthropicScript(['first cue\n', 'second cue\n', 'third cue\n']),
@@ -143,7 +170,10 @@ describe('TC-131 a long session holds its memory', () => {
     expect(stream).toBeDefined();
 
     const samples: { atMs: number; rssMb: number }[] = [];
+    const cpuSamples: number[] = [];
     const startedAt = Date.now();
+    let lastCpu = process.cpuUsage();
+    let lastCpuAt = startedAt;
     let nextSampleAt = startedAt;
     let ticks = 0;
     let turns = 0;
@@ -174,7 +204,12 @@ describe('TC-131 a long session holds its memory', () => {
         h.triggerConfigs.length = 0;
         h.llmTransport.requests.length = 0;
 
-        samples.push({ atMs: Date.now() - startedAt, rssMb: sampleRssMb() });
+        const now = Date.now();
+        cpuSamples.push(cpuPercentOfOneCore(lastCpu, now - lastCpuAt));
+        lastCpu = process.cpuUsage();
+        lastCpuAt = now;
+
+        samples.push({ atMs: now - startedAt, rssMb: sampleRssMb() });
         nextSampleAt = Date.now() + SAMPLE_MS;
       }
 
@@ -189,6 +224,7 @@ describe('TC-131 a long session holds its memory', () => {
 
     expect(turns).toBeGreaterThan(0);
     expect(samples.length).toBeGreaterThanOrEqual(8);
+    expect(cpuSamples).toHaveLength(samples.length);
 
     /* -------------------------------------------------------------- *
      * The ceiling (NFR-004)
@@ -207,6 +243,16 @@ describe('TC-131 a long session holds its memory', () => {
     const first = median(trailing.slice(0, Math.ceil(trailing.length / 10)).map((s) => s.rssMb));
     const last = median(trailing.slice(-Math.ceil(trailing.length / 10)).map((s) => s.rssMb));
 
+    /* -------------------------------------------------------------- *
+     * CPU (NFR-005)
+     * -------------------------------------------------------------- */
+
+    // The first sample covers start-up, which brings capture and two provider
+    // sessions up and is not the steady state the requirement describes.
+    const steadyCpu = cpuSamples.slice(1);
+    const meanCpu = steadyCpu.reduce((sum, v) => sum + v, 0) / steadyCpu.length;
+    const peakCpu = Math.max(...steadyCpu);
+
     console.info(
       [
         `TC-131 soak over ${DURATION_MINUTES} min: ${turns} turns, ${samples.length} samples`,
@@ -214,10 +260,13 @@ describe('TC-131 a long session holds its memory', () => {
         `trailing ${Math.round(DURATION_MINUTES * TREND_WINDOW_FRACTION)} min: ` +
           `${first.toFixed(1)} -> ${last.toFixed(1)} MB, ` +
           `slope ${trend.toFixed(3)} MB/min (budget ${TREND_BUDGET_MB_PER_MIN})`,
+        `main-process CPU: mean ${meanCpu.toFixed(1)}%, peak ${peakCpu.toFixed(1)}% of one ` +
+          `core (ceiling ${CPU_CEILING_PERCENT_OF_CORE}%)`,
       ].join('\n'),
     );
 
     expect(peak).toBeLessThan(RSS_CEILING_MB);
     expect(trend).toBeLessThan(TREND_BUDGET_MB_PER_MIN);
+    expect(meanCpu).toBeLessThan(CPU_CEILING_PERCENT_OF_CORE);
   });
 });

@@ -33,6 +33,7 @@ import { OverlayGate, type GatedMessage } from './overlay-gate.js';
 import { RagEngine, SUPPORTED_EXTENSIONS } from './rag.js';
 import { installGlobalHandlers, useAppOwnedTempDir } from './resilience.js';
 import { SecretVaultStore } from './secrets.js';
+import { SessionNoticeHolder } from './session-notice.js';
 import {
   SessionManager,
   SessionStartRefused,
@@ -86,6 +87,15 @@ let overlayGate: OverlayGate;
 let sessions: SessionManager;
 let cost: CostMeter;
 let live: LiveSessionLoop;
+
+/**
+ * The fault standing against the live session (`CH-217`, NFR-008, TASK-050).
+ *
+ * Constructed at module scope rather than in `bootstrap`, alongside the windows
+ * it outlives: a Dashboard closed and reopened mid-session must get its warning
+ * back, and holding it anywhere the window owns would lose it with the window.
+ */
+const sessionNotices = new SessionNoticeHolder();
 
 /**
  * Resolves when crash recovery has finished (`FR-105`, `FR-108`).
@@ -343,9 +353,10 @@ async function bootstrap(): Promise<void> {
     // renderer has no use for one it cannot act on (FR-034, NFR-003).
     onError: (message, detail) => {
       getLogger().error(message, detail);
-      const sessionId = sessions.current?.id;
-      if (!sessionId) return;
-      push(dashboardWindow?.webContents, 'notice:session', { sessionId, message });
+      // Retained as well as pushed, so a Dashboard closed and reopened during
+      // the session gets it back (CH-217, TC-132).
+      const notice = sessionNotices.note(sessions.current?.id, message);
+      if (notice) push(dashboardWindow?.webContents, 'notice:session', notice);
     },
     onInfo: (message, detail) => getLogger().info(message, detail),
   });
@@ -584,6 +595,11 @@ function wireDashboardWindow(): void {
     // was therefore missing from every reopened window.
     reportPlatform(dashboardWindow?.webContents);
     reportCaptureFidelity(dashboardWindow?.webContents);
+    // And the fault standing against the session now running. Without this a
+    // Dashboard reopened mid-session renders it as active with no warning
+    // beside it, which is the silent failure CH-217 exists to end (NFR-008).
+    const notice = sessionNotices.noticeFor(sessions.current?.id);
+    if (notice) push(dashboardWindow?.webContents, 'notice:session', notice);
   });
   dashboardWindow.on('closed', () => {
     dashboardWindow = null;

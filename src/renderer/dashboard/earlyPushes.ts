@@ -30,6 +30,10 @@ const REPLAYED: PushChannel[] = [
   // Dashboard whose first effect ran late would otherwise render the acrylic
   // option enabled on a Windows 10 build until something else changed (FR-089).
   'notice:platform',
+  // Replayed on `did-finish-load` for the session running now (CH-217). A
+  // Dashboard reopened mid-session would otherwise render it as active with no
+  // warning beside it, which is the silent failure the channel exists to end.
+  'notice:session',
 ];
 
 const latest = new Map<PushChannel, unknown>();

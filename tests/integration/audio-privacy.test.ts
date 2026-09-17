@@ -18,6 +18,7 @@
  * reason: a spool by something outside this process's `fs` calls still has to
  * land somewhere, and `useAppOwnedTempDir` makes that somewhere knowable.
  */
+import { createServer, type Server } from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -92,7 +93,7 @@ vi.mock('node:fs/promises', async () => {
 });
 
 const { clearSttProviders } = await import('../../src/main/ai/stt.js');
-const { createWhisperProvider, WHISPER_BUFFER_CHUNKS } =
+const { createWhisperProvider, postWavToOpenAi, WHISPER_BUFFER_CHUNKS } =
   await import('../../src/main/ai/stt/whisper.js');
 const { appOwnedTempEntries, useAppOwnedTempDir } = await import('../../src/main/resilience.js');
 const { defaultSettings } = await import('../../src/shared/defaults.js');
@@ -125,18 +126,50 @@ function whisperSettings() {
 /** The variables `useAppOwnedTempDir` sets, saved so this process gets them back. */
 const TEMP_VARS = ['TMPDIR', 'TEMP', 'TMP'] as const;
 
+/**
+ * A loopback stand-in for the transcription endpoint.
+ *
+ * The production transport posts to it, so `fetch` and the multipart
+ * serialization beneath it run for real. A fake `post` would have skipped both,
+ * and they are where a spool to a temp file would happen (`ADR-019`).
+ */
+function transcriptionServer(): Promise<{ server: Server; url: string; bodyBytes: number[] }> {
+  const bodyBytes: number[] = [];
+  const server = createServer((req, res) => {
+    let received = 0;
+    req.on('data', (chunk: Buffer) => {
+      received += chunk.byteLength;
+    });
+    req.on('end', () => {
+      bodyBytes.push(received);
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end('a transcribed sentence');
+    });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      const port = typeof address === 'object' && address ? address.port : 0;
+      resolve({ server, url: `http://127.0.0.1:${port}/v1/audio/transcriptions`, bodyBytes });
+    });
+  });
+}
+
 let userData: string;
 let savedTempVars: Record<string, string | undefined>;
+let endpoint: { server: Server; url: string; bodyBytes: number[] } | null;
 
 beforeEach(() => {
   clearSttProviders();
   userData = mkdtempSync(join(tmpdir(), 'icp-audio-privacy-'));
   savedTempVars = Object.fromEntries(TEMP_VARS.map((name) => [name, process.env[name]]));
+  endpoint = null;
 });
 
-afterEach(() => {
+afterEach(async () => {
   monitor.stopRecording();
   clearSttProviders();
+  if (endpoint) await new Promise<void>((resolve) => endpoint!.server.close(() => resolve()));
   for (const name of TEMP_VARS) {
     if (savedTempVars[name] === undefined) delete process.env[name];
     else process.env[name] = savedTempVars[name];
@@ -155,13 +188,19 @@ describe('TC-137 no audio reaches the filesystem', () => {
     expect(appOwnedTempEntries(appTemp)).toEqual([]);
     expect(tmpdir()).toBe(appTemp);
 
-    // The transport that would have posted to OpenAI. It keeps each body so the
-    // "built in memory, never a path and never a stream" half of ADR-019 is
-    // asserted rather than assumed.
+    // The **production** transport, pointed at a loopback server. `fetch` and
+    // the multipart serialization underneath it therefore run for real, which
+    // is the only way this test can observe a third-party spool: a fake `post`
+    // never reaches the code that would commit one (ADR-019).
+    endpoint = await transcriptionServer();
+    const realPost = postWavToOpenAi(endpoint.url);
+
+    // Wrapped, not replaced, so each body is still inspectable for the "built
+    // in memory, never a path and never a stream" half of ADR-019.
     const bodies: FormData[] = [];
-    const post = (body: FormData) => {
+    const post = (body: FormData, key: string) => {
       bodies.push(body);
-      return Promise.resolve({ ok: true, status: 200, text: 'a transcribed sentence' });
+      return realPost(body, key);
     };
 
     const h = harness(userData, {
@@ -185,6 +224,13 @@ describe('TC-137 no audio reaches the filesystem', () => {
     const session = await stopSession(h);
     monitor.stopRecording();
 
+    // Every window really crossed the wire. Without this the assertions below
+    // could hold because nothing was ever transmitted.
+    expect(endpoint.bodyBytes.length).toBeGreaterThanOrEqual(4);
+    for (const bytes of endpoint.bodyBytes) {
+      expect(bytes).toBeGreaterThan(ONE_SECOND_BYTES);
+    }
+
     /* -------------------------------------------------------------- *
      * The monitor saw real traffic
      * -------------------------------------------------------------- */
@@ -194,7 +240,7 @@ describe('TC-137 no audio reaches the filesystem', () => {
     expect(monitor.writes.length).toBeGreaterThan(0);
     expect(monitor.writes.some((w) => w.via.startsWith('FileHandle.'))).toBe(true);
 
-    // And the audio really went somewhere: two windows per stream, four bodies.
+    // And the adapter really built four bodies: two windows per stream.
     expect(bodies.length).toBeGreaterThanOrEqual(4);
 
     /* -------------------------------------------------------------- *

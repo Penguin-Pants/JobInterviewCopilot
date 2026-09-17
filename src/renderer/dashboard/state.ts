@@ -100,11 +100,14 @@ export function useDashboardData(): DashboardData {
   /**
    * The last thing that went wrong with the session itself (`CH-217`, NFR-008).
    *
-   * Not replayed. It is pushed while a session is being brought up, which a
-   * renderer loaded before then cannot miss, and one loaded afterwards is
-   * better off showing nothing than showing a fault it cannot place.
+   * Seeded from the early buffer like the other replayed channels. Main retains
+   * the notice for the session running now and pushes it again on
+   * `did-finish-load`, so a Dashboard closed and reopened mid-session gets its
+   * warning back rather than rendering a live session with nothing beside it.
    */
-  const [sessionNotice, setSessionNotice] = useState<SessionNotice | null>(null);
+  const [sessionNotice, setSessionNotice] = useState<SessionNotice | null>(
+    () => lastSeen('notice:session') ?? null,
+  );
   /**
    * What the host machine supports (`CH-216`, FR-089).
    *
@@ -249,6 +252,8 @@ export function useDashboardData(): DashboardData {
     if (earlyNotice) setCaptureNotice(earlyNotice.message);
     const earlyPlatform = lastSeen('notice:platform');
     if (earlyPlatform) setPlatform(earlyPlatform);
+    const earlySessionNotice = lastSeen('notice:session');
+    if (earlySessionNotice) setSessionNotice(earlySessionNotice);
 
     return () => off.forEach((unsubscribe) => unsubscribe());
   }, []);

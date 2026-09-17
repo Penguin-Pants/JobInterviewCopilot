@@ -182,9 +182,18 @@ export class WhisperSttSession implements SttSession {
   }
 }
 
-export function postWavToOpenAi(): PostWav {
+/**
+ * The real transport (`NFR-002`, `ADR-019`).
+ *
+ * `url` is a parameter so `TC-137` can point the **production** transport at a
+ * loopback server. Injecting a fake `post` instead would skip `fetch` and the
+ * multipart serialization underneath it, which is precisely where a third-party
+ * spool to a temp file would happen, so the test that exists to catch one would
+ * never execute the code that could commit it.
+ */
+export function postWavToOpenAi(url: string = WHISPER_TRANSCRIBE_URL): PostWav {
   return async (body, key) => {
-    const res = await fetch(WHISPER_TRANSCRIBE_URL, {
+    const res = await fetch(url, {
       method: 'POST',
       headers: { Authorization: `Bearer ${key}` },
       body,
