@@ -1406,7 +1406,28 @@ narrow as its worst call pattern.
 
 ### ADR-040 — Magic UI could not be vendored, and what was built instead
 
-**Status.** Accepted with a carried remainder, TASK-043.
+**Status. SUPERSEDED by ADR-042.** The premise below is wrong: Magic UI's
+source **is** reachable from this environment, and it is now vendored. The
+record is kept rather than deleted, because how the wrong conclusion was
+reached is worth more than the conclusion was.
+
+**What was wrong.** "Unreachable" was concluded from four probes, none of
+which was the one that works. `magicui.design`, `cdn.jsdelivr.net` and
+`unpkg.com` are genuinely refused by the egress proxy, and the two npm
+packages genuinely carry no component source. But the fourth probe was
+`curl https://api.github.com/repos/magicuidesign/magicui`, the GitHub **API**,
+which is gated per session and answered:
+
+> GitHub access to this repository is not enabled for this session. Use
+> `add_repo` to request access.
+
+That answer names its own remedy, and it was read as a refusal instead. A plain
+`git clone` of a public repository is served by this session's git proxy and
+always was; `add_repo` confirms it in one call. Four probes that all fail can
+still be the wrong four, and an error message that tells you what to do next is
+evidence, not a verdict.
+
+**Status (original).** Accepted with a carried remainder, TASK-043.
 
 **Context.** `FR-094` says overlay cards "must be built from Magic UI
 components on Tailwind, styled from the theme tokens in `FR-029`". The
@@ -1442,6 +1463,58 @@ verifies `NFR-016`, is unaffected: it drives the checker against a fixture, so
 it does not need a real vendored file. Swapping the first-party components for
 Magic UI's later is a contained change: they are four small components behind
 the props `Overlay.tsx` already passes.
+
+---
+
+### ADR-042 — Which Magic UI component the overlay uses, and which it does not
+
+**Status.** Accepted, TASK-043 follow-up. Supersedes ADR-040.
+
+**Context.** `FR-094` requires overlay cards to be "built from Magic UI
+components on Tailwind, styled from the theme tokens in `FR-029`". With the
+source in hand, the question stops being whether Magic UI can be obtained and
+becomes which of its 79 components actually serve this overlay.
+
+**Decision.**
+
+- **`BlurFade` is vendored and is the bullet reveal.** It is the canonical
+  fade-plus-offset reveal and its default shape is exactly what `FR-092`
+  specifies. It lives at `src/renderer/overlay/vendor/blur-fade.tsx` with its
+  source, commit and MIT license in `VENDORED.md`, and is byte-identical to
+  upstream apart from four marked lines: the import is rewritten to
+  `framer-motion`, and three type widenings describe what the body already does
+  but that this repository's stricter compiler rejected. It is driven through
+  its public props only, so the file can be refreshed by re-copying it.
+- **`MagicCard` is deliberately not used**, and the reasons are this
+  application's requirements rather than anything wrong with the component. It
+  is a pointer-tracking hover gradient, and the overlay is click-through by
+  default and forwards mouse events to whatever is behind it (`FR-083`), which
+  is the mode a user spends an entire interview in. It draws its surface from
+  shadcn tokens rather than the `FR-029` tokens `theme.ts` computes, and those
+  carry the alpha floor `FR-093`'s contrast depends on (ADR-039). It imports
+  `next-themes` and a shadcn `@/lib/utils`. Its orb mode animates a large
+  blurred element against `NFR-007`'s 60 fps on integrated graphics.
+- **`AnimatedList` is not used either.** It reveals children on a `setTimeout`
+  interval, whereas the stack is driven by `CH-207` arriving over IPC, and its
+  `scale: 0` entry and exit would move text a user may be halfway through
+  reading.
+- **Both variants are supplied to `BlurFade` explicitly**, rather than
+  inheriting its defaults. `blur="0px"` stops the filter being *animated* but
+  the default variants still set `filter: blur(0px)` on the element, which
+  promotes a compositing layer per bullet for no visible effect; measured on the
+  built renderer, a computed `filter` was present on every bullet. Supplying
+  both variants also leaves exactly one difference between the motion modes, the
+  slide, which is the one `NFR-010` names.
+
+**Consequences.** `FR-094` is **substantially met**: the reveal is Magic UI, the
+cards are on Tailwind, and the colours are the `FR-029` tokens. What remains is
+a product judgement rather than an obstacle: whether the card surface should be
+`MagicCard` despite the four objections above. That is carried to `TASK-051` as
+a decision to confirm, not as work that was blocked.
+
+`TC-146` proved itself on the way in. The first vendored file in the
+repository's history was rejected by the license gate for having no
+`VENDORED.md` row, which is exactly what `NFR-016` asks of it.
 
 ---
 

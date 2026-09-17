@@ -18,7 +18,22 @@ import { afterEach, describe, expect, it } from 'vitest';
  * (NFR-016), and passes on the real dependency tree (NFR-015).
  */
 
-const FIXTURE_DIR = 'src/renderer/overlay/vendor';
+/**
+ * The fixture lives in a directory of the test's own, not in a real one.
+ *
+ * It used to be `src/renderer/overlay/vendor`, which is where vendored code
+ * actually goes, and `afterEach` removed that directory **recursively**. That
+ * was harmless for exactly as long as nothing was vendored: the first real
+ * file to land there, Magic UI's `blur-fade.tsx`, was deleted by the first run
+ * of this suite, and the only symptom was a later `tsc` failing to resolve an
+ * import that had been there a minute earlier.
+ *
+ * `findVendorDirs` in the gate walks `src/renderer` for any directory named
+ * `vendor`, so a fixture under a clearly-owned parent is found by exactly the
+ * same code path and cannot collide with anything real (NFR-016).
+ */
+const FIXTURE_PARENT = 'src/renderer/__fixture-licenses__';
+const FIXTURE_DIR = `${FIXTURE_PARENT}/vendor`;
 const FIXTURE = `${FIXTURE_DIR}/__fixture-card.tsx`;
 
 function runChecker(): { code: number; output: string } {
@@ -56,7 +71,35 @@ function loadIdentifier(): (dir: string) => string | null {
 }
 
 afterEach(() => {
-  if (existsSync(FIXTURE_DIR)) rmSync(FIXTURE_DIR, { recursive: true, force: true });
+  // The fixture's own parent, and nothing above it. Removing a directory this
+  // suite did not create is how a real vendored file was deleted once already.
+  if (existsSync(FIXTURE_PARENT)) rmSync(FIXTURE_PARENT, { recursive: true, force: true });
+});
+
+/**
+ * The cleanup above must not be able to reach real vendored code again.
+ *
+ * Asserted rather than trusted to the constant, because the failure mode is
+ * silent: the suite passes, the file is gone, and the next command to notice is
+ * a compile in some later step.
+ */
+describe('TC-146 the fixture cannot collide with real vendored code', () => {
+  it('is confined to a directory this suite owns', () => {
+    expect(FIXTURE_PARENT).toContain('__fixture');
+    expect(FIXTURE_DIR.startsWith(FIXTURE_PARENT)).toBe(true);
+  });
+
+  it('leaves real vendored files alone', () => {
+    // Every vendored file the manifest declares still exists after this suite
+    // has created and cleaned up its fixture.
+    const manifest = readFileSync('VENDORED.md', 'utf8');
+    const declared = [...manifest.matchAll(/`(src\/renderer\/[^`]*\/vendor\/[^`]+)`/g)].map(
+      (m) => m[1] as string,
+    );
+    for (const file of declared) {
+      expect(existsSync(file), `${file} is declared in VENDORED.md but is not on disk`).toBe(true);
+    }
+  });
 });
 
 describe('TC-146 license gate', () => {

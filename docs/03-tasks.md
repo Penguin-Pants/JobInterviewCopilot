@@ -1062,7 +1062,10 @@ vague intention:
 `TASK-043` closed the two follow-ups Milestone 3 carried to it, and `FR-089`'s
 Dashboard half, which `TASK-042` carried. One requirement is **partially met**
 and is carried forward rather than claimed: `FR-094`'s Magic UI half, because
-Magic UI's source is unreachable from the build environment (ADR-040).
+Magic UI's source **is** reachable and `BlurFade` is now vendored
+(ADR-042, which supersedes ADR-040). `FR-094` is substantially met: the reveal
+is Magic UI, the cards are on Tailwind and the colours are the `FR-029` tokens.
+What remains is a product judgement rather than an obstacle.
 
 ### TASK-040 Session manager and transcript — COMPLETE
 **Traces** FR-088, FR-101, FR-105, FR-106, FR-107, FR-108, ADR-003, ADR-013, ADR-018
@@ -1595,11 +1598,18 @@ it caught it.
 | **The consent reminder could be pushed 2386 px off the top of the window.** Its text was sized in `em`, so it scaled with `FR-093`'s 16 to 32 px control, and the shell let the whole column overflow | At 32 px the reminder alone was 297 px in a 260 px window, and `justify-end` pushed it and most of the newest card off the top. `FR-006` requires the reminder to be **displayed**, and one that is entirely above the viewport is not | The reminder and the size control are chrome, not suggestion text, so they are sized in pixels. Exactly one region is allowed to overflow, the card stack, and it clips from the top: the newest cue sits against the bottom of the window and the oldest card is what goes. Measured again after the fix, and asserted by `TC-006` |
 | **`FR-093`'s contrast could not hold at 0.3 opacity** under any reading that a test can check | A dark card at 0.3 over a white desktop composites to about 70 percent grey, where white text is roughly 2 to 1. The requirement would have been true in the test and false in the product | The card surface carries an alpha floor computed from the palette, and `TC-114` asserts both that the raw minimum would fail and that a step below the floor already fails, so the floor cannot be removed or padded without the suite noticing (ADR-039) |
 
+**Found in the TASK-043 follow-up that vendored Magic UI**
+
+| Defect | Consequence | Fix |
+|---|---|---|
+| **`TC-146` deleted real vendored code.** Its fixture directory was `src/renderer/overlay/vendor`, the path real vendored code lives at, and its `afterEach` removed that directory **recursively** rather than the file it created | Harmless for exactly as long as nothing was vendored. The first real file to land there, Magic UI's `blur-fade.tsx`, was deleted by the first run of the integration suite, and the only symptom was a `tsc` a minute later failing to resolve an import that had been fine. A test whose cleanup is wider than what it created, guarding the very feature it destroys | The fixture moved to `src/renderer/__fixture-licenses__/vendor`, which the gate's `findVendorDirs` walks identically and which nothing real can occupy, and the cleanup is confined to that parent. Two new cases pin it: the fixture path is asserted to be the suite's own, and every file `VENDORED.md` declares is asserted to still exist after the suite has run |
+| **The premise of ADR-040 was wrong.** "Magic UI's source is unreachable" was concluded from four probes, none of which was a plain `git clone` | The conclusion was recorded in the decision log, the architecture's dependency table, `VENDORED.md` and this document, and shipped. The fourth probe was the GitHub **API**, whose refusal names `add_repo` as its own remedy; that was read as a verdict rather than as evidence. Four failing probes can still be the wrong four | ADR-042 supersedes ADR-040 and records how the wrong conclusion was reached, because that is worth more than the conclusion was. The three documents carrying the claim are corrected |
+
 **Deferred, with an owner**
 
 | Item | Why it is not done here | Owner |
 |---|---|---|
-| `FR-094`'s Magic UI half. The cards are on Tailwind and on the `FR-029` tokens; they are not Magic UI components | Magic UI's source is unreachable from the build environment: `magicui.design`, `raw.githubusercontent.com`, `cdn.jsdelivr.net` and `unpkg.com` are refused by the egress proxy, and its two npm packages are registry clients carrying no component source. Writing a `VENDORED.md` provenance row for code that was not copied from there would be a false statement in the file `NFR-016` exists to make trustworthy (ADR-040) | TASK-051 |
+| ~~`FR-094`'s Magic UI half~~ **Closed in the TASK-043 follow-up.** `BlurFade` is vendored and is the bullet reveal; the original entry's premise, that the source was unreachable, was wrong (ADR-042 supersedes ADR-040). What is carried on is smaller and is a decision rather than work: **confirm that the suggestion card's surface should stay first-party rather than `MagicCard`.** Four requirement-grounded objections are recorded in ADR-042, so the default is that it stays; this is an owner's confirmation, not an open task | TASK-051 |
 | `overlay:setFontSize` pushes `CH-211` to the overlay but nothing pushes settings to the Dashboard | The focus re-read closes the practical window without a contract change, the same way `earlyPushes.ts` closed the Dashboard's session-state race. A `CH-2xx settings:changed` push is the right fix if a third writer of one setting ever appears | TASK-050 |
 | A rebuilt overlay is replayed the card it missed, but the **idle** and **paused** state it rebuilds into comes from `CH-212` and `CH-201`, which are pushed on load rather than reconciled | Harmless today: both are pushed on `did-finish-load` and seeded from `earlyPushes`, so the window is correct by its first paint. It is the same reconciliation gap `TASK-042` carried for the settings, and it belongs with that one | TASK-050 |
 | `tailwindcss` and `@tailwindcss/vite` are devDependencies, so their `lightningcss` (MPL-2.0) is outside the license gate's `--production` scope | That scope is the existing policy, not an exception made here: `vite`, `electron-builder` and `typescript` are already outside it, and nothing of Tailwind reaches the shipped bundle. Whether the gate should also cover build-time licenses is a policy question for the release task | TASK-051 |
