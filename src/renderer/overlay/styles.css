@@ -1,0 +1,87 @@
+@import 'tailwindcss';
+
+/*
+ * Overlay styling (FR-090 to FR-094, NFR-007, NFR-010, TASK-043).
+ *
+ * Tailwind carries the layout and the typography; every colour comes from the
+ * custom properties `theme.ts` computes, because the contrast guarantee in
+ * `FR-093` is a calculation over those values and a second copy written here
+ * would be a copy that can drift out of the calculation's reach.
+ *
+ * `backdrop-filter` appears nowhere in this file. `FR-089` forbids it as a
+ * substitute for real acrylic: translucency is the window's, built by
+ * `overlayWindowOptions`, and CSS that imitated it would be a second blur the
+ * window does not know about.
+ */
+
+html,
+body {
+  margin: 0;
+  background: transparent;
+  overflow: hidden;
+  font-family: system-ui, 'Segoe UI', sans-serif;
+}
+
+/*
+ * A frameless window is not movable just because it accepts mouse events.
+ * Windows needs an explicit drag region, so the shell carries one in
+ * interactive mode and the controls inside it opt back out; without this the
+ * interaction toggle lets the user click the overlay but never move it
+ * (FR-082, FR-084).
+ */
+[data-drag-region] {
+  -webkit-app-region: drag;
+  cursor: move;
+}
+
+button,
+a,
+input,
+[data-no-drag] {
+  -webkit-app-region: no-drag;
+}
+
+/* The card surface, from the alpha `theme.ts` proved safe (FR-093, ADR-039). */
+.overlay-surface {
+  background-color: color-mix(
+    in srgb,
+    var(--overlay-surface) calc(var(--overlay-surface-alpha) * 100%),
+    transparent
+  );
+  color: var(--overlay-text);
+  border: 1px solid
+    color-mix(in srgb, var(--overlay-border) calc(var(--overlay-chrome-alpha) * 100%), transparent);
+}
+
+/*
+ * The mode affordance (FR-084, TC-117).
+ *
+ * Click-through and interactive have to be told apart at a glance, because the
+ * hotkey is the only thing that changes them and a user who cannot see which
+ * one they are in cannot tell a dead overlay from a live one. Interactive gets
+ * the accent frame and a ring; click-through gets neither.
+ */
+[data-interactive='true'] .overlay-surface {
+  border-color: var(--overlay-accent);
+  box-shadow: 0 0 0 2px
+    color-mix(in srgb, var(--overlay-accent) calc(var(--overlay-chrome-alpha) * 60%), transparent);
+}
+
+/*
+ * NFR-007: nothing animates while the overlay is idle.
+ *
+ * What actually guarantees it is the tree: going idle unmounts the card stack
+ * and its `AnimatePresence`, and the idle card is plain markup with no motion
+ * component behind it, so nothing motion-driven exists to be running.
+ *
+ * This rule is the narrower belt to that brace, and it is worth being exact
+ * about what it catches. It cancels **CSS**-declared animations and
+ * transitions, which is how a utility class or an inherited rule would sneak
+ * one in. It does not stop framer-motion, which drives WAAPI and writes inline
+ * styles, so a motion component added to the idle card later would still
+ * animate and this rule would not notice.
+ */
+[data-overlay-state='idle'] * {
+  animation: none !important;
+  transition: none !important;
+}

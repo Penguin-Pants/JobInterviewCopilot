@@ -9,8 +9,10 @@ import {
   screen,
   session,
   type OpenDialogOptions,
+  type WebContents,
 } from 'electron';
 import { AudioSupervisor } from './audio.js';
+import { throttleWrites } from './write-throttle.js';
 import {
   ElectronAudioWorkerHost,
   installLoopbackHandler,
@@ -334,8 +336,13 @@ async function bootstrap(): Promise<void> {
   registerIpcHandlers();
 
   const settings = config.get();
-  dashboardWindow = await createDashboardWindow(settings);
-  wireDashboardWindow();
+  // The callback form, for the reason `createOverlayWindow` uses it: `loadFile`
+  // resolves from inside `did-finish-load`, so wiring after the await attaches
+  // every replay listener to an event that has already fired (TASK-043).
+  await createDashboardWindow(settings, (win) => {
+    dashboardWindow = win;
+    wireDashboardWindow();
+  });
 
   // `onCreated` rather than the returned promise, and it is load-bearing.
   // `createOverlayWindow` constructs the window and then awaits its renderer, so
@@ -355,7 +362,6 @@ async function bootstrap(): Promise<void> {
   });
 
   registerHotkeys();
-  reportCaptureFidelity();
 
   // Re-open windows, never re-run bootstrap. A second bootstrap would build a
   // second ConfigStore and re-register every IPC channel, which throws.
@@ -456,8 +462,10 @@ async function startKnowledgeBase(): Promise<void> {
 /** Bring the Dashboard forward, creating it again when it has been closed. */
 async function focusOrRecreateDashboard(): Promise<void> {
   if (!dashboardWindow || dashboardWindow.isDestroyed()) {
-    dashboardWindow = await createDashboardWindow(config.get());
-    wireDashboardWindow();
+    await createDashboardWindow(config.get(), (win) => {
+      dashboardWindow = win;
+      wireDashboardWindow();
+    });
     return;
   }
   if (dashboardWindow.isMinimized()) dashboardWindow.restore();
@@ -469,8 +477,10 @@ async function focusOrRecreateDashboard(): Promise<void> {
 async function reopenWindows(): Promise<void> {
   const settings = config.get();
   if (!dashboardWindow || dashboardWindow.isDestroyed()) {
-    dashboardWindow = await createDashboardWindow(settings);
-    wireDashboardWindow();
+    await createDashboardWindow(settings, (win) => {
+      dashboardWindow = win;
+      wireDashboardWindow();
+    });
   }
   if (!overlayWindow || overlayWindow.isDestroyed()) {
     // The callback form, for the reason bootstrap uses it: assigning from the
@@ -549,6 +559,12 @@ function wireDashboardWindow(): void {
     pushSessionState();
     push(dashboardWindow?.webContents, 'model:download', rag.getModelState());
     push(dashboardWindow?.webContents, 'state:providers', health.snapshot());
+    // Both notices describe the machine rather than a moment, so a Dashboard
+    // that was closed and reopened needs them again: `FR-089`'s acrylic gate
+    // reads `CH-216`, and `NFR-012`'s warning was pushed once at bootstrap and
+    // was therefore missing from every reopened window.
+    reportPlatform(dashboardWindow?.webContents);
+    reportCaptureFidelity(dashboardWindow?.webContents);
   });
   dashboardWindow.on('closed', () => {
     dashboardWindow = null;
@@ -575,6 +591,38 @@ function wireOverlayWindow(): void {
     // channel to ask, so it would render the session as inactive until the next
     // transition. Reachable whenever the overlay is rebuilt (ADR-015).
     pushSessionState();
+    // What the machine can do, and the capture warning `NFR-012` puts beside
+    // the consent reminder. Both are sent before the renderer reports ready,
+    // for the same reason the consent text is: the card the warning belongs to
+    // has to be able to exist by the time readiness is claimed (ADR-016).
+    reportPlatform(overlayWindow?.webContents);
+    reportCaptureFidelity(overlayWindow?.webContents);
+  });
+
+  /**
+   * A document reload closes the gate as surely as the window closing does
+   * (FR-008, ADR-016).
+   *
+   * `closed` fires when the **window** goes away. It does not fire when the
+   * document is replaced under a window that stays, and the gate's invariant is
+   * about the document: `ready` means *this renderer* has painted the consent
+   * reminder. A new document reaches `overlay:ready` two animation frames after
+   * it mounts, and a gate still holding the old document's answer delivers into
+   * that interval: the messages reach a page with no subscription, `delivered`
+   * advances past them, and the begin is then never replayed, so the lines that
+   * follow arrive with no card to render them on.
+   *
+   * Nothing in this app reloads the overlay today, which is why this is an
+   * invariant repaired rather than a bug reproduced. A renderer that crashes, a
+   * reload from tooling, and `TC-115`, which reloads the overlay to pick up an
+   * emulated `prefers-reduced-motion`, all take the same path.
+   *
+   * `noteClosed` is exactly the right call: it keeps the card and resets only
+   * how much of it this renderer has been sent, so a generation streaming
+   * across the reload is replayed in full to the new document (ADR-015).
+   */
+  overlayWindow.webContents.on('did-start-loading', () => {
+    overlayGate.noteClosed();
   });
 
   overlayWindow.on('moved', () => {
@@ -681,8 +729,29 @@ function pushOverlayMode(): void {
  * Warn about degraded capture exclusion once per session, not once per install
  * (NFR-012). A user who dismissed this months ago must not be surprised by a
  * black rectangle in a screen share today.
+ *
+ * It goes to **both** windows (`CH-215`, TASK-043). `NFR-012` says the warning
+ * belongs "alongside the consent reminder", which is the overlay, and the IPC
+ * table said `overlay` from the day the channel was written down; the code
+ * pushed it to the Dashboard only and the overlay preload did not allow it, so
+ * the one window the sentence is about could never show it. The Dashboard keeps
+ * it because `FR-089` reads the build number there and because the overlay card
+ * is dismissible, so the Dashboard is where it can still be read afterwards.
+ *
+ * Sent to **the window that just loaded**, rather than to both from either
+ * handler, so a window is not told twice for one load. Both windows can be
+ * rebuilt: the overlay on a translucency change (ADR-015), the Dashboard by
+ * being closed and reopened, and a one-shot push at bootstrap left every
+ * rebuilt window with no warning at all.
+ *
+ * `NFR-012`'s "once per session" is about what the user is shown, and the
+ * overlay shows this inside the consent card, which is itself re-shown at each
+ * session boundary and at nothing else. The log line is emitted once per
+ * process, because a rebuilt window is not a new fact about the machine.
  */
-function reportCaptureFidelity(): void {
+let captureFidelityLogged = false;
+
+function reportCaptureFidelity(target: WebContents | undefined): void {
   const build = windowsBuildNumber();
   if (process.platform !== 'win32' || hasTrueCaptureExclusion(build)) return;
 
@@ -691,8 +760,41 @@ function reportCaptureFidelity(): void {
     'The overlay will appear as a black rectangle in screen shares and recordings. ' +
     'Windows 10 build 19041 or later is required for true exclusion.';
 
-  getLogger().warn('capture exclusion degraded', { build });
-  push(dashboardWindow?.webContents, 'notice:captureFidelity', { windowsBuild: build, message });
+  if (!captureFidelityLogged) {
+    captureFidelityLogged = true;
+    getLogger().warn('capture exclusion degraded', { build });
+  }
+  push(target, 'notice:captureFidelity', { windowsBuild: build, message });
+}
+
+/**
+ * Tell both renderers what this machine can do (`CH-216`, FR-089, ADR-038).
+ *
+ * `FR-089` requires the Dashboard to disable the acrylic option on Windows 10
+ * with an explanatory note, and until this channel existed no push carried a
+ * build number there unless capture fidelity was **also** degraded. A Windows
+ * 10 machine on build 19045 has exact capture exclusion and no acrylic, so it
+ * received nothing and the option stayed enabled over a mode the window cannot
+ * render.
+ *
+ * The overlay receives it too, for a different reason: `overlayWindowOptions`
+ * silently builds a transparent window when acrylic is asked for on a build
+ * that cannot render it, so the stored translucency and the window that exists
+ * can disagree. The renderer resolves the effective mode from this, and its
+ * contrast depends on which one it really is (FR-093).
+ *
+ * Off Windows the build number is 0 and acrylic is unsupported, which is the
+ * truth for the development container and keeps every gate falling closed.
+ *
+ * Sent to the window that just loaded, for the reason above: both windows are
+ * rebuildable and each one asks on its own load.
+ */
+function reportPlatform(target: WebContents | undefined): void {
+  const build = windowsBuildNumber();
+  push(target, 'notice:platform', {
+    windowsBuild: build,
+    acrylicSupported: supportsAcrylic(build),
+  });
 }
 
 /**
@@ -720,6 +822,30 @@ function triggerConfigFrom(settings: Settings, serving?: ProviderChoice | null):
     batchIntervalMs: model?.batchIntervalMs ?? 0,
   };
 }
+
+/**
+ * How often `CH-126` may reach the settings file, in milliseconds.
+ *
+ * Above a human's repeat-click rate, so a real adjustment is never delayed,
+ * and low enough that a hostile renderer buys five writes a second rather than
+ * as many as it can issue.
+ */
+const FONT_SIZE_WRITE_INTERVAL_MS = 200;
+
+/**
+ * The throttled writer behind `overlay:setFontSize` (FR-093, CH-126).
+ *
+ * The commit is the whole of what a write does: store the size and push the
+ * theme back, so the overlay renders the stored value rather than its own
+ * optimistic one, which is what makes the Dashboard control and the in-overlay
+ * one the same setting rather than two.
+ */
+const overlayFontSizeWrites = throttleWrites<number>((px) => {
+  const theme = config.get().theme;
+  if (px === theme.overlayFontSizePx) return;
+  const after = config.set({ theme: { ...theme, overlayFontSizePx: px } });
+  push(overlayWindow?.webContents, 'overlay:theme', after.theme);
+}, FONT_SIZE_WRITE_INTERVAL_MS);
 
 /** `CH-201`, from the Session Manager rather than from a second copy of the state. */
 function pushSessionState(): void {
@@ -878,6 +1004,11 @@ function registerIpcHandlers(): void {
       assertProfile(patch.activeProfileId);
     }
     const after = config.set(patch);
+    // A queued `CH-126` write is older than this one, and the throttle would
+    // otherwise re-read the theme this call just stored and put its own stale
+    // size back over it, reversing the user's last action. Only the newest
+    // writer may commit, so the pending one is dropped rather than delayed.
+    if (patch.theme !== undefined) overlayFontSizeWrites.cancel();
     await applyThemeChange(before, after);
     bindHealthFromSettings(after);
     // The trigger holds its own copy of the gap and the guard, so a settings
@@ -914,6 +1045,48 @@ function registerIpcHandlers(): void {
 
   router.handle('overlay:savePosition', ({ x, y, displayId }) => {
     config.set({ overlayWindow: { x, y, displayId } });
+    return { ok: true as const };
+  });
+
+  /**
+   * The in-overlay text size control (`CH-126`, FR-093).
+   *
+   * The range is enforced by the channel's schema, so an out-of-range value is
+   * refused by the router and never reaches here (CMP-10). The write goes
+   * through `config.set` like every other setting, so it persists, and the
+   * theme is pushed straight back: the overlay renders the stored value rather
+   * than its own optimistic one, which is what makes the Dashboard control and
+   * this one the same setting rather than two.
+   */
+  router.handle('overlay:setFontSize', ({ px }) => {
+    // Rate limited, not merely range checked. The schema bounds the value to
+    // 16 to 32 and the commit below drops a write that changes nothing, but
+    // neither bounds how often a renderer may call: alternating two sizes
+    // reaches `config.set` every time, and that is a **synchronous** settings
+    // write on the same event loop as the live audio and STT loop. The narrow
+    // write capability this channel exists to be would otherwise be a way for
+    // a compromised overlay renderer to stall an interview, which is worse
+    // than anything the allowlist was narrowed to prevent (FR-086).
+    //
+    // Leading edge, so one press still feels immediate, with the last value
+    // asked for committed when the window closes.
+    overlayFontSizeWrites.request(px);
+    return { ok: true as const };
+  });
+
+  /**
+   * The consent reminder was dismissed (`CH-120`, FR-006).
+   *
+   * Dismissal is renderer state: the card disappears whether or not this call
+   * succeeds, because `FR-006` is about the reminder being dismissible, not
+   * about the main process knowing. What the main process does with it is
+   * record it, so a transcript reader can tell a session where the reminder was
+   * acknowledged from one where it sat on screen untouched. Milestone 0 left
+   * this channel allowlisted with no handler, so every dismissal answered with
+   * an `IpcError` the overlay had to ignore.
+   */
+  router.handle('consent:dismiss', () => {
+    getLogger().info('consent reminder dismissed');
     return { ok: true as const };
   });
 

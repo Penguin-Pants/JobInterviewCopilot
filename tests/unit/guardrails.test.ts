@@ -181,12 +181,21 @@ describe('TC-008 content security policy', () => {
  * directions are now allowlisted, and the overlay's list is deliberately tiny.
  */
 describe('FR-086 preload invoke allowlists', () => {
-  it('the overlay may invoke only the three channels its UI needs', () => {
+  it('the overlay may invoke only the four channels its UI needs', () => {
     const source = readFileSync('src/preload/overlay.ts', 'utf8');
     const block = /ALLOWED_INVOKE[^=]*=\s*\[([^\]]*)\]/s.exec(source)?.[1] ?? '';
     const channels = [...block.matchAll(/'([^']+)'/g)].map((m) => m[1]).sort();
 
-    expect(channels).toEqual(['consent:dismiss', 'overlay:ready', 'overlay:savePosition']);
+    // The fourth is `overlay:setFontSize` (CH-126, TASK-043). `FR-093` wants
+    // the size adjustable from the overlay, and the only alternative was
+    // `config:set`, which is the whole settings object and so the whole of what
+    // this allowlist exists to keep away from this window.
+    expect(channels).toEqual([
+      'consent:dismiss',
+      'overlay:ready',
+      'overlay:savePosition',
+      'overlay:setFontSize',
+    ]);
     for (const forbidden of ['secrets:set', 'config:set', 'hotkey:rebind', 'session:start']) {
       expect(block, `overlay must not reach ${forbidden}`).not.toContain(forbidden);
     }
@@ -231,6 +240,93 @@ describe('ADR-016 consent renders before readiness is reported', () => {
 });
 
 /**
+ * FR-008, ADR-016, TASK-043. The readiness gate is closed by a document
+ * reload, not only by the window closing.
+ *
+ * `closed` fires when the window goes away. The gate's invariant is about the
+ * **document**: `ready` means this renderer has painted the consent reminder.
+ * A document replaced under a window that stays leaves the gate holding the old
+ * document's answer, and the two animation frames before the new one reports
+ * ready are an interval the gate would deliver into: `delivered` advances past
+ * messages nothing received, and the begin is then never replayed.
+ *
+ * Pinned here because `src/main/index.ts` is excluded from coverage and cannot
+ * be imported by a unit test, which is how every other behaviour in that file
+ * is pinned.
+ */
+describe('FR-008 an overlay reload re-arms the readiness gate', () => {
+  const source = readFileSync('src/main/index.ts', 'utf8');
+
+  it('closes the gate when the overlay document starts loading', () => {
+    const wiring = source.slice(
+      source.indexOf('function wireOverlayWindow'),
+      source.indexOf('function registerHotkeys'),
+    );
+    expect(wiring).toContain("overlayWindow.webContents.on('did-start-loading'");
+    const handler = wiring.slice(wiring.indexOf("on('did-start-loading'"));
+    expect(handler.slice(0, 200)).toContain('overlayGate.noteClosed()');
+  });
+
+  it('still closes it when the window itself goes away', () => {
+    const wiring = source.slice(
+      source.indexOf('function wireOverlayWindow'),
+      source.indexOf('function registerHotkeys'),
+    );
+    const handler = wiring.slice(wiring.indexOf("overlayWindow.on('closed'"));
+    expect(handler.slice(0, 400)).toContain('overlayGate.noteClosed()');
+  });
+
+  /**
+   * FR-093, TASK-043. A queued `CH-126` write is older than any `config:set`
+   * that follows it, and the throttle re-reads the theme when it fires. Without
+   * this the overlay's stale size would be written back over a Dashboard change
+   * made in the meantime, reversing the user's last action.
+   */
+  it('drops a queued overlay font write when a newer theme is stored', () => {
+    const handler = source.slice(
+      source.indexOf("router.handle('config:set'"),
+      source.indexOf("router.handle('secrets:set'"),
+    );
+    expect(handler).toContain('overlayFontSizeWrites.cancel()');
+    expect(handler).toMatch(/patch\.theme !== undefined/);
+  });
+});
+
+/**
+ * FR-089, TASK-043. The acrylic build number is written in two places.
+ *
+ * `MIN_BUILD_FOR_ACRYLIC` in `src/main/windows.ts` is the authority, and the
+ * Dashboard cannot import it because that module imports Electron. The
+ * Dashboard branches on `platform.acrylicSupported`, which the main process
+ * computes, so a drift could only ever put the wrong number in a sentence.
+ * That is still a sentence a user reads and acts on, so the two are pinned to
+ * each other here.
+ */
+describe('FR-089 the acrylic build number agrees across the process boundary', () => {
+  it('the Dashboard note names the same build the main process gates on', () => {
+    const main = readFileSync('src/main/windows.ts', 'utf8');
+    const authority = /MIN_BUILD_FOR_ACRYLIC = (\d+)/.exec(main)?.[1];
+    expect(authority, 'MIN_BUILD_FOR_ACRYLIC is not declared in src/main/windows.ts').toBeTruthy();
+
+    const dashboard = readFileSync('src/renderer/dashboard/sections/OverlayAppearance.tsx', 'utf8');
+    const copy = /MIN_BUILD_FOR_ACRYLIC = (\d+)/.exec(dashboard)?.[1];
+    expect(copy, 'the Dashboard copy of MIN_BUILD_FOR_ACRYLIC is gone or renamed').toBe(authority);
+  });
+
+  /**
+   * The gate itself is the boolean, not the number. A Dashboard that recomputed
+   * "is this build new enough" from its own copy would be a second
+   * implementation of `supportsAcrylic`, and the two could then disagree about
+   * a machine rather than only about a sentence.
+   */
+  it('the Dashboard gates on the pushed capability, not on its own comparison', () => {
+    const dashboard = readFileSync('src/renderer/dashboard/sections/OverlayAppearance.tsx', 'utf8');
+    expect(dashboard).toContain('platform.acrylicSupported');
+    expect(dashboard).not.toMatch(/windowsBuild\s*[<>]=?\s*MIN_BUILD_FOR_ACRYLIC/);
+  });
+});
+
+/**
  * FR-082 / FR-084 regression: a frameless window is not movable just because it
  * accepts mouse events. Without a drag region the interaction toggle made the
  * overlay clickable but immovable, and the `moved` persistence handler could
@@ -238,9 +334,22 @@ describe('ADR-016 consent renders before readiness is reported', () => {
  */
 describe('FR-082 overlay is actually draggable in interactive mode', () => {
   it('declares a drag region and opts controls back out', () => {
+    // Moved out of `index.html` and into the stylesheet the entry imports, so
+    // Tailwind can see the overlay's styles in one place (TASK-043, FR-094).
+    // The rule is what matters, not which file carries it.
+    const css = readFileSync('src/renderer/overlay/styles.css', 'utf8');
+    expect(css).toContain('-webkit-app-region: drag');
+    expect(css).toContain('-webkit-app-region: no-drag');
+  });
+
+  /**
+   * The ground has to be transparent in the very first frame, before the
+   * bundle has run, or the window flashes white over whatever is being shared.
+   * That is why this one rule stays inline in the document (FR-081).
+   */
+  it('keeps the transparent ground inline, ahead of the bundle', () => {
     const html = readFileSync('src/renderer/overlay/index.html', 'utf8');
-    expect(html).toContain('-webkit-app-region: drag');
-    expect(html).toContain('-webkit-app-region: no-drag');
+    expect(html).toContain('background: transparent');
   });
 
   it('applies the drag region only in interactive mode', () => {
@@ -468,6 +577,11 @@ describe('FR-086 the preload allowlists account for every invoke channel', () =>
     'overlay:savePosition',
     'overlay:ready',
     'consent:dismiss',
+    // The Dashboard has its own text size control, writing the same setting
+    // through `config:set` alongside the rest of the theme. A second path to
+    // one field would be two ways to write it and two things to keep in step
+    // (FR-093, TASK-043).
+    'overlay:setFontSize',
   ];
 
   it('the Dashboard may invoke every channel not explicitly reserved to another window', () => {

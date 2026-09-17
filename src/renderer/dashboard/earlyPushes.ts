@@ -26,6 +26,10 @@ const REPLAYED: PushChannel[] = [
   'state:audio',
   'model:download',
   'notice:captureFidelity',
+  // `CH-216` is replayed on every load and describes the machine, so a
+  // Dashboard whose first effect ran late would otherwise render the acrylic
+  // option enabled on a Windows 10 build until something else changed (FR-089).
+  'notice:platform',
 ];
 
 const latest = new Map<PushChannel, unknown>();

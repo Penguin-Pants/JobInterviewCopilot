@@ -17,6 +17,8 @@ export type ProvidersState = PushPayload<'state:providers'>;
 export type AudioState = PushPayload<'state:audio'>;
 export type ModelState = PushPayload<'model:download'>;
 export type UsageWarning = PushPayload<'usage:warning'>;
+/** What the host machine supports (`CH-216`, FR-089, NFR-012). */
+export type PlatformState = PushPayload<'notice:platform'>;
 
 export interface DocProgress {
   state: DocumentState;
@@ -34,6 +36,7 @@ export interface DashboardData {
   model: ModelState | null;
   warnings: UsageWarning[];
   captureNotice: string | null;
+  platform: PlatformState;
   docProgress: Record<string, DocProgress>;
   activeProfile: Profile | null;
   /**
@@ -86,6 +89,16 @@ export function useDashboardData(): DashboardData {
   const [warnings, setWarnings] = useState<UsageWarning[]>([]);
   const [captureNotice, setCaptureNotice] = useState<string | null>(
     () => lastSeen('notice:captureFidelity')?.message ?? null,
+  );
+  /**
+   * What the host machine supports (`CH-216`, FR-089).
+   *
+   * Starts as "no acrylic", which is what an unknown machine is entitled to be
+   * treated as: offering a mode the window cannot build is the failure, and
+   * withholding one it can is a moment's inconvenience until the push lands.
+   */
+  const [platform, setPlatform] = useState<PlatformState>(
+    () => lastSeen('notice:platform') ?? { windowsBuild: 0, acrylicSupported: false },
   );
   const [docProgress, setDocProgress] = useState<Record<string, DocProgress>>({});
   const [sessionRevision, setSessionRevision] = useState(0);
@@ -148,12 +161,23 @@ export function useDashboardData(): DashboardData {
    * stayed on screen. Re-reading when the window is focused again is what
    * "the Dashboard re-reads" means for a change made outside the app, and it
    * costs one in-memory list rather than a poll (FR-077, ADR-014).
+   *
+   * The settings are re-read for the same reason, since `TASK-043` (FR-093).
+   * The overlay's own text size control writes `overlayFontSizePx` through
+   * `CH-126`, and nothing pushes settings to the Dashboard, so its Overlay and
+   * appearance draft stayed on the value it last read. The next theme edit
+   * there wrote that whole stale draft back and silently undid the size the
+   * user had just set from the overlay: two controls on one setting, one of
+   * them overwriting the other.
    */
   useEffect(() => {
-    const onFocus = (): void => void reloadProfiles();
+    const onFocus = (): void => {
+      void reloadProfiles();
+      void reloadSettings();
+    };
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
-  }, [reloadProfiles]);
+  }, [reloadProfiles, reloadSettings]);
 
   useEffect(() => {
     // Every subscription is torn down by the function it returns. A Dashboard
@@ -172,6 +196,7 @@ export function useDashboardData(): DashboardData {
       window.copilot.on('state:audio', setAudio),
       window.copilot.on('model:download', setModel),
       window.copilot.on('notice:captureFidelity', (p) => setCaptureNotice(p.message)),
+      window.copilot.on('notice:platform', setPlatform),
       window.copilot.on('usage:warning', (w) =>
         // At most one of each per session (FR-103, FR-109), so a repeat within
         // one session is a main-process defect rather than something to stack
@@ -206,6 +231,8 @@ export function useDashboardData(): DashboardData {
     if (earlyModel) setModel(earlyModel);
     const earlyNotice = lastSeen('notice:captureFidelity');
     if (earlyNotice) setCaptureNotice(earlyNotice.message);
+    const earlyPlatform = lastSeen('notice:platform');
+    if (earlyPlatform) setPlatform(earlyPlatform);
 
     return () => off.forEach((unsubscribe) => unsubscribe());
   }, []);
@@ -278,6 +305,7 @@ export function useDashboardData(): DashboardData {
     model,
     warnings,
     captureNotice,
+    platform,
     docProgress,
     activeProfile,
     sessionRevision,

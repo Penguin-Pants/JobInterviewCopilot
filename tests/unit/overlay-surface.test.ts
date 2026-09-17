@@ -9,7 +9,14 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { PUSH_CHANNEL_NAMES, pushChannels, type PushChannel } from '../../src/shared/ipc.js';
+import {
+  INVOKE_CHANNEL_NAMES,
+  PUSH_CHANNEL_NAMES,
+  invokeChannels,
+  pushChannels,
+  type PushChannel,
+} from '../../src/shared/ipc.js';
+import { SETTINGS_LIMITS } from '../../src/shared/defaults.js';
 import { OverlayGate, isGatedChannel, type GatedMessage } from '../../src/main/overlay-gate.js';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -58,11 +65,60 @@ describe('TC-096 no overlay error channel', () => {
         'suggestion:begin',
         'suggestion:end',
         'suggestion:line',
+        // TASK-043. Neither is a failure and neither is optional.
+        //
+        // `notice:captureFidelity` is where `NFR-012` says it belongs: the
+        // warning is shown "alongside the consent reminder", which is this
+        // window, and the IPC table has said `overlay` since the channel was
+        // written down. It was pushed to the Dashboard only and withheld here,
+        // so the one window the sentence is about could never show it.
+        //
+        // `notice:platform` describes the machine. The overlay needs it because
+        // `overlayWindowOptions` silently builds a transparent window when
+        // acrylic is asked for on a build that cannot render it, so the stored
+        // translucency and the window that exists can disagree, and the card
+        // would be styled for a surface it does not have (FR-093).
+        'notice:captureFidelity',
+        'notice:platform',
       ].sort(),
     );
     expect(invoke.sort()).toEqual(
-      ['consent:dismiss', 'overlay:ready', 'overlay:savePosition'].sort(),
+      [
+        'consent:dismiss',
+        'overlay:ready',
+        'overlay:savePosition',
+        // FR-093's in-overlay text size control. One channel that changes one
+        // number, rather than `config:set`, which would hand a compromised
+        // overlay renderer the settings, the hotkeys and the credentials.
+        'overlay:setFontSize',
+      ].sort(),
     );
+  });
+
+  /**
+   * The invoke allowlist is the security boundary, so it is asserted for what
+   * it must **not** contain as well as for what it does (FR-086).
+   */
+  it('withholds every invoke channel that could write something else', () => {
+    for (const channel of ['config:set', 'secrets:set', 'hotkey:rebind', 'doc:import'] as const) {
+      expect(INVOKE_CHANNEL_NAMES).toContain(channel);
+      expect(invoke).not.toContain(channel);
+    }
+  });
+
+  /**
+   * FR-093: the range the in-overlay control can ask for is the settings range,
+   * enforced by the channel's own schema rather than by a handler. A renderer
+   * that asked for 200 px would be refused at the router (CMP-10).
+   */
+  it('overlay:setFontSize refuses a size outside SETTINGS_LIMITS', () => {
+    const schema = invokeChannels['overlay:setFontSize'].payload;
+    const { min, max } = SETTINGS_LIMITS.overlayFontSizePx;
+    expect(schema.safeParse({ px: min }).success).toBe(true);
+    expect(schema.safeParse({ px: max }).success).toBe(true);
+    expect(schema.safeParse({ px: min - 1 }).success).toBe(false);
+    expect(schema.safeParse({ px: max + 1 }).success).toBe(false);
+    expect(schema.safeParse({ px: 22.5 }).success).toBe(false);
   });
 
   it('no allowed push channel has a field that can carry a failure', () => {
@@ -84,12 +140,17 @@ describe('TC-096 no overlay error channel', () => {
     // These are how a failure is reported (FR-076, FR-100): the Dashboard
     // badge, never the overlay. Naming them makes the exclusion deliberate
     // rather than incidental.
+    //
+    // `notice:captureFidelity` is no longer in this list. It is not a failure
+    // report: it says the operating system cannot hide the overlay, which is a
+    // fact about the machine that `NFR-012` requires beside the consent
+    // reminder. It carries no error, no severity and no retry, and no provider
+    // failure can reach the overlay through it.
     const dashboardOnly: PushChannel[] = [
       'state:providers',
       'usage:warning',
       'rag:progress',
       'model:download',
-      'notice:captureFidelity',
     ];
     for (const channel of dashboardOnly) {
       expect(PUSH_CHANNEL_NAMES).toContain(channel);
@@ -254,6 +315,38 @@ describe('the overlay readiness gate', () => {
    * the interview, and the next rebuild replays the previous interview's
    * suggestion to a session that has not produced one.
    */
+  /**
+   * FR-006, FR-008. The gate is closed again at a session boundary, not only
+   * emptied, because `FR-006` asks for the reminder before the first
+   * suggestion of **every** session. Readiness taken once at the first load
+   * answers for the first interview only: the reminder is dismissible, so by
+   * the second it is off screen, and the renderer re-shows it on a
+   * `state:session` push it processes asynchronously. A gate left open would
+   * deliver on whatever the renderer happened to have painted, which is the
+   * race ADR-016 exists so that nothing has to win.
+   */
+  it('a session boundary closes the gate, so the next interview buffers again', () => {
+    const g = gate();
+    g.gate.noteReady();
+    g.gate.send(begin('gen-1'));
+    expect(g.sent).toHaveLength(1);
+
+    g.gate.reset();
+    expect(g.gate.isReady).toBe(false);
+
+    // The next interview's first suggestion is held, not delivered over a
+    // reminder that has not been re-shown yet.
+    g.sent.length = 0;
+    g.gate.send(begin('gen-2'));
+    g.gate.send(line('gen-2', 'the next interview'));
+    expect(g.sent).toEqual([]);
+    expect(g.gate.pending).toBe(2);
+
+    // And released in full once the renewed reminder has painted.
+    g.gate.noteReady();
+    expect(g.sent.map((m) => m.channel)).toEqual(['suggestion:begin', 'suggestion:line']);
+  });
+
   it('a session boundary forgets the card, so it cannot outlive its interview', () => {
     const g = gate();
     g.gate.noteReady();

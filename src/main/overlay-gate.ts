@@ -98,16 +98,30 @@ export class OverlayGate {
   }
 
   /**
-   * A session boundary: forget the card entirely (ADR-036).
+   * A session boundary: forget the card, and close the gate again (ADR-036).
    *
    * `noteClosed` deliberately **keeps** the card, because a window rebuilt for a
    * translucency change mid-generation has to be sent the whole of what it
    * missed. Across a session boundary that is exactly wrong: the card outlives
    * the interview, and the next overlay rebuild replays the previous
    * interview's suggestion to a session that has not produced one yet.
+   *
+   * Readiness is cleared too, and that is not symmetry for its own sake.
+   * `FR-006` requires the reminder before the first suggestion of **every**
+   * live session, and `FR-008` gates delivery on the renderer having rendered
+   * it. Readiness taken once, at the first load, answers that question for the
+   * first interview only: the reminder is dismissible, so by the second one it
+   * is off screen, and the renderer re-shows it on a `state:session` push that
+   * React processes asynchronously. A gate left open across that boundary would
+   * deliver the second interview's first suggestion on whatever the renderer
+   * happened to have painted, which is exactly the race `ADR-016` exists so
+   * that nothing has to win. The renderer reports ready again once the renewed
+   * reminder has painted, and until then suggestions buffer rather than drop,
+   * as they do at every other closed-gate moment.
    */
   reset(): void {
     this.card = null;
+    this.ready = false;
   }
 
   send(message: GatedMessage): void {

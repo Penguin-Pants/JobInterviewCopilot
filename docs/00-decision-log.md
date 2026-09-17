@@ -1208,6 +1208,243 @@ notes.
 
 ---
 
+### ADR-038 — Which window sees a notice, and how the Dashboard learns what the machine can do
+
+**Status.** Accepted, TASK-043.
+
+**Context.** Two gaps, one of them a three-way disagreement that had stood
+since Milestone 0.
+
+1. `CH-215 notice:captureFidelity` was written into the IPC table with
+   **overlay** as its target, implemented as a push to the **Dashboard**, and
+   left out of the overlay preload's allowlist. `NFR-012` says the pre-19041
+   warning is shown "alongside the consent reminder", which is the overlay, so
+   the one window the requirement is about could never show it. `TASK-032`'s
+   `TC-096` found the inconsistency while enumerating the overlay's surface and
+   carried it here, because `NFR-012` decides it and this is the task that owns
+   the overlay's UI.
+2. `FR-089` requires the acrylic option to be **disabled in the Dashboard with
+   an explanatory note** on Windows 10. Nothing carried a build number to the
+   Dashboard except `CH-215`, which fires only when capture fidelity is
+   degraded. A Windows 10 machine on build 19045 has exact capture exclusion
+   and no acrylic, so it received nothing at all and the option stayed enabled
+   over a mode the window cannot render. `TASK-042` carried this with the same
+   reasoning and named this task as its owner.
+
+**Decision.**
+
+- `CH-215`'s target is **both**, and it is pushed to both windows. The overlay
+  renders it inside the consent card, which is where `NFR-012` puts it. The
+  Dashboard keeps it, because `FR-089` reads its build number and because the
+  overlay card is dismissible, so the Dashboard is where the sentence can still
+  be found afterwards.
+- `CH-216 notice:platform` is new, carries `{ windowsBuild, acrylicSupported }`
+  and goes to both windows on every renderer load. The Dashboard disables the
+  acrylic option from `acrylicSupported` and names the build in the note.
+- The overlay receives it too, for a reason that is not `FR-089`'s.
+  `overlayWindowOptions` silently builds a **transparent** window when acrylic
+  is selected on a build that cannot render it, so the stored translucency and
+  the window that exists can disagree. The renderer resolves the effective mode
+  from `acrylicSupported` and styles the window it got rather than the one that
+  was asked for, which is what its contrast depends on.
+- The Dashboard gates on the pushed boolean, never on its own comparison
+  against a build number. A second implementation of `supportsAcrylic` in a
+  renderer could disagree with the main process about a machine; a copied
+  constant can only ever put the wrong number in a sentence, and a guardrail
+  pins the two together.
+
+**Consequences.** Both notices are pushed on `did-finish-load` rather than once
+at bootstrap, because either window can be rebuilt: the overlay on a
+translucency change (ADR-015), the Dashboard by being closed and reopened. The
+old one-shot push at the end of bootstrap left every rebuilt window without the
+warning, which was a second, quieter bug in the same code. Each notice goes to
+**the window that just loaded**, not to both from either handler, so one load
+does not tell a window twice.
+
+That last point uncovered a third. `wireDashboardWindow` was called after
+`await createDashboardWindow(...)`, and `loadFile` resolves from **inside**
+`did-finish-load`, so every replay listener it installed was attached to an
+event that had already been emitted. It had never fired, since `TASK-042`.
+While `reportPlatform` pushed to both windows the overlay's handler masked it;
+pushing per window made it load-bearing, and a Dashboard that cannot hear its
+own load would have had the acrylic option permanently disabled on Windows 11.
+`createDashboardWindow` now takes the `onCreated` callback `createOverlayWindow`
+already had, for the reason `createOverlayWindow`'s own comment gives, and
+`model:download`, `state:providers` and `state:session` are replayed again as a
+result.
+
+**Why neither notice breaks `FR-076`.** `FR-076` bars an **error card**:
+"Provider failures are reported only through the Dashboard status badge."
+Neither of these is a provider failure. One says the operating system cannot
+hide a window from screen capture, which `NFR-012` requires next to the consent
+reminder in so many words; the other describes the machine. Neither carries a
+severity, a retry or a reason, and no code path can put a provider failure into
+either.
+
+---
+
+### ADR-039 — The overlay card carries an alpha floor, so `FR-093`'s contrast is true at every opacity
+
+**Status.** Accepted, TASK-043.
+
+**Context.** `FR-093` requires suggestion text to hold at least 4.5 to 1
+"against the card background", and `TASK-043` requires it "in both themes at
+**every** supported opacity level". `SETTINGS_LIMITS.overlayOpacity.min` is
+0.3.
+
+The overlay floats over an unknown desktop, so the card background is not a
+colour until the card is composited over whatever is behind it. Two readings
+were available and only one of them is worth testing:
+
+- **The card's own colour, alpha ignored.** Passes for any palette at any
+  opacity, including a card nobody can read. `TC-114` would assert nothing.
+- **The worst case the card can be read on:** composited over pure white and
+  over pure black, which bound every desktop between them. This is what the
+  user actually sees.
+
+Under the second reading a dark card at 0.3 over a white desktop composites to
+about 70 percent grey, and white text on that is roughly 2 to 1. No single text
+colour clears 4.5 to 1 against both bounds at that alpha, in either theme.
+
+**Decision.** The **card surface** has an alpha floor, computed from the
+palette rather than chosen: the smallest alpha at which every colour held to
+the target still clears it over both bounds. The user's opacity setting moves
+the surface between that floor and fully opaque. Below the floor the setting
+still does something visible: the frame, the shadow and the idle card follow
+the raw value, because no text is read off them.
+
+The floor is the lowest alpha from which **every** alpha up to 1 clears the
+target, not the first alpha that happens to clear it. Worst-case contrast is not
+monotonic in alpha: the minimum over the two backdrops rises while the card
+covers the hostile one, then falls back toward the card's own contrast at alpha
+1, so the passing set is an interval rather than a suffix of [0, 1]. A search
+that stopped at the first pass could return a floor with a failing band above
+it, and `cardSurfaceAlpha` hands back any user opacity at or above the floor.
+The scan therefore runs downward from 1 and stops at the first failure, which
+makes the band safe by construction rather than by assumption.
+
+`TC-114` drives every theme and every opacity step the slider can produce, and
+asserts separately that the raw minimum **would** fail, that one held colour
+already fails a step below the floor, that every alpha from the floor to 1
+clears the target, and that a deliberately non-monotonic palette does not get a
+floor with a failing band above it. Without those the floor could be removed, or
+set well clear of the boundary, and the suite would stay green.
+
+The colours held to the target are the card's text **and** its muted colour,
+because the muted one renders a card's question line and the idle message and a
+user reads those the same way they read a bullet. It is also the binding one:
+both floors are set by `muted`, not by `text`.
+
+**Consequences.** A user who sets 0.3 gets a card more opaque than 0.3. That is
+the cost of the requirement as written, and it is paid on the setting chosen by
+someone who wants the overlay unobtrusive, which is exactly when they can least
+afford to squint at it. The alternative is a requirement that is false in the
+product and true in the test.
+
+---
+
+### ADR-041 — Readiness is answered per session, and the one write the overlay can reach is rate limited
+
+**Status.** Accepted, TASK-043, after the Codex review on the pull request.
+
+**Context.** Two properties this task's own criteria rest on were narrower in
+the code than in the requirement.
+
+1. `FR-006` asks for the consent reminder before the first suggestion of
+   **every** live session, and `FR-008` gates delivery on the renderer having
+   rendered it. The renderer reported `overlay:ready` once, behind a latching
+   ref, and `OverlayGate.reset()` cleared the card at a session boundary while
+   leaving the gate **open**. So the question "has the reminder been rendered"
+   was answered once, at the first load, and that answer stood for the life of
+   the window. The reminder is dismissible, so by the second interview it was
+   off screen, and the renderer re-shows it on a `state:session` push that React
+   processes asynchronously.
+2. `CH-126 overlay:setFontSize` is the one write an overlay renderer can reach.
+   Its schema bounds the value and the handler drops a write that changes
+   nothing, but a renderer alternating 16 and 32 defeats that guard and each
+   call lands a **synchronous** `config.set` on the same event loop as the live
+   audio and STT loop.
+
+**Decision.**
+
+- `reset()` clears readiness as well as the card, and the renderer reports
+  again once the renewed reminder has painted, keyed on a session epoch rather
+  than a latching ref. Until it does, the next interview's suggestions buffer,
+  which is what the gate does at every other closed moment.
+- `overlay:setFontSize` goes through a leading-edge throttle with a trailing
+  commit (`src/main/write-throttle.ts`). The first press writes at once, any
+  number of calls inside the window cost one write, and the last value asked
+  for is the one stored. Its timers are injected, so the behaviour is driven
+  with fake timers rather than waited for, which `src/main/index.ts` being
+  outside coverage makes necessary rather than merely tidy.
+- The overlay keeps a **draft** of the size it has asked for. Coalescing means
+  the stored value no longer moves on every press, and without a draft each
+  press would step from a stale rendered number: three quick presses from 26
+  would all ask for 28.
+
+A third followed from the same review round, found by CI rather than by reading:
+the renderer detected a new interview by watching `active` go false and back to
+true on `CH-201`. Two pushes delivered close enough together land in one React
+batch, so `active` is true before and after, React bails out of the render and
+the effect never runs. The boundary is keyed on the **session id** now, which is
+what a session is and therefore cannot be missed, while a re-push carrying the
+same id is still not a boundary and so cannot wipe a card mid-interview.
+
+**Consequences.** The first defect was not practically reachable: a suggestion
+needs an interviewer turn plus two round trips, while the re-render is two React
+commits. That is the point. `ADR-016` exists so that ordering does not depend on
+the renderer being fast enough, and a gate that relied on winning a race was not
+the guarantee `FR-008` states, however comfortably it was winning.
+
+The second is a threat-model correction rather than a bug report: the allowlist
+was narrowed so a compromised overlay renderer could not write settings, rebind
+hotkeys or replace credentials, and an unbounded call rate into a synchronous
+write handed back a way to stall an interview instead. A capability is only as
+narrow as its worst call pattern.
+
+---
+
+### ADR-040 — Magic UI could not be vendored, and what was built instead
+
+**Status.** Accepted with a carried remainder, TASK-043.
+
+**Context.** `FR-094` says overlay cards "must be built from Magic UI
+components on Tailwind, styled from the theme tokens in `FR-029`". The
+architecture's dependency table records Magic UI as code **copied into the
+repository**, not an npm dependency, and `NFR-016` requires every vendored file
+to carry its source URL, the version or commit copied, and its license in
+`VENDORED.md`. `VENDORED.md` has carried a placeholder row naming this task
+since Milestone 0.
+
+Magic UI's source could not be obtained in this environment. `magicui.design`,
+`raw.githubusercontent.com`, `cdn.jsdelivr.net` and `unpkg.com` are all refused
+by the network egress proxy, and the two Magic UI packages on npm
+(`@magicuidesign/cli`, `@magicuidesign/mcp`) are thin clients that fetch the
+component registry from `magicui.design` at run time and embed no component
+source.
+
+**Decision.** The Tailwind half of `FR-094` is implemented: the cards are built
+on Tailwind, styled from the `FR-029` theme tokens through the custom
+properties `theme.ts` computes, and `tailwindcss` compiles the stylesheet at
+build time. The card, the reveal and the idle card are written as first-party
+components under `src/renderer/overlay/components/`, occupying the roles Magic
+UI's `MagicCard` and `BlurFade` would.
+
+Nothing is vendored, and `VENDORED.md` records that rather than a row. A
+provenance row naming a source URL, a version and a license for code that was
+not copied from there would be a false statement in the one file `NFR-016`
+exists to make trustworthy, and `scripts/check-licenses.mjs` reads that file as
+input. A wrong row is worse than no row.
+
+**Consequences.** `FR-094` is **partially met** and the remainder is carried to
+`TASK-051` with its reason, rather than being recorded as done. `TC-146`, which
+verifies `NFR-016`, is unaffected: it drives the checker against a fixture, so
+it does not need a real vendored file. Swapping the first-party components for
+Magic UI's later is a contained change: they are four small components behind
+the props `Overlay.tsx` already passes.
+
+---
+
 ## 5. Out of scope for v1
 
 Carried forward from product discovery. Do not add without a new decision.

@@ -12,16 +12,31 @@ import type { InvokeChannel, PushChannel, PushPayload } from '../shared/ipc.js';
  * Both directions are allowlisted. An unrestricted invoke forwarder would give
  * a compromised overlay renderer the whole main-process surface, including
  * writing settings, rebinding hotkeys and replacing credentials. The overlay
- * needs three channels, so it gets three (FR-086).
+ * needs four channels, so it gets four (FR-086).
+ *
+ * `overlay:setFontSize` is the fourth, added with the in-overlay text size
+ * control (FR-093). It exists rather than `config:set` for the reason above:
+ * one channel that can change one number cannot be turned into a settings
+ * write, and its range is enforced by the contract's own schema (CH-126).
  *
  * The push allowlist deliberately carries no error channel. The overlay has two
  * states, idle and suggestions, and no error state (FR-076, TC-096).
+ *
+ * Two notices are the exception that proves the rule, and neither is an error.
+ * `notice:captureFidelity` is where `NFR-012` says it belongs: beside the
+ * consent reminder, in the window it is about. It was pushed to the Dashboard
+ * and withheld from the overlay, which contradicted both `NFR-012` and the IPC
+ * table; it now reaches both windows, because `FR-089` needs its build number
+ * in the Dashboard. `notice:platform` describes the machine, and the overlay
+ * needs it to know whether the acrylic it was asked for is the window it
+ * actually got (CH-216, ADR-038).
  */
 
 const ALLOWED_INVOKE: readonly InvokeChannel[] = [
   'overlay:ready',
   'overlay:savePosition',
   'consent:dismiss',
+  'overlay:setFontSize',
 ];
 
 const ALLOWED_PUSH: readonly PushChannel[] = [
@@ -32,6 +47,8 @@ const ALLOWED_PUSH: readonly PushChannel[] = [
   'overlay:theme',
   'overlay:mode',
   'state:session',
+  'notice:captureFidelity',
+  'notice:platform',
 ];
 
 const allowedInvoke = new Set<string>(ALLOWED_INVOKE);
