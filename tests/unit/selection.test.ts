@@ -14,7 +14,6 @@ import {
   backupConflict,
   latencyConsequence,
   sharedCredentialNotice,
-  sharedCredentialProviders,
 } from '../../src/shared/registry/selection.js';
 import { LLM_REGISTRY } from '../../src/shared/registry/llm.js';
 import { STT_REGISTRY } from '../../src/shared/registry/stt.js';
@@ -110,7 +109,6 @@ describe('FR-038 non-streaming consequence', () => {
 /** ADR-017: one credential can serve both capabilities, and the UI must say so. */
 describe('ADR-017 shared credential notice', () => {
   it('names the provider that appears in both shipped registries', () => {
-    expect(sharedCredentialProviders()).toEqual(['OpenAI']);
     expect(sharedCredentialNotice()).toContain('OpenAI');
     expect(sharedCredentialNotice()).toMatch(/speech-to-text models and .* language models/);
   });
@@ -122,7 +120,6 @@ describe('ADR-017 shared credential notice', () => {
     const llm: ProviderDescriptor<LlmModelDescriptor>[] = [
       { id: 'b', displayName: 'B', credentialId: 'anthropic', models: [] },
     ];
-    expect(sharedCredentialProviders(stt, llm)).toEqual([]);
     expect(sharedCredentialNotice(stt, llm)).toBe('');
   });
 
@@ -150,6 +147,11 @@ describe('ADR-017 shared credential notice', () => {
       { id: 'c', displayName: 'C', credentialId: 'openai', models: [] },
       { id: 'd', displayName: 'D', credentialId: 'anthropic', models: [] },
     ];
-    expect(sharedCredentialProviders(stt, llm)).toEqual(['A', 'B']);
+    // Asserted on the notice, which is what Provider Setup renders. The same
+    // case asserted on a helper the Dashboard never calls proved nothing about
+    // what a user reads.
+    const notice = sharedCredentialNotice(stt, llm);
+    expect(notice).toContain('One A key serves A speech-to-text models and C language models');
+    expect(notice).toContain('One B key serves B speech-to-text models and D language models');
   });
 });

@@ -61,21 +61,18 @@ export function latencyConsequence(model: SttModelDescriptor): string | null {
 }
 
 /**
- * The providers whose key is shared between an STT model and an LLM model
+ * The pairs of display names behind one shared credential, speech first
  * (ADR-017, FR-025).
  *
- * Read off `credentialId`, never off a provider name, so the Dashboard sentence
- * stays true when a second provider starts serving both capabilities.
+ * Matched on `credentialId`, never on a provider name, so the Dashboard
+ * sentence stays true when a second provider starts serving both capabilities.
+ *
+ * Private, because `sharedCredentialNotice` is the only thing the Dashboard
+ * needs and an exported "which providers are shared" helper was called by
+ * nothing but its own tests. Those tests then proved the shared-credential
+ * rules about a function no window renders, which reads as coverage and is
+ * not: the assertions are on the notice itself now.
  */
-export function sharedCredentialProviders(
-  stt: ProviderDescriptor<SttModelDescriptor>[] = STT_REGISTRY,
-  llm: ProviderDescriptor<LlmModelDescriptor>[] = LLM_REGISTRY,
-): string[] {
-  const llmCredentials = new Set(llm.map((p) => p.credentialId));
-  return stt.filter((p) => llmCredentials.has(p.credentialId)).map((p) => p.displayName);
-}
-
-/** The two display names behind one shared credential, speech first. */
 function sharedCredentialPairs(
   stt: ProviderDescriptor<SttModelDescriptor>[],
   llm: ProviderDescriptor<LlmModelDescriptor>[],

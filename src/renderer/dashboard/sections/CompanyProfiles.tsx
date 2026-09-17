@@ -77,6 +77,17 @@ export function CompanyProfiles({
     if (session.active) setPendingDelete(null);
   }, [session.active]);
 
+  /**
+   * One create at a time.
+   *
+   * The name is cleared only once `profile:create` has answered, so two clicks
+   * inside that round trip both read the same `newName` and both create a
+   * profile. `FR-027` is about which profile is active rather than about
+   * duplicate names, so nothing downstream refuses the second one: the user
+   * gets two profiles, each with its own knowledge base, from one action.
+   */
+  const [creating, setCreating] = useState(false);
+
   async function create(): Promise<void> {
     setError(null);
     const name = newName.trim();
@@ -84,13 +95,18 @@ export function CompanyProfiles({
       setError('Give the profile a name first.');
       return;
     }
-    const result = await call('profile:create', { name });
-    if (!result.ok) {
-      setError(result.message);
-      return;
+    setCreating(true);
+    try {
+      const result = await call('profile:create', { name });
+      if (!result.ok) {
+        setError(result.message);
+        return;
+      }
+      setNewName('');
+      await refresh();
+    } finally {
+      setCreating(false);
     }
-    setNewName('');
-    await refresh();
   }
 
   async function activate(id: string): Promise<void> {
@@ -212,7 +228,12 @@ export function CompanyProfiles({
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
         />
-        <button type="button" data-testid="create-profile" onClick={() => void create()}>
+        <button
+          type="button"
+          data-testid="create-profile"
+          disabled={creating}
+          onClick={() => void create()}
+        >
           Create profile
         </button>
       </div>
