@@ -1060,12 +1060,14 @@ vague intention:
 `TASK-042` by `ADR-034`.
 
 `TASK-043` closed the two follow-ups Milestone 3 carried to it, and `FR-089`'s
-Dashboard half, which `TASK-042` carried. One requirement is **partially met**
-and is carried forward rather than claimed: `FR-094`'s Magic UI half, because
-Magic UI's source **is** reachable and `BlurFade` is now vendored
-(ADR-042, which supersedes ADR-040). `FR-094` is substantially met: the reveal
-is Magic UI, the cards are on Tailwind and the colours are the `FR-029` tokens.
-What remains is a product judgement rather than an obstacle.
+Dashboard half, which `TASK-042` carried. `FR-094` is **substantially met**: the
+reveal is Magic UI's `BlurFade`, vendored with its provenance in `VENDORED.md`,
+the cards are on Tailwind and the colours are the `FR-029` tokens (ADR-042,
+which supersedes ADR-040 and its wrong premise that the source was
+unreachable). One item goes to `TASK-051`, and it is a decision to confirm
+rather than work that was blocked: whether the card surface should be
+`MagicCard`. ADR-042 records four requirement-grounded objections, so the
+default is that it stays first-party.
 
 ### TASK-040 Session manager and transcript — COMPLETE
 **Traces** FR-088, FR-101, FR-105, FR-106, FR-107, FR-108, ADR-003, ADR-013, ADR-018
@@ -1524,7 +1526,8 @@ contract change and are carried below with the reason.
 **Status: COMPLETE.** `npm run typecheck`, `npm run lint`, `npm run
 format:check`, `npm run licenses`, `npm run build`, `npm run smoke:main` and
 `python3 scripts/traceability.py` all pass. The unit and integration suites are
-green. `FR-094` is **partially met**; see the carried item below.
+green. `FR-094` is **substantially met**; the one item below is a decision to
+confirm, not work that was blocked.
 
 **Two requirements gained a trace here** because this task implements them, and
 neither was traced by it before: `FR-089`, whose Dashboard half `TASK-042`
