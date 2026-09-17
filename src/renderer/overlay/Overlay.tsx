@@ -62,6 +62,16 @@ function Overlay(): JSX.Element {
   const [sessionActive, setSessionActive] = useState(
     () => lastSeen('state:session')?.active ?? false,
   );
+  /**
+   * Which session is running, which is what identifies one (FR-006).
+   *
+   * The boundary is detected from this rather than from watching `active` go
+   * false and back to true. See the effect below for why that difference
+   * matters.
+   */
+  const [sessionId, setSessionId] = useState<string | null>(
+    () => lastSeen('state:session')?.sessionId ?? null,
+  );
   const [captureNotice, setCaptureNotice] = useState<string | null>(
     () => lastSeen('notice:captureFidelity')?.message ?? null,
   );
@@ -146,6 +156,7 @@ function Overlay(): JSX.Element {
       }),
       window.copilot.on('state:session', (p) => {
         setSessionActive(p.active);
+        setSessionId(p.sessionId);
         setPaused(p.paused);
       }),
       window.copilot.on('suggestion:begin', (payload) => dispatch({ kind: 'begin', payload })),
@@ -169,6 +180,7 @@ function Overlay(): JSX.Element {
     const earlySession = lastSeen('state:session');
     if (earlySession) {
       setSessionActive(earlySession.active);
+      setSessionId(earlySession.sessionId);
       // `paused` too, as the initialiser above does. `CH-201` carries it, and
       // re-seeding one of its two fields would leave the overlay showing a live
       // card stack over a paused trigger if this push were ever to arrive
@@ -192,13 +204,24 @@ function Overlay(): JSX.Element {
    * boundary (ADR-036), so this is the renderer half of one rule rather than a
    * second opinion about it.
    *
-   * Keyed on the transition into an active session, not on `active` itself: a
-   * re-push of the same state is how crash recovery tells a renderer to look
-   * again, and it must not wipe a card mid-interview.
+   * **Keyed on the session id, not on watching `active` go false and back.**
+   * That heuristic needs the renderer to observe the gap, and it does not
+   * always get one: two `CH-201` pushes delivered close enough together land in
+   * a single React batch, `active` is then true before and after, React bails
+   * out of the render entirely, and the effect never runs. Measured on the
+   * built renderer, that is exactly what happens, and the second interview then
+   * begins with the reminder still dismissed from the first. A window rebuilt
+   * across the boundary loses the gap the same way.
+   *
+   * The id is what a session *is*, so it cannot be missed: it differs whether
+   * or not the renderer ever saw a moment with no session running. A re-push
+   * carrying the **same** id is not a boundary, which is what keeps crash
+   * recovery, which re-pushes to make Session History look again, from wiping a
+   * card mid-interview.
    */
-  const wasActive = useRef(false);
+  const lastSessionId = useRef<string | null>(null);
   useEffect(() => {
-    if (sessionActive && !wasActive.current) {
+    if (sessionId !== null && sessionId !== lastSessionId.current) {
       setDismissed(false);
       dispatch({ kind: 'reset' });
       // And readiness is owed again. `OverlayGate.reset()` closes the gate at
@@ -207,8 +230,8 @@ function Overlay(): JSX.Element {
       // been re-shown yet.
       setReadyEpoch((epoch) => epoch + 1);
     }
-    wasActive.current = sessionActive;
-  }, [sessionActive]);
+    lastSessionId.current = sessionId;
+  }, [sessionId]);
 
   /**
    * Report readiness once the consent card is on screen (FR-008, ADR-016).

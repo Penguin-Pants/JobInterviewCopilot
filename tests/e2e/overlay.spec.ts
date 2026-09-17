@@ -96,11 +96,23 @@ async function revealObserved(): Promise<{ minOpacity: number; sawTransform: boo
   });
 }
 
-/** `CH-201`, which is how the renderer learns a session started or stopped. */
-async function setSession(active: boolean, paused = false): Promise<void> {
+/**
+ * `CH-201`, which is how the renderer learns a session started or stopped.
+ *
+ * `sessionId` is a parameter rather than a constant, because it is what
+ * identifies a session and therefore what the renderer detects a boundary
+ * from. Reusing one id across a stop and a start would be one session pushed
+ * twice, not two sessions, so a case that means to exercise `FR-006`'s "every
+ * live session" has to name them apart.
+ */
+async function setSession(
+  active: boolean,
+  sessionId = 'session-e2e-1',
+  paused = false,
+): Promise<void> {
   await pushToOverlay(app, 'state:session', {
     active,
-    sessionId: active ? 'session-e2e' : null,
+    sessionId: active ? sessionId : null,
     profileName: active ? 'Acme' : null,
     startedAt: active ? new Date().toISOString() : null,
     paused,
@@ -165,8 +177,16 @@ test('TC-006 the consent reminder renders before the first suggestion, every ses
 
   // And back for the next session, because FR-006 says every session. A user
   // who dismissed it last interview has not consented to this one.
+  //
+  // A **different** session id, which is what makes this a second interview
+  // rather than the same one pushed again. The renderer keys the boundary on
+  // the id for a reason this sequence demonstrates: these two pushes arrive
+  // close enough together to land in one React batch, so `active` is true
+  // before and after and a renderer watching for it to go false never sees a
+  // boundary at all. Measured on the built renderer, that left the reminder
+  // dismissed into the second interview.
   await setSession(false);
-  await setSession(true);
+  await setSession(true, 'session-e2e-2');
   await expect(reminder).toBeVisible();
   // The previous interview's cue does not survive the boundary either (ADR-036).
   await expect(overlay.locator('[data-testid="suggestion-card"]')).toHaveCount(0);

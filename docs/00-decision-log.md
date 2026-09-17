@@ -1382,6 +1382,14 @@ the code than in the requirement.
   press would step from a stale rendered number: three quick presses from 26
   would all ask for 28.
 
+A third followed from the same review round, found by CI rather than by reading:
+the renderer detected a new interview by watching `active` go false and back to
+true on `CH-201`. Two pushes delivered close enough together land in one React
+batch, so `active` is true before and after, React bails out of the render and
+the effect never runs. The boundary is keyed on the **session id** now, which is
+what a session is and therefore cannot be missed, while a re-push carrying the
+same id is still not a boundary and so cannot wipe a card mid-interview.
+
 **Consequences.** The first defect was not practically reachable: a suggestion
 needs an interviewer turn plus two round trips, while the re-render is two React
 commits. That is the point. `ADR-016` exists so that ordering does not depend on
