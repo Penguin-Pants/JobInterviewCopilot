@@ -12,6 +12,7 @@ import {
   type WebContents,
 } from 'electron';
 import { AudioSupervisor } from './audio.js';
+import { throttleWrites } from './write-throttle.js';
 import {
   ElectronAudioWorkerHost,
   installLoopbackHandler,
@@ -796,6 +797,30 @@ function triggerConfigFrom(settings: Settings, serving?: ProviderChoice | null):
   };
 }
 
+/**
+ * How often `CH-126` may reach the settings file, in milliseconds.
+ *
+ * Above a human's repeat-click rate, so a real adjustment is never delayed,
+ * and low enough that a hostile renderer buys five writes a second rather than
+ * as many as it can issue.
+ */
+const FONT_SIZE_WRITE_INTERVAL_MS = 200;
+
+/**
+ * The throttled writer behind `overlay:setFontSize` (FR-093, CH-126).
+ *
+ * The commit is the whole of what a write does: store the size and push the
+ * theme back, so the overlay renders the stored value rather than its own
+ * optimistic one, which is what makes the Dashboard control and the in-overlay
+ * one the same setting rather than two.
+ */
+const overlayFontSizeWrites = throttleWrites<number>((px) => {
+  const theme = config.get().theme;
+  if (px === theme.overlayFontSizePx) return;
+  const after = config.set({ theme: { ...theme, overlayFontSizePx: px } });
+  push(overlayWindow?.webContents, 'overlay:theme', after.theme);
+}, FONT_SIZE_WRITE_INTERVAL_MS);
+
 /** `CH-201`, from the Session Manager rather than from a second copy of the state. */
 function pushSessionState(): void {
   const active = sessions.current;
@@ -1003,17 +1028,18 @@ function registerIpcHandlers(): void {
    * this one the same setting rather than two.
    */
   router.handle('overlay:setFontSize', ({ px }) => {
-    const theme = config.get().theme;
-    // A write that changes nothing is not performed. The Dashboard's control
-    // commits once per adjustment on purpose, because a `config.set` is a
-    // synchronous settings write on the process that also runs the live audio
-    // and STT loop; this control commits once per click, with only the
-    // renderer's own disabled-button logic in front of it. Dropping the no-op
-    // takes the cheapest way to spin that write out of a renderer's reach and
-    // costs nothing a real press would notice.
-    if (px === theme.overlayFontSizePx) return { ok: true as const };
-    const after = config.set({ theme: { ...theme, overlayFontSizePx: px } });
-    push(overlayWindow?.webContents, 'overlay:theme', after.theme);
+    // Rate limited, not merely range checked. The schema bounds the value to
+    // 16 to 32 and the commit below drops a write that changes nothing, but
+    // neither bounds how often a renderer may call: alternating two sizes
+    // reaches `config.set` every time, and that is a **synchronous** settings
+    // write on the same event loop as the live audio and STT loop. The narrow
+    // write capability this channel exists to be would otherwise be a way for
+    // a compromised overlay renderer to stall an interview, which is worse
+    // than anything the allowlist was narrowed to prevent (FR-086).
+    //
+    // Leading edge, so one press still feels immediate, with the last value
+    // asked for committed when the window closes.
+    overlayFontSizeWrites.request(px);
     return { ok: true as const };
   });
 

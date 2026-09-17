@@ -1343,6 +1343,59 @@ product and true in the test.
 
 ---
 
+### ADR-041 — Readiness is answered per session, and the one write the overlay can reach is rate limited
+
+**Status.** Accepted, TASK-043, after the Codex review on the pull request.
+
+**Context.** Two properties this task's own criteria rest on were narrower in
+the code than in the requirement.
+
+1. `FR-006` asks for the consent reminder before the first suggestion of
+   **every** live session, and `FR-008` gates delivery on the renderer having
+   rendered it. The renderer reported `overlay:ready` once, behind a latching
+   ref, and `OverlayGate.reset()` cleared the card at a session boundary while
+   leaving the gate **open**. So the question "has the reminder been rendered"
+   was answered once, at the first load, and that answer stood for the life of
+   the window. The reminder is dismissible, so by the second interview it was
+   off screen, and the renderer re-shows it on a `state:session` push that React
+   processes asynchronously.
+2. `CH-126 overlay:setFontSize` is the one write an overlay renderer can reach.
+   Its schema bounds the value and the handler drops a write that changes
+   nothing, but a renderer alternating 16 and 32 defeats that guard and each
+   call lands a **synchronous** `config.set` on the same event loop as the live
+   audio and STT loop.
+
+**Decision.**
+
+- `reset()` clears readiness as well as the card, and the renderer reports
+  again once the renewed reminder has painted, keyed on a session epoch rather
+  than a latching ref. Until it does, the next interview's suggestions buffer,
+  which is what the gate does at every other closed moment.
+- `overlay:setFontSize` goes through a leading-edge throttle with a trailing
+  commit (`src/main/write-throttle.ts`). The first press writes at once, any
+  number of calls inside the window cost one write, and the last value asked
+  for is the one stored. Its timers are injected, so the behaviour is driven
+  with fake timers rather than waited for, which `src/main/index.ts` being
+  outside coverage makes necessary rather than merely tidy.
+- The overlay keeps a **draft** of the size it has asked for. Coalescing means
+  the stored value no longer moves on every press, and without a draft each
+  press would step from a stale rendered number: three quick presses from 26
+  would all ask for 28.
+
+**Consequences.** The first defect was not practically reachable: a suggestion
+needs an interviewer turn plus two round trips, while the re-render is two React
+commits. That is the point. `ADR-016` exists so that ordering does not depend on
+the renderer being fast enough, and a gate that relied on winning a race was not
+the guarantee `FR-008` states, however comfortably it was winning.
+
+The second is a threat-model correction rather than a bug report: the allowlist
+was narrowed so a compromised overlay renderer could not write settings, rebind
+hotkeys or replace credentials, and an unbounded call rate into a synchronous
+write handed back a way to stall an interview instead. A capability is only as
+narrow as its worst call pattern.
+
+---
+
 ### ADR-040 — Magic UI could not be vendored, and what was built instead
 
 **Status.** Accepted with a carried remainder, TASK-043.

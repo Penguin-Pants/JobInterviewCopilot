@@ -51,6 +51,51 @@ async function generate(id: string, question: string, lines: string[]): Promise<
   await pushToOverlay(app, 'suggestion:end', { generationId: `gen-${id}`, status: 'complete' });
 }
 
+/**
+ * Watch a bullet's opacity and transform from **before** it exists.
+ *
+ * A settled assertion cannot tell a fade from no fade: a bullet that was never
+ * animated also ends at opacity 1, so `toHaveText`/`toBe('1')` pass either way.
+ * Sampling after the push is racy in the other direction, because the element
+ * may not be there yet and a 250 ms reveal is easy to miss.
+ *
+ * So the sampler is installed first and runs every frame, recording the lowest
+ * opacity and whether any non-identity transform was ever applied. Whatever the
+ * timing, the frames are observed rather than guessed at.
+ */
+async function watchFirstBullet(): Promise<void> {
+  await overlay.evaluate(() => {
+    const probe = window as unknown as {
+      __reveal?: { minOpacity: number; sawTransform: boolean; raf?: number };
+    };
+    if (probe.__reveal?.raf !== undefined) cancelAnimationFrame(probe.__reveal.raf);
+    const state = { minOpacity: 1, sawTransform: false, raf: 0 };
+    probe.__reveal = state;
+    const identity = new Set(['none', 'matrix(1, 0, 0, 1, 0, 0)']);
+    const tick = (): void => {
+      const el = document.querySelector('[data-testid="bullet"]');
+      if (el) {
+        const style = getComputedStyle(el);
+        const opacity = Number.parseFloat(style.opacity);
+        if (Number.isFinite(opacity)) state.minOpacity = Math.min(state.minOpacity, opacity);
+        if (!identity.has(style.transform)) state.sawTransform = true;
+      }
+      state.raf = requestAnimationFrame(tick);
+    };
+    tick();
+  });
+}
+
+async function revealObserved(): Promise<{ minOpacity: number; sawTransform: boolean }> {
+  return overlay.evaluate(() => {
+    const probe = window as unknown as {
+      __reveal: { minOpacity: number; sawTransform: boolean; raf: number };
+    };
+    cancelAnimationFrame(probe.__reveal.raf);
+    return { minOpacity: probe.__reveal.minOpacity, sawTransform: probe.__reveal.sawTransform };
+  });
+}
+
 /** `CH-201`, which is how the renderer learns a session started or stopped. */
 async function setSession(active: boolean, paused = false): Promise<void> {
   await pushToOverlay(app, 'state:session', {
@@ -219,6 +264,7 @@ test('TC-111 a fourth suggestion leaves exactly three cards, the oldest gone', a
  */
 test('TC-112 a reveal is one element per bullet, never per word or per character', async () => {
   await setSession(true);
+  await watchFirstBullet();
   const lines = [
     'Name the system and the symptom in one breath',
     'Say what you measured before you changed anything',
@@ -238,6 +284,13 @@ test('TC-112 a reveal is one element per bullet, never per word or per character
   expect(elementsInside, 'a bullet contains child elements, which a word split would produce').toBe(
     0,
   );
+
+  // FR-092: the reveal is a fade **plus** a slide, and it is observed rather
+  // than inferred from where the bullet ended up. A build with no animation at
+  // all settles exactly where an animated one does.
+  const reveal = await revealObserved();
+  expect(reveal.minOpacity, 'the bullet never faded in').toBeLessThan(1);
+  expect(reveal.sawTransform, 'the bullet never slid').toBe(true);
 
   // NFR-007: nothing animates while idle. With no card on screen there is no
   // animating element for the compositor to be running at all.
@@ -354,6 +407,7 @@ test('TC-115 reduced motion drops the slide and keeps the fade', async () => {
   );
 
   await setSession(true);
+  await watchFirstBullet();
   await generate('1', 'A question', ['A cue']);
   const bullet = overlay.locator('[data-testid="bullet"]').first();
   await expect(bullet).toHaveAttribute('data-slide', 'off');
@@ -366,9 +420,15 @@ test('TC-115 reduced motion drops the slide and keeps the fade', async () => {
     .poll(async () => bullet.evaluate((el) => getComputedStyle(el).transform))
     .toMatch(/^(none|matrix\(1, 0, 0, 1, 0, 0\))$/);
 
-  // The fade remains: the bullet is fully opaque once it has revealed, having
-  // started from zero.
+  // The fade remains, and that is observed rather than inferred. A settled
+  // opacity of 1 is what a bullet that was never animated shows too, so
+  // asserting only the end state would pass against a build that dropped the
+  // fade along with the slide, which is the half `NFR-010` keeps.
   await expect.poll(async () => bullet.evaluate((el) => getComputedStyle(el).opacity)).toBe('1');
+
+  const reveal = await revealObserved();
+  expect(reveal.minOpacity, 'reduced motion dropped the fade as well as the slide').toBeLessThan(1);
+  expect(reveal.sawTransform, 'reduced motion still moved the text').toBe(false);
 });
 
 /* ------------------------------------------------------------------ *

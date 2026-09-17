@@ -73,7 +73,15 @@ function Overlay(): JSX.Element {
     () => lastSeen('overlay:theme') ?? defaultSettings().theme,
   );
   const [cards, dispatch] = useReducer(reduceCards, []);
-  const reported = useRef(false);
+  /**
+   * Bumped at every session boundary, to re-report readiness (FR-006, FR-008).
+   *
+   * `FR-006` is about every live session, not about the first one, so the
+   * answer to "has the reminder been rendered" has to be given again for each.
+   * A ref that latched after the first report said yes forever, over a reminder
+   * the user had dismissed an interview ago.
+   */
+  const [readyEpoch, setReadyEpoch] = useState(0);
 
   /**
    * `prefers-reduced-motion` (NFR-010, FR-092).
@@ -95,9 +103,35 @@ function Overlay(): JSX.Element {
 
   const prefersDark = useMediaPreference('(prefers-color-scheme: dark)', false);
 
+  /**
+   * The size this control has asked for but the store has not confirmed yet
+   * (FR-093, CH-126).
+   *
+   * The main process rate-limits `overlay:setFontSize`, because it is the one
+   * write an overlay renderer can reach and each one is a synchronous settings
+   * write on the process running the live loop. Coalescing there means the
+   * stored value does not move on every press, and without a draft each press
+   * would compute its step from a stale rendered number: three quick presses
+   * from 26 would all ask for 28. The draft is what makes them accumulate, and
+   * it makes the number move on the press rather than a round trip later.
+   *
+   * It is cleared the moment the store agrees, so the stored value is what
+   * survives any disagreement. That is the same shape the Dashboard's own
+   * controls use, and for the same reason.
+   */
+  const [pendingFontSizePx, setPendingFontSizePx] = useState<number | null>(null);
+  const storedFontSizePx = theme.overlayFontSizePx;
+  useEffect(() => {
+    setPendingFontSizePx((draft) => (draft === storedFontSizePx ? null : draft));
+  }, [storedFontSizePx]);
+
   const resolved = useMemo(
-    () => resolveOverlayTheme(theme, { prefersDark, acrylicSupported: platform.acrylicSupported }),
-    [theme, prefersDark, platform.acrylicSupported],
+    () =>
+      resolveOverlayTheme(
+        pendingFontSizePx === null ? theme : { ...theme, overlayFontSizePx: pendingFontSizePx },
+        { prefersDark, acrylicSupported: platform.acrylicSupported },
+      ),
+    [theme, pendingFontSizePx, prefersDark, platform.acrylicSupported],
   );
 
   useEffect(() => {
@@ -167,28 +201,46 @@ function Overlay(): JSX.Element {
     if (sessionActive && !wasActive.current) {
       setDismissed(false);
       dispatch({ kind: 'reset' });
+      // And readiness is owed again. `OverlayGate.reset()` closes the gate at
+      // this same boundary, so until this is answered the next interview's
+      // suggestions buffer rather than arriving over a reminder that has not
+      // been re-shown yet.
+      setReadyEpoch((epoch) => epoch + 1);
     }
     wasActive.current = sessionActive;
   }, [sessionActive]);
 
   /**
-   * Report readiness only once the consent card is on screen (FR-008, ADR-016).
+   * Report readiness once the consent card is on screen (FR-008, ADR-016).
    *
    * This used to fire on mount, but the consent text arrives from the main
    * process and the card cannot exist yet at that point. Readiness would then
    * open the suggestion gate before the reminder had rendered, which is the one
    * thing the gate exists to prevent. Waiting for the text and then for a paint
    * makes "the reminder was shown" true when the main process is told so.
+   *
+   * It runs again at every session boundary, because `FR-006` asks for the
+   * reminder before the first suggestion of **every** session and the gate is
+   * closed again at the same boundary. Reporting it once, with a latching ref,
+   * answered for the first interview and then stood unchallenged over a
+   * reminder the user had dismissed.
+   *
+   * The double `requestAnimationFrame` is the paint, and the cleanup flag is
+   * what keeps a superseded epoch, or StrictMode's simulated remount, from
+   * reporting on behalf of a card that is no longer the one on screen.
    */
   useEffect(() => {
-    if (consent === null || reported.current) return;
-    reported.current = true;
+    if (consent === null) return;
+    let cancelled = false;
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        void window.copilot.invoke('overlay:ready');
+        if (!cancelled) void window.copilot.invoke('overlay:ready');
       });
     });
-  }, [consent]);
+    return () => {
+      cancelled = true;
+    };
+  }, [consent, readyEpoch]);
 
   const dismiss = useCallback(() => {
     setDismissed(true);
@@ -199,9 +251,11 @@ function Overlay(): JSX.Element {
   }, []);
 
   const setFontSize = useCallback((px: number) => {
-    // No optimistic update. The main process answers by pushing `overlay:theme`
-    // back, so what is rendered is what was stored, and the Dashboard control
-    // and this one are the same setting rather than two that drift.
+    // Shown at once, stored when the main process gets to it. The draft above
+    // is cleared as soon as `overlay:theme` comes back carrying this size, so
+    // what is on screen a moment later is what was stored, and the Dashboard
+    // control and this one remain the same setting rather than two that drift.
+    setPendingFontSizePx(px);
     void window.copilot.invoke('overlay:setFontSize', { px });
   }, []);
 

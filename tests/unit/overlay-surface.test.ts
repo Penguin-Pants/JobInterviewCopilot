@@ -315,6 +315,38 @@ describe('the overlay readiness gate', () => {
    * the interview, and the next rebuild replays the previous interview's
    * suggestion to a session that has not produced one.
    */
+  /**
+   * FR-006, FR-008. The gate is closed again at a session boundary, not only
+   * emptied, because `FR-006` asks for the reminder before the first
+   * suggestion of **every** session. Readiness taken once at the first load
+   * answers for the first interview only: the reminder is dismissible, so by
+   * the second it is off screen, and the renderer re-shows it on a
+   * `state:session` push it processes asynchronously. A gate left open would
+   * deliver on whatever the renderer happened to have painted, which is the
+   * race ADR-016 exists so that nothing has to win.
+   */
+  it('a session boundary closes the gate, so the next interview buffers again', () => {
+    const g = gate();
+    g.gate.noteReady();
+    g.gate.send(begin('gen-1'));
+    expect(g.sent).toHaveLength(1);
+
+    g.gate.reset();
+    expect(g.gate.isReady).toBe(false);
+
+    // The next interview's first suggestion is held, not delivered over a
+    // reminder that has not been re-shown yet.
+    g.sent.length = 0;
+    g.gate.send(begin('gen-2'));
+    g.gate.send(line('gen-2', 'the next interview'));
+    expect(g.sent).toEqual([]);
+    expect(g.gate.pending).toBe(2);
+
+    // And released in full once the renewed reminder has painted.
+    g.gate.noteReady();
+    expect(g.sent.map((m) => m.channel)).toEqual(['suggestion:begin', 'suggestion:line']);
+  });
+
   it('a session boundary forgets the card, so it cannot outlive its interview', () => {
     const g = gate();
     g.gate.noteReady();
