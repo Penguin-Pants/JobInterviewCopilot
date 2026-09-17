@@ -30,7 +30,7 @@ Two checks run against the output, in CI and available locally:
 | Command | What it proves |
 |---|---|
 | `npm run check:packaged` | The installer exists, carries the version and `x64`, and the modules that cannot live inside an asar are real files on disk |
-| `npm run smoke:packaged` | The packaged app launches, paints a Dashboard, and **loads** `chokidar` and `onnxruntime-node` in its own main process (Windows only; it skips elsewhere rather than passing vacuously) |
+| `npm run smoke:packaged` | The packaged app launches, paints a Dashboard, completes its knowledge-base startup and logs no failure doing so (Windows only; it skips elsewhere rather than passing vacuously) |
 
 Why both exist: `onnxruntime-node` ships a native addon, which `process.dlopen`
 cannot open from inside an asar archive, and `chokidar` 5 is ESM-only, reached
@@ -38,13 +38,23 @@ through `import()`, which Electron's asar shim does not cover.
 `electron-builder.yml` unpacks both. A wrong glob there still builds a green
 installer; the app only breaks when it is run.
 
-The two checks answer different questions, and the second is the one that
-matters. `check:packaged` proves the files are on disk where the loader will
-look. `smoke:packaged` proves the loader can actually reach and open them,
-which is also the only thing that catches a wrong-ABI native binary. Waiting on
-the Dashboard alone would not have: `startKnowledgeBase` marks profiles ready
-**before** awaiting `rag.start()` and catches what it throws, so the Dashboard
-renders whether or not the watcher ever loaded.
+The two checks answer different questions. `check:packaged` proves the files are
+on disk where the loader will look. `smoke:packaged` runs the app and reads its
+own report of whether startup worked.
+
+Waiting on the Dashboard alone would prove neither: `startKnowledgeBase` marks
+profiles ready **before** awaiting `rag.start()` and catches what it throws, so
+the Dashboard renders whether or not the watcher ever loaded. So the smoke test
+waits for the model state, which is pushed on the last line of that function,
+and then reads `main.log` for the failure `rag.start()` would have logged. A
+failed `chokidar` import surfaces there and nowhere else.
+
+What CI cannot reach is the native addon's own `dlopen`, which happens only when
+something embeds. Loading it from outside the app does not answer the question
+either: `app.evaluate` runs a serialized function with no `require` and no
+dynamic-import callback, so it fails on the harness rather than on the app, and
+a plain `node -e "require(...)"` would test Node's ABI rather than Electron's.
+`MW-15` covers it, by importing and embedding a document on a clean install.
 
 ---
 

@@ -18,10 +18,13 @@
  *
  * Run: node scripts/smoke-packaged.mjs   (after npm run package)
  */
-import { existsSync, mkdtempSync, readdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+/** What `startKnowledgeBase` logs when `rag.start()` throws, chokidar included. */
+const KNOWLEDGE_BASE_FAILED = 'the knowledge base failed to start';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const release = join(root, 'release');
@@ -71,47 +74,49 @@ try {
 
   await dashboard.waitForSelector('[data-testid="profile-list"] > li', { timeout: 30_000 });
 
-  // The Dashboard rendering is not the claim that matters. `startKnowledgeBase`
-  // calls `markProfilesReady()` *before* awaiting `rag.start()`, and catches
-  // what that throws, so the profile row appears whether or not the watcher
-  // ever loaded. Waiting for it proves bootstrap ran, and nothing more.
+  // The Dashboard rendering is not the whole claim. `startKnowledgeBase` calls
+  // `markProfilesReady()` *before* awaiting `rag.start()`, and catches what
+  // that throws, so the profile row appears whether or not the watcher ever
+  // loaded. Two further signals are needed, and neither can be got by reaching
+  // into the packaged app's module system: `app.evaluate` runs a serialized
+  // function with no `require` and no dynamic-import callback, so asking it to
+  // load a module fails on the harness rather than on the app.
   //
-  // So the two modules are loaded here, in the packaged main process, by the
-  // same mechanisms production uses: a dynamic `import()` for the ESM-only
-  // watcher and `require` for the native addon. This is what distinguishes
-  // "the files are on disk", which `check-packaged.mjs` already proved, from
-  // "the loader can actually reach and open them" (ADR-019 is a different
-  // guarantee; this one is TASK-025's follow-up and TC-165).
-  const loaded = await app.evaluate(async () => {
-    const attempt = async (name, load) => {
-      try {
-        await load();
-        return { name, ok: true };
-      } catch (err) {
-        return { name, ok: false, error: err instanceof Error ? err.message : String(err) };
-      }
-    };
-    return [
-      // ESM-only, reached through import(). Electron's asar shim patches
-      // CommonJS require and not Node's ESM loader.
-      await attempt('chokidar', () => import('chokidar')),
-      // A native addon. process.dlopen cannot open a file inside an archive,
-      // and a wrong-ABI binary fails here rather than at file-existence time.
-      await attempt('onnxruntime-node', () => Promise.resolve(require('onnxruntime-node'))),
-    ];
+  // So the app's own signals are used instead.
+  //
+  // First, that bootstrap ran to the end. The model state is pushed on the
+  // last line of `startKnowledgeBase`, and the Dashboard mounts one of these
+  // two on receiving it.
+  await dashboard.waitForSelector('[data-testid="model-gate"], [data-testid="model-ready"]', {
+    timeout: 30_000,
   });
 
-  const broken = loaded.filter((m) => !m.ok);
-  if (broken.length > 0) {
-    throw new Error(
-      `the packaged app could not load ${broken.map((m) => m.name).join(' or ')}: ` +
-        broken.map((m) => `${m.name}: ${m.error}`).join('; '),
-    );
+  // Second, that nothing failed on the way. `rag.start()` opens a watcher,
+  // which is where `chokidar` is pulled in through the ESM `import()` that
+  // asar cannot serve, and a failure there is caught and logged rather than
+  // thrown. The log is the only place it surfaces, so the log is what is read.
+  const log = join(userDataDir, 'logs', 'main.log');
+  const deadline = Date.now() + 10_000;
+  let contents = '';
+  for (;;) {
+    contents = existsSync(log) ? readFileSync(log, 'utf8') : '';
+    if (contents.includes(KNOWLEDGE_BASE_FAILED) || Date.now() > deadline) break;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
+  if (contents.includes(KNOWLEDGE_BASE_FAILED)) {
+    const line = contents.split('\n').find((l) => l.includes(KNOWLEDGE_BASE_FAILED));
+    throw new Error(`the knowledge base did not start in the packaged app: ${line?.trim()}`);
+  }
+
+  // Not vacuous: an app that never wrote a log never got as far as failing.
+  if (contents.trim() === '') {
+    throw new Error(`the packaged app wrote no log at ${log}, so nothing above was observed`);
   }
 
   console.log(
-    `Packaged app smoke test passed: ${exe} launched, rendered the Dashboard, and loaded ` +
-      `${loaded.map((m) => m.name).join(' and ')} from outside the asar.`,
+    `Packaged app smoke test passed: ${exe} launched, rendered the Dashboard, ` +
+      'and started its knowledge base without error.',
   );
 } catch (err) {
   console.error('The packaged app did not come up:');
