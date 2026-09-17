@@ -31,6 +31,19 @@ export interface SessionHistoryProps {
 export function SessionHistory({ profiles, sessionRevision }: SessionHistoryProps): JSX.Element {
   const [byProfile, setByProfile] = useState<Record<string, SessionSummary[]>>({});
   const [failed, setFailed] = useState<Record<string, string>>({});
+  /**
+   * Whether `session:list` has answered for the profiles on screen yet.
+   *
+   * Without it, a group with no entry in `byProfile` read as an empty one, and
+   * "No sessions in this profile." appeared over transcripts that were still on
+   * disk and simply had not been read. That is the same sentence, and the same
+   * contradiction of `FR-110`, that a **failed** read used to produce; the
+   * fix for that one distinguished failure from emptiness and left this third
+   * case, not yet read, still folded into emptiness. `reload` walks the
+   * profiles one at a time, so the last group carries the wrong sentence for as
+   * long as every earlier round trip takes.
+   */
+  const [loaded, setLoaded] = useState(false);
   const [opened, setOpened] = useState<Session | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -61,6 +74,7 @@ export function SessionHistory({ profiles, sessionRevision }: SessionHistoryProp
     if (token !== runToken.current) return;
     setByProfile(next);
     setFailed(errors);
+    setLoaded(true);
     // Keyed on the ids rather than on the array identity. `profile:list`
     // returns a fresh array on every reload, and depending on it would re-list
     // every session on every document-progress tick. The body reads the ids and
@@ -68,6 +82,10 @@ export function SessionHistory({ profiles, sessionRevision }: SessionHistoryProp
   }, [profileIds]);
 
   useEffect(() => {
+    // A new profile list is a new question, so the old answer stops standing
+    // for it. Left true, a profile added mid-session would show the empty
+    // sentence before its own list had been asked for.
+    setLoaded(false);
     void reload();
   }, [reload, sessionRevision]);
 
@@ -118,9 +136,15 @@ export function SessionHistory({ profiles, sessionRevision }: SessionHistoryProp
                 {failure}
               </p>
             ) : null}
-            {!failure && sessions.length === 0 ? (
+            {!failure && !loaded && sessions.length === 0 ? (
+              <p role="status" data-testid={`history-loading-${profile.id}`}>
+                Reading this profile&rsquo;s sessions&hellip;
+              </p>
+            ) : null}
+            {!failure && loaded && sessions.length === 0 ? (
               <p data-testid={`history-empty-${profile.id}`}>No sessions in this profile.</p>
-            ) : (
+            ) : null}
+            {sessions.length > 0 ? (
               <ul className="rows">
                 {sessions.map((summary) => (
                   <li key={summary.id} data-testid={`session-${summary.id}`}>
@@ -151,7 +175,7 @@ export function SessionHistory({ profiles, sessionRevision }: SessionHistoryProp
                   </li>
                 ))}
               </ul>
-            )}
+            ) : null}
           </div>
         );
       })}

@@ -1069,6 +1069,24 @@ rather than work that was blocked: whether the card surface should be
 `MagicCard`. ADR-042 records four requirement-grounded objections, so the
 default is that it stays first-party.
 
+**Review round after the merge.** `TASK-042` and `TASK-043` were read again as
+one diff, against their acceptance criteria and then against the review itself.
+All twenty-six acceptance criteria are met in code. Eight defects were
+confirmed, five in `TASK-042`'s files and three in `TASK-043`'s, and all eight
+are fixed; each task's section records them in a table of its own. Five further
+items were judged real but out of this phase's scope and are carried to
+`TASK-050` and `TASK-051` in the deferred tables: in-flight guards on the
+remaining action buttons, the drop zone's `onDragLeave` containment check, the
+`SttSlot` and `LlmSlot` duplication, the rebuild-versus-settings reconciliation
+already carried, and a measured rather than constructed contrast check for the
+overlay's text size control.
+
+Three of the eight were the same shape and are worth naming as a class: a
+comment that promised a guarantee the code does not make. None of the three
+changed behaviour, and all three would have misled whoever closed the follow-up
+that depends on them, which is how `ADR-037`'s `basename` reason went wrong in
+`TASK-042` and how `ADR-040`'s premise went wrong in `TASK-043`.
+
 ### TASK-040 Session manager and transcript — COMPLETE
 **Traces** FR-088, FR-101, FR-105, FR-106, FR-107, FR-108, ADR-003, ADR-013, ADR-018
 **Depends on** TASK-011, TASK-032
@@ -1478,6 +1496,20 @@ contract change and are carried below with the reason.
 | **Provider selection was writable during a live session** | `config:set` rebinds the health registry immediately while `CMP-15` keeps the STT sockets it already opened on the old choice. The badge would describe a configuration the audio is not using, and a later failure on an old socket would be raised into a machine bound to a provider that had never been tried | The providers are bound for the session, as the profile is (ADR-013). The save is refused with the reason on screen, and the atomic close-and-reopen that would allow it is carried below |
 | **Two translucency changes could race the overlay rebuild** | The second stores the newer setting but finds no window to act on; the first then finishes building a window from the older settings, leaving the overlay in one mode while the settings and the Dashboard say the other (ADR-015) | The renderer serializes its own commits and disables the control while one is in flight. The main-process half is carried below |
 
+**Defects found by a local review round after the merge, and fixed**
+
+A second reading of the whole `TASK-042` and `TASK-043` diff, against the
+acceptance criteria and then against itself. Four findings in this task's files
+were confirmed by the code and fixed; the rest are carried below.
+
+| Defect | Consequence | Fix |
+|---|---|---|
+| **The key field stayed editable while its check ran.** Only the button carried `disabled={state.kind === 'checking'}` | `FR-026` allows the check ten seconds. A replacement typed inside that window was erased by the answer to the **previous** key, because a passing key clears the field, and the verdict that landed beside the now-empty field read "Key accepted and saved" about a value the vault had never seen. That is exactly the defect the `onChange` reset was added to prevent, reached by the asynchronous path instead of the typing one | The field is locked for the duration of the check, as the button already was |
+| **Session History rendered a profile it had not read yet as an empty one.** `byProfile` starts `{}` and `reload` walks the profiles one round trip at a time | "No sessions in this profile." over transcripts still on disk, which is the same sentence, and the same contradiction of `FR-110`, that a **failed** read used to produce. The fix for that one separated failure from emptiness and left this third case, not yet read, still folded into emptiness. The last group carries the wrong sentence for as long as every earlier round trip takes | A `loaded` flag, cleared whenever the profile list changes, and a distinct "Reading this profile's sessions…" state |
+| **Create profile had no in-flight guard** | The name is cleared only once `profile:create` answers, so two clicks inside that round trip both read the same `newName` and both create a profile. Nothing downstream refuses the second: `FR-027` is about which profile is active, not about duplicate names, so one action produced two profiles, each with its own knowledge base | The button is disabled while the call is in flight |
+| **`sharedCredentialProviders` was exported, tested, and called by nothing** | Its test, "names every provider that serves both, not only the first", asserted that rule about a function no window renders. The rule was therefore **unverified** for `sharedCredentialNotice`, which is what Provider Setup actually shows, while reading as though it were covered | The helper is gone and the case is asserted on the notice, where a user would read it |
+| **The Overlay and appearance TSDoc claimed more serialization than the code has.** "Serializing removes the overlap this renderer can cause" | `committing` disables the translucency select and nothing else, so an opacity or theme-mode commit can still overlap a window rebuild. The claim is right about the thing that matters, two rebuilds, and wrong as written, which is how a later reader closes the follow-up below on the strength of a sentence rather than the code | The comment now states exactly what is serialized, why the other controls stay live, and why the overlap that remains is harmless today: `wireOverlayWindow` reads `config.get()` afresh on `did-finish-load`, so a rebuilt renderer is handed the newest theme rather than the snapshot its rebuild started from |
+
 **Deferred, with an owner**
 
 | Item | Why it is not done here | Owner |
@@ -1494,6 +1526,9 @@ contract change and are carried below with the reason.
 | A rebuilt overlay is not reconciled against the newest settings | The renderer now serializes its own theme commits, so it can no longer start two rebuilds. A rebuild racing a settings change from anywhere else still ends with a window built from older settings. The fix belongs where the window is rebuilt (ADR-015) | TASK-050 |
 | Changing the STT selection during a live session | Refused in the Dashboard for now, because rebinding health while `CMP-15` holds sockets on the old choice puts the badge and the audio out of step. Allowing it means closing and reopening the STT pair together with the health rebind, at a boundary with no audio in flight, which is the session loop's work and the same shape as the `noteCleanBoundary` item TASK-044 carried | TASK-050 |
 | `session:read` and `session:delete` still scan every profile | Carried from TASK-040. Session History was built on the channels as they stand and found no reason to change them, so it is an optimization | TASK-050 |
+| The remaining action buttons have no in-flight guard: Save thresholds, Apply in Hotkeys, Save provider selection, and a document row's Try again and Remove document | Found by the review round below. Each one issues a duplicate `config:set`, `hotkey:rebind`, `doc:retry` or `doc:delete` on a fast second click. None of them creates a second entity the way Create profile did, which is why that one was fixed here and these are carried: a repeated `config:set` stores the same object twice, and a repeated `doc:delete` at worst raises an error about a row that is already gone. The consistent answer is one busy convention for the section rather than five separate flags | TASK-050 |
+| The drop zone's `onDragLeave` does not check where the pointer went | It fires when the pointer crosses onto the zone's own children, so `data-drop-active` flickers off and is restored by the next `onDragOver`. Cosmetic, self-correcting, and the containment check needs `relatedTarget`, which is a behaviour no test in this repository can drive: a real OS drag is not reachable from the Playwright Electron runner | TASK-050 |
+| `SttSlot` and `LlmSlot` are two near-identical components | About seventy lines each, differing in the registry they read, the price shape and a streams column the LLM half states rather than reads. A generic slot is the obvious shape, and it is a refactor with no acceptance criterion here and no defect behind it today | TASK-050 |
 
 **Verified by** TC-120, TC-121, TC-122, TC-123, TC-124, TC-125, TC-154, TC-158
 
@@ -1608,6 +1643,18 @@ it caught it.
 | **`TC-146` deleted real vendored code.** Its fixture directory was `src/renderer/overlay/vendor`, the path real vendored code lives at, and its `afterEach` removed that directory **recursively** rather than the file it created | Harmless for exactly as long as nothing was vendored. The first real file to land there, Magic UI's `blur-fade.tsx`, was deleted by the first run of the integration suite, and the only symptom was a `tsc` a minute later failing to resolve an import that had been fine. A test whose cleanup is wider than what it created, guarding the very feature it destroys | The fixture moved to `src/renderer/__fixture-licenses__/vendor`, which the gate's `findVendorDirs` walks identically and which nothing real can occupy, and the cleanup is confined to that parent. Two new cases pin it: the fixture path is asserted to be the suite's own, and every file `VENDORED.md` declares is asserted to still exist after the suite has run |
 | **The premise of ADR-040 was wrong.** "Magic UI's source is unreachable" was concluded from four probes, none of which was a plain `git clone` | The conclusion was recorded in the decision log, the architecture's dependency table, `VENDORED.md` and this document, and shipped. The fourth probe was the GitHub **API**, whose refusal names `add_repo` as its own remedy; that was read as a verdict rather than as evidence. Four failing probes can still be the wrong four | ADR-042 supersedes ADR-040 and records how the wrong conclusion was reached, because that is worth more than the conclusion was. The three documents carrying the claim are corrected |
 
+**Defects found by a local review round after the merge, and fixed**
+
+The same reading that produced `TASK-042`'s round above. Three findings in this
+task's files were confirmed by the code and fixed. All three are the same shape:
+a comment or a component that claimed a guarantee the code does not make.
+
+| Defect | Consequence | Fix |
+|---|---|---|
+| **The in-overlay text size control had no surface behind it.** Every other piece of text in this window sits on `.overlay-surface`; this one sat on the shell, which has no background over a transparent `body` | `A-`, `A+` and the pixel value were painted straight onto the desktop behind the overlay. In dark mode `--overlay-text` is near white, so over a light desktop the control `FR-093` requires the overlay to be adjustable from is one the user cannot see. `TC-114`'s contrast guarantee did not cover it, because that guarantee is about text on a card and this text was on no card | The controls are a row on `.overlay-surface`, so they inherit the alpha floor `theme.ts` proves to 4.5 to 1 at every supported opacity, rather than a second rule that could drift. The row is the inner element, not the full-width one, so the card is the size of the controls. `TC-117` asserts the surface is not transparent |
+| **`theme.ts` said the idle card follows the raw opacity and that no text is read off the chrome alpha.** Both halves are wrong: `styles.css` paints only the border and the interactive ring with `--overlay-chrome-alpha`, and the idle card is an `.overlay-surface` whose message renders in `--overlay-muted` | The behaviour is correct and safer than the comment described, which is the dangerous direction: a reader lowering the floor on the strength of "nothing reads text off them" would have taken the idle message and the consent reminder below 4.5 to 1 with the module's own documentation as the warrant. This repository has already corrected one true conclusion that carried the wrong reason (`basename` in ADR-037) | Both places now name the border and the ring as what follows the raw value, and say that everything carrying text is painted with `surfaceAlpha` |
+| **`throttleWrites`'s TSDoc claimed a value comparison the module does not make.** "A value identical to the last committed one is dropped rather than scheduled, so a renderer looping one value costs nothing at all" | `request` never compares anything. The dedupe is in the commit callback in `src/main/index.ts`, which returns without writing when the size has not moved, so a repeated value is still scheduled and still costs a timer. The conclusion, that a looping renderer buys no settings write, is true; the mechanism given for it is not, and it is the mechanism a later reader would rely on when moving the dedupe | The TSDoc says where the comparison actually lives and what a looping renderer really costs: one coalesced timer per window and no settings write |
+
 **Deferred, with an owner**
 
 | Item | Why it is not done here | Owner |
@@ -1620,6 +1667,7 @@ it caught it.
 | `TC-138` cannot exercise `OverlayGate` itself | Its messages go through `webContents.send`, which is the renderer's real input but bypasses the gate. Nothing a test can reach feeds the gate except a live session, which needs provider credentials the E2E suite cannot supply. A read-only "what is buffered" channel would close it and is a contract change with no acceptance criterion here | TASK-050 |
 | Three cards of five bullets do not fit in the overlay window at any size the user can choose | `OVERLAY_SIZE` is 420 by 260 and `FR-081` makes the window non-resizable, while `FR-091` asks for three cards, `FR-004` allows five lines each and `FR-093` allows 32 px text. The arithmetic does not close: one card of five wrapping bullets is about 390 px at 22 px. The stack therefore clips from the top, which puts the newest cue and the consent reminder where they belong and drops the oldest card, and the realistic case (short cues, reminder dismissed) fits with room to spare. Closing it properly means either growing `OVERLAY_SIZE`, which is `TASK-005`'s constant and carries `MW-01` and `MW-07` visual checks, or accepting the clip in the requirement. Neither is this task's to decide alone | TASK-051 |
 | The overlay is operable from the keyboard when it has focus, but nothing gives it focus | `NFR-010` requires the **Dashboard** to be keyboard navigable, and `TC-124` proves that. A click-through, non-activating overlay that took focus would take it from the interview, which is the opposite of what the product is for. Naming it so a later accessibility pass does not read the silence as an oversight | TASK-050 |
+| The text size control's own surface is asserted to exist, not to a contrast ratio | `TC-114` proves the floor for the palette's held colours on a card, and the control now renders on exactly that card, so the ratio follows from the same construction rather than from a second measurement. Measuring the rendered control would need the E2E runner, which is Windows only, to compute a composited colour over an arbitrary desktop: the same problem `theme.ts` solves analytically for the cards | TASK-051 |
 
 **Verified by** TC-006, TC-110, TC-111, TC-112, TC-113, TC-114, TC-115, TC-116, TC-117, TC-138, TC-142
 

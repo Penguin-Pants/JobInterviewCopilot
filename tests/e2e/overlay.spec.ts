@@ -616,6 +616,18 @@ test('TC-117 click-through and interactive render a visibly different state', as
     .locator('[data-testid="idle-card"]')
     .evaluate((el) => getComputedStyle(el).borderColor);
   expect(interactiveBorder, 'the two modes look the same').not.toBe(clickThroughBorder);
+
+  // The control sits on a card, like every other piece of text in this window.
+  // The shell has no background and `body` is transparent, so without one its
+  // labels are painted straight onto the desktop: in dark mode that is near
+  // white text over whatever is behind the overlay, which is a control the user
+  // cannot see and therefore cannot use (FR-093, NFR-010).
+  const controlSurface = await overlay
+    .locator('[data-testid="font-size-surface"]')
+    .evaluate((el) => getComputedStyle(el).backgroundColor);
+  expect(controlSurface, 'the text size control has no surface behind it').not.toMatch(
+    /rgba\(0, 0, 0, 0\)|transparent/,
+  );
 });
 
 /* ------------------------------------------------------------------ *

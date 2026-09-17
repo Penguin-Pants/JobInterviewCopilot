@@ -22,8 +22,11 @@ import type { OverlayTranslucency, Settings, ThemeMode } from '../../shared/type
  * So the **card surface** carries a floor, computed here from the palette
  * rather than guessed, and the user's opacity moves the surface between that
  * floor and fully opaque. Opacity below the floor still changes the overlay:
- * the frame, the shadow and the idle card follow the raw value, because nothing
- * reads text off them.
+ * the card's border and the interactive ring follow the raw value, because they
+ * are shapes rather than surfaces and no text is read against them. Every card
+ * that carries text, the idle card and the consent reminder among them, is
+ * painted on the floored surface, because a user reads those the same way they
+ * read a bullet.
  *
  * The alternative, letting the surface go to 0.3 and accepting 2 to 1, fails
  * the requirement silently on the exact setting a user picks when they want the
@@ -279,9 +282,11 @@ export function resolveOverlayTheme(
   const palette = OVERLAY_PALETTES[mode];
   const translucency = effectiveTranslucency(theme.overlayTranslucency, options.acrylicSupported);
   const surfaceAlpha = cardSurfaceAlpha(mode, theme.overlayOpacity);
-  // The frame, the shadow and the idle card follow the raw setting: no text is
-  // read off them, so nothing is owed a contrast floor there and the control
-  // keeps its full range where it is free to have it.
+  // The border and the interactive ring follow the raw setting: they are the
+  // two things `styles.css` paints with this, no text is read against either,
+  // so nothing is owed a contrast floor there and the control keeps its full
+  // range where it is free to have it. Everything that carries text is painted
+  // with `surfaceAlpha` above.
   const chromeAlpha = Math.min(1, Math.max(0, theme.overlayOpacity));
   const accent = parseHex(theme.accent) ?? palette.text;
 

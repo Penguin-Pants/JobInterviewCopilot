@@ -44,8 +44,13 @@ const systemTimers: ThrottleTimers = {
  *
  * The first call in a quiet period commits immediately. Calls inside the window
  * are coalesced, and the **last** value among them is committed when the window
- * closes. A value identical to the last committed one is dropped rather than
- * scheduled, so a renderer looping one value costs nothing at all.
+ * closes.
+ *
+ * Values are not compared here. Whether a value is worth storing is the
+ * commit's own question, and the caller in `src/main/index.ts` answers it by
+ * returning without writing when the size has not moved. So a renderer looping
+ * one value still costs one coalesced timer per window, and no settings write
+ * at all, which is the cost this module exists to bound.
  */
 export function throttleWrites<T>(
   commit: (value: T) => void,

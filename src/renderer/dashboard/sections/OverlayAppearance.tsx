@@ -82,9 +82,20 @@ export function OverlayAppearance({
    * newer setting, but `applyThemeChange` finds no window to act on and
    * returns, and the first call then finishes building a window from the older
    * settings: the overlay ends up in one mode while the settings and the
-   * Dashboard both say the other. Serializing removes the overlap this renderer
-   * can cause. Reconciling a rebuilt window against the newest settings is the
-   * main process's half, and is carried as follow-up work.
+   * Dashboard both say the other.
+   *
+   * What this serializes is exactly the control that rebuilds the window, and
+   * that is the whole of the claim: the translucency select is the only one
+   * `committing` disables, so two rebuilds cannot overlap. The other controls
+   * stay live during a commit on purpose, because they write settings without
+   * rebuilding anything and locking the whole section behind a window rebuild
+   * would freeze five controls on the strength of one. A rebuild racing a plain
+   * settings write is therefore still reachable from here; it is harmless today
+   * only because `wireOverlayWindow` reads `config.get()` afresh on
+   * `did-finish-load`, so the rebuilt renderer is handed the newest theme
+   * rather than the snapshot its rebuild started from. Making the rebuild
+   * itself reconcile, rather than relying on that, is the main process's half
+   * and is carried as follow-up work.
    */
   const [committing, setCommitting] = useState(false);
 

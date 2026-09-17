@@ -17,6 +17,16 @@ import { SETTINGS_LIMITS } from '../../../shared/defaults.js';
  *
  * The buttons are real buttons and carry accessible names, so the overlay is
  * operable from the keyboard when it has focus (NFR-010).
+ *
+ * The controls sit on `.overlay-surface`, like every other piece of text in
+ * this window. Without it they were the one exception: the shell has no
+ * background and `body` is transparent, so `A-`, `A+` and the pixel value were
+ * painted straight onto the desktop behind the overlay. In dark mode
+ * `--overlay-text` is near white, which over a light desktop is a control the
+ * user cannot see and therefore cannot use, on the very window `FR-093` asks
+ * to be adjustable from. The surface is the same one `theme.ts` proves to
+ * 4.5 to 1 at every supported opacity, so the affordance is readable by the
+ * same construction as a bullet rather than by a second rule that could drift.
  */
 export interface FontSizeControlProps {
   fontSizePx: number;
@@ -45,36 +55,46 @@ export function FontSizeControl({ fontSizePx, onChange }: FontSizeControlProps):
     <div
       data-testid="font-size-control"
       data-no-drag="true"
-      className="mt-1 flex shrink-0 items-center justify-end gap-1"
+      className="mt-1 flex shrink-0 items-center justify-end"
     >
-      <button
-        type="button"
-        data-testid="font-smaller"
-        aria-label="Smaller overlay text"
-        className={button}
-        disabled={fontSizePx <= min}
-        onClick={() => onChange(nextFontSize(fontSizePx, -FONT_STEP_PX))}
+      {/*
+        The surface is the inner row, not this one. This element is full width
+        because the shell is a column, and painting a card across it would put a
+        band over the desktop for the sake of three small controls.
+      */}
+      <div
+        data-testid="font-size-surface"
+        className="overlay-surface flex items-center gap-1 rounded-lg px-1.5 py-1"
       >
-        A−
-      </button>
-      <span
-        data-testid="font-size-value"
-        aria-live="polite"
-        className="text-[12px] tabular-nums"
-        style={{ color: 'var(--overlay-muted)' }}
-      >
-        {fontSizePx}px
-      </span>
-      <button
-        type="button"
-        data-testid="font-larger"
-        aria-label="Larger overlay text"
-        className={button}
-        disabled={fontSizePx >= max}
-        onClick={() => onChange(nextFontSize(fontSizePx, FONT_STEP_PX))}
-      >
-        A+
-      </button>
+        <button
+          type="button"
+          data-testid="font-smaller"
+          aria-label="Smaller overlay text"
+          className={button}
+          disabled={fontSizePx <= min}
+          onClick={() => onChange(nextFontSize(fontSizePx, -FONT_STEP_PX))}
+        >
+          A−
+        </button>
+        <span
+          data-testid="font-size-value"
+          aria-live="polite"
+          className="text-[12px] tabular-nums"
+          style={{ color: 'var(--overlay-muted)' }}
+        >
+          {fontSizePx}px
+        </span>
+        <button
+          type="button"
+          data-testid="font-larger"
+          aria-label="Larger overlay text"
+          className={button}
+          disabled={fontSizePx >= max}
+          onClick={() => onChange(nextFontSize(fontSizePx, FONT_STEP_PX))}
+        >
+          A+
+        </button>
+      </div>
     </div>
   );
 }

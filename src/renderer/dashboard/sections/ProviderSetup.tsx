@@ -427,6 +427,15 @@ export function ProviderSetup({
                 data-testid={`key-input-${credentialId}`}
                 type="password"
                 autoComplete="off"
+                // Locked while the check runs, for the same reason the button
+                // is. `FR-026` allows the check 10 seconds, and a key that
+                // passes clears the field: a replacement typed inside that
+                // window was wiped by an answer about the *previous* key, and
+                // the verdict that landed beside the empty field said "Key
+                // accepted and saved" about a value the vault had never seen.
+                // That is the defect the `onChange` reset below was added to
+                // prevent, arriving by the asynchronous path instead.
+                disabled={state.kind === 'checking'}
                 value={keys[credentialId] ?? ''}
                 onChange={(e) => {
                   setKeys((k) => ({ ...k, [credentialId]: e.target.value }));
