@@ -88,23 +88,31 @@ test('TC-006 the consent reminder renders before the first suggestion, every ses
   // The reminder is *displayed*, not merely present. `OVERLAY_SIZE` is 420 by
   // 260 and cannot be resized, and scaling this card with the suggestion text
   // size once pushed it 2386 px above the viewport: a reminder nobody can read
-  // does not satisfy `FR-006`. The shell keeps it out of the region that clips.
-  const shown = async (selector: string): Promise<boolean> =>
+  // does not satisfy `FR-006`. The shell keeps it out of the region that clips,
+  // and the newest cue sits against the bottom of the window whatever is above
+  // it, because the stack clips from the top.
+  //
+  // Both are polled, because the claim is about the **settled** layout. A card
+  // enters under a transform, so a single read lands mid-animation: measured on
+  // the built renderer, the newest card's bottom is 331 while it is still
+  // travelling and 252 once it arrives, and the first CI run caught it at 332.
+  const boxOf = async (selector: string): Promise<{ top: number; bottom: number; h: number }> =>
     overlay.locator(selector).evaluate((el) => {
       const box = el.getBoundingClientRect();
-      return box.top >= 0 && box.bottom <= window.innerHeight && box.height > 0;
+      return { top: box.top, bottom: box.bottom, h: box.height };
     });
-  expect(await shown('[data-testid="consent-reminder"]')).toBe(true);
+  const viewport = await overlay.evaluate(() => window.innerHeight);
 
-  // And the newest cue is against the bottom of the window, whatever is above
-  // it. The stack clips from the top, so the oldest card is what goes.
-  const newestBottom = await overlay
-    .locator('[data-testid="suggestion-card"][data-depth="0"]')
-    .evaluate((el) => ({
-      bottom: el.getBoundingClientRect().bottom,
-      viewport: window.innerHeight,
-    }));
-  expect(newestBottom.bottom).toBeLessThanOrEqual(newestBottom.viewport);
+  await expect
+    .poll(async () => {
+      const box = await boxOf('[data-testid="consent-reminder"]');
+      return box.h > 0 && box.top >= 0 && box.bottom <= viewport;
+    })
+    .toBe(true);
+
+  await expect
+    .poll(async () => (await boxOf('[data-testid="suggestion-card"][data-depth="0"]')).bottom)
+    .toBeLessThanOrEqual(viewport);
 
   // FR-006: dismissible.
   await overlay.click('[data-testid="consent-dismiss"]');
@@ -282,11 +290,12 @@ test('TC-113 the text size defaults to 22 px, moves from both controls and persi
   for (let i = 0; i < 2; i += 1) await dashboard.keyboard.press('ArrowRight');
   await expect(dashboard.locator('[data-testid="overlay-font-size-value"]')).toHaveText('24');
   await expect.poll(renderedSize).toBe(24);
-  await expect(overlay.locator('[data-testid="font-size-value"]')).toHaveText('24px');
 
   // And the in-overlay control, offered in interactive mode only, which is
-  // where a click can reach it (FR-084).
+  // where a click can reach it (FR-084). Its readout does not exist before
+  // that, so it is read after the mode push rather than before it.
   await pushToOverlay(app, 'overlay:mode', { interactive: true, paused: false });
+  await expect(overlay.locator('[data-testid="font-size-value"]')).toHaveText('24px');
   await overlay.click('[data-testid="font-larger"]');
   await expect(overlay.locator('[data-testid="font-size-value"]')).toHaveText('26px');
   await expect.poll(renderedSize).toBe(26);
@@ -350,9 +359,12 @@ test('TC-115 reduced motion drops the slide and keeps the fade', async () => {
   await expect(bullet).toHaveAttribute('data-slide', 'off');
 
   // The slide is a transform, so its absence is the absence of one. `none` and
-  // an identity matrix both count: neither moves the text.
-  const transform = await bullet.evaluate((el) => getComputedStyle(el).transform);
-  expect(['none', 'matrix(1, 0, 0, 1, 0, 0)']).toContain(transform);
+  // an identity matrix both count: neither moves the text. Polled for the same
+  // reason the geometry in `TC-006` is: a read taken while anything is still
+  // settling is a read of a frame, not of the state under test.
+  await expect
+    .poll(async () => bullet.evaluate((el) => getComputedStyle(el).transform))
+    .toMatch(/^(none|matrix\(1, 0, 0, 1, 0, 0\))$/);
 
   // The fade remains: the bullet is fully opaque once it has revealed, having
   // started from zero.
@@ -395,11 +407,17 @@ test('TC-116 theme mode, opacity and translucency apply with no app restart', as
   // FR-094: the card's colours are the custom properties `theme.ts` computes,
   // resolved through the Tailwind stylesheet. Asserted on a resolved colour
   // rather than on a stylesheet element existing, which any build satisfies.
+  //
+  // Both serialisations are accepted. `color-mix(in srgb, …)` computes to
+  // `color(srgb r g b / a)` in current Chromium rather than to `rgba(…)`, and
+  // which one a build emits is the browser's business, not this card's.
   const surface = await overlay
     .locator('[data-testid="idle-card"]')
     .evaluate((el) => getComputedStyle(el).backgroundColor);
-  expect(surface, 'the card has no resolved background colour').toMatch(/^rgba?\(/);
-  expect(surface).not.toBe('rgba(0, 0, 0, 0)');
+  expect(surface, 'the card has no resolved background colour').toMatch(/^(rgba?|color)\(/);
+  // Translucent, and not invisible: `FR-090` calls for a translucent card, so
+  // an alpha of exactly 0 is as wrong as no colour at all.
+  expect(surface, 'the card is fully transparent').not.toMatch(/\/\s*0\s*\)$|^rgba\(0, 0, 0, 0\)$/);
 
   // And the translucency mode, which rebuilds the window rather than applying
   // in place (ADR-015).
