@@ -219,6 +219,7 @@ export function Dashboard(): JSX.Element {
       <OverlayAppearance
         settings={data.settings}
         captureNotice={data.captureNotice}
+        platform={data.platform}
         onSettingsChanged={data.reloadSettings}
       />
     </main>

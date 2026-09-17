@@ -52,6 +52,7 @@ const ALLOWED_PUSH: readonly PushChannel[] = [
   'rag:progress',
   'model:download',
   'notice:captureFidelity',
+  'notice:platform',
 ];
 
 const allowedInvoke = new Set<string>(ALLOWED_INVOKE);

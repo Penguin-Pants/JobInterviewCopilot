@@ -1208,6 +1208,151 @@ notes.
 
 ---
 
+### ADR-038 — Which window sees a notice, and how the Dashboard learns what the machine can do
+
+**Status.** Accepted, TASK-043.
+
+**Context.** Two gaps, one of them a three-way disagreement that had stood
+since Milestone 0.
+
+1. `CH-215 notice:captureFidelity` was written into the IPC table with
+   **overlay** as its target, implemented as a push to the **Dashboard**, and
+   left out of the overlay preload's allowlist. `NFR-012` says the pre-19041
+   warning is shown "alongside the consent reminder", which is the overlay, so
+   the one window the requirement is about could never show it. `TASK-032`'s
+   `TC-096` found the inconsistency while enumerating the overlay's surface and
+   carried it here, because `NFR-012` decides it and this is the task that owns
+   the overlay's UI.
+2. `FR-089` requires the acrylic option to be **disabled in the Dashboard with
+   an explanatory note** on Windows 10. Nothing carried a build number to the
+   Dashboard except `CH-215`, which fires only when capture fidelity is
+   degraded. A Windows 10 machine on build 19045 has exact capture exclusion
+   and no acrylic, so it received nothing at all and the option stayed enabled
+   over a mode the window cannot render. `TASK-042` carried this with the same
+   reasoning and named this task as its owner.
+
+**Decision.**
+
+- `CH-215`'s target is **both**, and it is pushed to both windows. The overlay
+  renders it inside the consent card, which is where `NFR-012` puts it. The
+  Dashboard keeps it, because `FR-089` reads its build number and because the
+  overlay card is dismissible, so the Dashboard is where the sentence can still
+  be found afterwards.
+- `CH-216 notice:platform` is new, carries `{ windowsBuild, acrylicSupported }`
+  and goes to both windows on every renderer load. The Dashboard disables the
+  acrylic option from `acrylicSupported` and names the build in the note.
+- The overlay receives it too, for a reason that is not `FR-089`'s.
+  `overlayWindowOptions` silently builds a **transparent** window when acrylic
+  is selected on a build that cannot render it, so the stored translucency and
+  the window that exists can disagree. The renderer resolves the effective mode
+  from `acrylicSupported` and styles the window it got rather than the one that
+  was asked for, which is what its contrast depends on.
+- The Dashboard gates on the pushed boolean, never on its own comparison
+  against a build number. A second implementation of `supportsAcrylic` in a
+  renderer could disagree with the main process about a machine; a copied
+  constant can only ever put the wrong number in a sentence, and a guardrail
+  pins the two together.
+
+**Consequences.** Both notices are pushed on `did-finish-load` rather than once
+at bootstrap, because either window can be rebuilt: the overlay on a
+translucency change (ADR-015), the Dashboard by being closed and reopened. The
+old one-shot push at the end of bootstrap left every rebuilt window without the
+warning, which was a second, quieter bug in the same code.
+
+**Why neither notice breaks `FR-076`.** `FR-076` bars an **error card**:
+"Provider failures are reported only through the Dashboard status badge."
+Neither of these is a provider failure. One says the operating system cannot
+hide a window from screen capture, which `NFR-012` requires next to the consent
+reminder in so many words; the other describes the machine. Neither carries a
+severity, a retry or a reason, and no code path can put a provider failure into
+either.
+
+---
+
+### ADR-039 — The overlay card carries an alpha floor, so `FR-093`'s contrast is true at every opacity
+
+**Status.** Accepted, TASK-043.
+
+**Context.** `FR-093` requires suggestion text to hold at least 4.5 to 1
+"against the card background", and `TASK-043` requires it "in both themes at
+**every** supported opacity level". `SETTINGS_LIMITS.overlayOpacity.min` is
+0.3.
+
+The overlay floats over an unknown desktop, so the card background is not a
+colour until the card is composited over whatever is behind it. Two readings
+were available and only one of them is worth testing:
+
+- **The card's own colour, alpha ignored.** Passes for any palette at any
+  opacity, including a card nobody can read. `TC-114` would assert nothing.
+- **The worst case the card can be read on:** composited over pure white and
+  over pure black, which bound every desktop between them. This is what the
+  user actually sees.
+
+Under the second reading a dark card at 0.3 over a white desktop composites to
+about 70 percent grey, and white text on that is roughly 2 to 1. No single text
+colour clears 4.5 to 1 against both bounds at that alpha, in either theme.
+
+**Decision.** The **card surface** has an alpha floor, computed from the
+palette rather than chosen: the smallest alpha at which every colour held to
+the target still clears it over both bounds. The user's opacity setting moves
+the surface between that floor and fully opaque. Below the floor the setting
+still does something visible: the frame, the shadow and the idle card follow
+the raw value, because no text is read off them.
+
+`TC-114` drives every theme and every opacity step the slider can produce, and
+asserts separately that the raw minimum **would** fail and that one held colour
+already fails a step below the floor. Without those two the floor could be
+removed, or set well clear of the boundary, and the suite would stay green.
+
+**Consequences.** A user who sets 0.3 gets a card more opaque than 0.3. That is
+the cost of the requirement as written, and it is paid on the setting chosen by
+someone who wants the overlay unobtrusive, which is exactly when they can least
+afford to squint at it. The alternative is a requirement that is false in the
+product and true in the test.
+
+---
+
+### ADR-040 — Magic UI could not be vendored, and what was built instead
+
+**Status.** Accepted with a carried remainder, TASK-043.
+
+**Context.** `FR-094` says overlay cards "must be built from Magic UI
+components on Tailwind, styled from the theme tokens in `FR-029`". The
+architecture's dependency table records Magic UI as code **copied into the
+repository**, not an npm dependency, and `NFR-016` requires every vendored file
+to carry its source URL, the version or commit copied, and its license in
+`VENDORED.md`. `VENDORED.md` has carried a placeholder row naming this task
+since Milestone 0.
+
+Magic UI's source could not be obtained in this environment. `magicui.design`,
+`raw.githubusercontent.com`, `cdn.jsdelivr.net` and `unpkg.com` are all refused
+by the network egress proxy, and the two Magic UI packages on npm
+(`@magicuidesign/cli`, `@magicuidesign/mcp`) are thin clients that fetch the
+component registry from `magicui.design` at run time and embed no component
+source.
+
+**Decision.** The Tailwind half of `FR-094` is implemented: the cards are built
+on Tailwind, styled from the `FR-029` theme tokens through the custom
+properties `theme.ts` computes, and `tailwindcss` compiles the stylesheet at
+build time. The card, the reveal and the idle card are written as first-party
+components under `src/renderer/overlay/components/`, occupying the roles Magic
+UI's `MagicCard` and `BlurFade` would.
+
+Nothing is vendored, and `VENDORED.md` records that rather than a row. A
+provenance row naming a source URL, a version and a license for code that was
+not copied from there would be a false statement in the one file `NFR-016`
+exists to make trustworthy, and `scripts/check-licenses.mjs` reads that file as
+input. A wrong row is worse than no row.
+
+**Consequences.** `FR-094` is **partially met** and the remainder is carried to
+`TASK-051` with its reason, rather than being recorded as done. `TC-146`, which
+verifies `NFR-016`, is unaffected: it drives the checker against a fixture, so
+it does not need a real vendored file. Swapping the first-party components for
+Magic UI's later is a contained change: they are four small components behind
+the props `Overlay.tsx` already passes.
+
+---
+
 ## 5. Out of scope for v1
 
 Carried forward from product discovery. Do not add without a new decision.

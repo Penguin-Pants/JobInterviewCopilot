@@ -17,8 +17,11 @@ export interface LaunchedApp {
   userDataDir: string;
 }
 
-export async function launchApp(): Promise<LaunchedApp> {
-  const userDataDir = mkdtempSync(join(tmpdir(), 'icp-e2e-'));
+export async function launchApp(reuseUserDataDir?: string): Promise<LaunchedApp> {
+  // A caller may hand back a directory from an earlier launch, which is the
+  // only way to assert that a setting survives a relaunch rather than merely a
+  // reload (`TC-113`). A fresh directory is still the default.
+  const userDataDir = reuseUserDataDir ?? mkdtempSync(join(tmpdir(), 'icp-e2e-'));
   const app = await electron.launch({
     args: [join(process.cwd(), 'out/main/index.js'), `--user-data-dir=${userDataDir}`],
   });
@@ -37,6 +40,64 @@ export async function launchApp(): Promise<LaunchedApp> {
   // that is about to appear.
   await dashboard.waitForSelector('[data-testid="model-gate"], [data-testid="model-ready"]');
   return { app, dashboard, userDataDir };
+}
+
+/**
+ * The overlay's page, once its renderer has painted (CMP-14, TASK-043).
+ *
+ * The window is found by its loaded URL, exactly as `pushToDashboard` finds the
+ * Dashboard and for the same reason: the hidden audio worker is a real renderer
+ * too, so "the one that is not the Dashboard" picks whichever of the two
+ * happens to exist first.
+ *
+ * Waiting for `[data-testid="overlay"]` rather than for the window is what
+ * makes the returned page usable: bootstrap creates the overlay and awaits its
+ * renderer, so the page exists for the whole of that load with nothing in it.
+ *
+ * A closed page is skipped. A translucency change destroys the overlay and
+ * builds a new one (ADR-015), and the old page can still be listed for a moment
+ * after its window is gone, so "the first page whose URL says overlay" would
+ * hand back a window that no longer exists.
+ */
+export async function overlayPage(app: ElectronApplication): Promise<Page> {
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    const page = app.windows().find((w) => !w.isClosed() && w.url().includes('overlay'));
+    if (page) {
+      await page.waitForSelector('[data-testid="overlay"]');
+      return page;
+    }
+    if (Date.now() > deadline) throw new Error('No overlay window appeared within 30s.');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+/**
+ * Push a main-to-renderer message into the overlay.
+ *
+ * The suggestion channels are driven directly for the same reason the
+ * Dashboard's live state is: reaching them through a real session needs
+ * provider credentials this suite has no way to supply, and asserting a card
+ * against a generation that never happens would assert nothing. What is under
+ * test here is the renderer, and these are the messages it really receives.
+ */
+export async function pushToOverlay(
+  app: ElectronApplication,
+  channel: string,
+  payload: unknown,
+): Promise<void> {
+  const delivered = await app.evaluate(
+    ({ BrowserWindow }, args) => {
+      const overlay = BrowserWindow.getAllWindows().find((w) =>
+        w.webContents.getURL().includes('overlay'),
+      );
+      if (!overlay) return false;
+      overlay.webContents.send(args.channel, args.payload);
+      return true;
+    },
+    { channel, payload },
+  );
+  if (!delivered) throw new Error(`No overlay window to receive ${channel}.`);
 }
 
 /**

@@ -355,7 +355,6 @@ async function bootstrap(): Promise<void> {
   });
 
   registerHotkeys();
-  reportCaptureFidelity();
 
   // Re-open windows, never re-run bootstrap. A second bootstrap would build a
   // second ConfigStore and re-register every IPC channel, which throws.
@@ -549,6 +548,12 @@ function wireDashboardWindow(): void {
     pushSessionState();
     push(dashboardWindow?.webContents, 'model:download', rag.getModelState());
     push(dashboardWindow?.webContents, 'state:providers', health.snapshot());
+    // Both notices describe the machine rather than a moment, so a Dashboard
+    // that was closed and reopened needs them again: `FR-089`'s acrylic gate
+    // reads `CH-216`, and `NFR-012`'s warning was pushed once at bootstrap and
+    // was therefore missing from every reopened window.
+    reportPlatform();
+    reportCaptureFidelity();
   });
   dashboardWindow.on('closed', () => {
     dashboardWindow = null;
@@ -575,6 +580,12 @@ function wireOverlayWindow(): void {
     // channel to ask, so it would render the session as inactive until the next
     // transition. Reachable whenever the overlay is rebuilt (ADR-015).
     pushSessionState();
+    // What the machine can do, and the capture warning `NFR-012` puts beside
+    // the consent reminder. Both are sent before the renderer reports ready,
+    // for the same reason the consent text is: the card the warning belongs to
+    // has to be able to exist by the time readiness is claimed (ADR-016).
+    reportPlatform();
+    reportCaptureFidelity();
   });
 
   overlayWindow.on('moved', () => {
@@ -681,6 +692,19 @@ function pushOverlayMode(): void {
  * Warn about degraded capture exclusion once per session, not once per install
  * (NFR-012). A user who dismissed this months ago must not be surprised by a
  * black rectangle in a screen share today.
+ *
+ * It goes to **both** windows (`CH-215`, TASK-043). `NFR-012` says the warning
+ * belongs "alongside the consent reminder", which is the overlay, and the IPC
+ * table said `overlay` from the day the channel was written down; the code
+ * pushed it to the Dashboard only and the overlay preload did not allow it, so
+ * the one window the sentence is about could never show it. The Dashboard keeps
+ * it because `FR-089` reads the build number there and because the overlay card
+ * is dismissible, so the Dashboard is where it can still be read afterwards.
+ *
+ * Called on every renderer load rather than once at bootstrap, because either
+ * window can be rebuilt: the overlay on a translucency change (ADR-015), the
+ * Dashboard by being closed and reopened. A one-shot push at bootstrap left a
+ * rebuilt window with no warning at all.
  */
 function reportCaptureFidelity(): void {
   const build = windowsBuildNumber();
@@ -693,6 +717,33 @@ function reportCaptureFidelity(): void {
 
   getLogger().warn('capture exclusion degraded', { build });
   push(dashboardWindow?.webContents, 'notice:captureFidelity', { windowsBuild: build, message });
+  push(overlayWindow?.webContents, 'notice:captureFidelity', { windowsBuild: build, message });
+}
+
+/**
+ * Tell both renderers what this machine can do (`CH-216`, FR-089, ADR-038).
+ *
+ * `FR-089` requires the Dashboard to disable the acrylic option on Windows 10
+ * with an explanatory note, and until this channel existed no push carried a
+ * build number there unless capture fidelity was **also** degraded. A Windows
+ * 10 machine on build 19045 has exact capture exclusion and no acrylic, so it
+ * received nothing and the option stayed enabled over a mode the window cannot
+ * render.
+ *
+ * The overlay receives it too, for a different reason: `overlayWindowOptions`
+ * silently builds a transparent window when acrylic is asked for on a build
+ * that cannot render it, so the stored translucency and the window that exists
+ * can disagree. The renderer resolves the effective mode from this, and its
+ * contrast depends on which one it really is (FR-093).
+ *
+ * Off Windows the build number is 0 and acrylic is unsupported, which is the
+ * truth for the development container and keeps every gate falling closed.
+ */
+function reportPlatform(): void {
+  const build = windowsBuildNumber();
+  const payload = { windowsBuild: build, acrylicSupported: supportsAcrylic(build) };
+  push(dashboardWindow?.webContents, 'notice:platform', payload);
+  push(overlayWindow?.webContents, 'notice:platform', payload);
 }
 
 /**
@@ -914,6 +965,38 @@ function registerIpcHandlers(): void {
 
   router.handle('overlay:savePosition', ({ x, y, displayId }) => {
     config.set({ overlayWindow: { x, y, displayId } });
+    return { ok: true as const };
+  });
+
+  /**
+   * The in-overlay text size control (`CH-126`, FR-093).
+   *
+   * The range is enforced by the channel's schema, so an out-of-range value is
+   * refused by the router and never reaches here (CMP-10). The write goes
+   * through `config.set` like every other setting, so it persists, and the
+   * theme is pushed straight back: the overlay renders the stored value rather
+   * than its own optimistic one, which is what makes the Dashboard control and
+   * this one the same setting rather than two.
+   */
+  router.handle('overlay:setFontSize', ({ px }) => {
+    const after = config.set({ theme: { ...config.get().theme, overlayFontSizePx: px } });
+    push(overlayWindow?.webContents, 'overlay:theme', after.theme);
+    return { ok: true as const };
+  });
+
+  /**
+   * The consent reminder was dismissed (`CH-120`, FR-006).
+   *
+   * Dismissal is renderer state: the card disappears whether or not this call
+   * succeeds, because `FR-006` is about the reminder being dismissible, not
+   * about the main process knowing. What the main process does with it is
+   * record it, so a transcript reader can tell a session where the reminder was
+   * acknowledged from one where it sat on screen untouched. Milestone 0 left
+   * this channel allowlisted with no handler, so every dismissal answered with
+   * an `IpcError` the overlay had to ignore.
+   */
+  router.handle('consent:dismiss', () => {
+    getLogger().info('consent reminder dismissed');
     return { ok: true as const };
   });
 

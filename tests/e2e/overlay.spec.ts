@@ -1,0 +1,543 @@
+import { expect, test, type ElectronApplication, type Page } from '@playwright/test';
+import { launchApp, overlayPage, pushToDashboard, pushToOverlay } from './launch.js';
+import { SETTINGS_LIMITS } from '../../src/shared/defaults.js';
+import { FONT_STEP_PX } from '../../src/renderer/overlay/components/FontSizeControl.js';
+
+/**
+ * TASK-043 Overlay UI: TC-006, TC-110, TC-111, TC-112, TC-113, TC-115, TC-116,
+ * TC-117, TC-138, and `FR-089`'s Dashboard half of TC-142.
+ *
+ * Skipped off Windows, like the rest of the Electron suite. These drive the
+ * real overlay window, the real preload bridge and the real main-process
+ * handlers, and the coverage policy makes E2E the only verification
+ * `src/renderer/**` gets (ADR-004).
+ *
+ * The pure halves are asserted in the unit suite, where they can be driven
+ * exhaustively rather than sampled: `tests/unit/overlay-cards.test.ts` for the
+ * stack rules and `tests/unit/overlay-theme.test.ts` for `TC-114`'s contrast
+ * over every theme and opacity combination.
+ */
+test.skip(process.platform !== 'win32', 'Electron E2E runs on the Windows target only');
+
+let app: ElectronApplication;
+let dashboard: Page;
+let overlay: Page;
+let userDataDir: string;
+
+test.beforeEach(async () => {
+  ({ app, dashboard, userDataDir } = await launchApp());
+  overlay = await overlayPage(app);
+});
+
+test.afterEach(async () => {
+  await app.close();
+});
+
+/** One generation, as the three channels really deliver it. */
+async function generate(id: string, question: string, lines: string[]): Promise<void> {
+  await pushToOverlay(app, 'suggestion:begin', {
+    generationId: `gen-${id}`,
+    cardId: `card-${id}`,
+    question,
+  });
+  for (const [index, line] of lines.entries()) {
+    await pushToOverlay(app, 'suggestion:line', {
+      generationId: `gen-${id}`,
+      cardId: `card-${id}`,
+      line,
+      index,
+    });
+  }
+  await pushToOverlay(app, 'suggestion:end', { generationId: `gen-${id}`, status: 'complete' });
+}
+
+/** `CH-201`, which is how the renderer learns a session started or stopped. */
+async function setSession(active: boolean, paused = false): Promise<void> {
+  await pushToOverlay(app, 'state:session', {
+    active,
+    sessionId: active ? 'session-e2e' : null,
+    profileName: active ? 'Acme' : null,
+    startedAt: active ? new Date().toISOString() : null,
+    paused,
+  });
+}
+
+/* ------------------------------------------------------------------ *
+ * TC-006  the consent reminder precedes the first suggestion
+ * ------------------------------------------------------------------ */
+
+/**
+ * FR-006, FR-007, NFR-012. The reminder is on screen before any suggestion
+ * renders, in **every** session, and it is dismissible without blocking
+ * anything else.
+ */
+test('TC-006 the consent reminder renders before the first suggestion, every session', async () => {
+  const reminder = overlay.locator('[data-testid="consent-reminder"]');
+  await expect(reminder).toBeVisible();
+  // FR-007: the default text says plainly that a local text transcript is kept.
+  await expect(reminder).toContainText('transcript');
+  // No suggestion has arrived, so nothing can have preceded it.
+  await expect(overlay.locator('[data-testid="suggestion-card"]')).toHaveCount(0);
+
+  await setSession(true);
+  await generate('1', 'Tell me about a hard bug', ['Name the system', 'Name the fix']);
+  await expect(overlay.locator('[data-testid="suggestion-card"]')).toHaveCount(1);
+  // Still there: the reminder is not dismissed by a suggestion arriving.
+  await expect(reminder).toBeVisible();
+
+  // The reminder is *displayed*, not merely present. `OVERLAY_SIZE` is 420 by
+  // 260 and cannot be resized, and scaling this card with the suggestion text
+  // size once pushed it 2386 px above the viewport: a reminder nobody can read
+  // does not satisfy `FR-006`. The shell keeps it out of the region that clips.
+  const shown = async (selector: string): Promise<boolean> =>
+    overlay.locator(selector).evaluate((el) => {
+      const box = el.getBoundingClientRect();
+      return box.top >= 0 && box.bottom <= window.innerHeight && box.height > 0;
+    });
+  expect(await shown('[data-testid="consent-reminder"]')).toBe(true);
+
+  // And the newest cue is against the bottom of the window, whatever is above
+  // it. The stack clips from the top, so the oldest card is what goes.
+  const newestBottom = await overlay
+    .locator('[data-testid="suggestion-card"][data-depth="0"]')
+    .evaluate((el) => ({
+      bottom: el.getBoundingClientRect().bottom,
+      viewport: window.innerHeight,
+    }));
+  expect(newestBottom.bottom).toBeLessThanOrEqual(newestBottom.viewport);
+
+  // FR-006: dismissible.
+  await overlay.click('[data-testid="consent-dismiss"]');
+  await expect(reminder).toHaveCount(0);
+
+  // And back for the next session, because FR-006 says every session. A user
+  // who dismissed it last interview has not consented to this one.
+  await setSession(false);
+  await setSession(true);
+  await expect(reminder).toBeVisible();
+  // The previous interview's cue does not survive the boundary either (ADR-036).
+  await expect(overlay.locator('[data-testid="suggestion-card"]')).toHaveCount(0);
+});
+
+/**
+ * FR-076: there is no error state in the overlay's component tree, so no push
+ * it can receive produces one. Driven rather than read off the source, because
+ * the claim is about what the window does with the messages it really gets.
+ */
+test('FR-076 no ending renders as an error', async () => {
+  await setSession(true);
+  for (const status of ['cancelled', 'nonconforming'] as const) {
+    await pushToOverlay(app, 'suggestion:begin', {
+      generationId: `gen-${status}`,
+      cardId: `card-${status}`,
+      question: 'A question',
+    });
+    await pushToOverlay(app, 'suggestion:line', {
+      generationId: `gen-${status}`,
+      cardId: `card-${status}`,
+      line: 'What was salvaged',
+      index: 0,
+    });
+    await pushToOverlay(app, 'suggestion:end', { generationId: `gen-${status}`, status });
+  }
+
+  // FR-004: what was salvaged is still shown, whatever the ending.
+  await expect(overlay.locator('[data-testid="bullet"]').first()).toContainText('salvaged');
+  await expect(overlay.locator('[role="alert"]')).toHaveCount(0);
+  const body = (await overlay.locator('[data-testid="overlay"]').innerText()).toLowerCase();
+  for (const word of ['error', 'failed', 'failure', 'retry', 'unavailable']) {
+    expect(body, `the overlay said "${word}"`).not.toContain(word);
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * TC-110  the idle card
+ * ------------------------------------------------------------------ */
+
+test('TC-110 the idle card shows before the first suggestion and whenever paused', async () => {
+  // FR-090: before the first suggestion.
+  await expect(overlay.locator('[data-testid="idle-card"]')).toBeVisible();
+  await expect(overlay.locator('[data-testid="overlay"]')).toHaveAttribute(
+    'data-overlay-state',
+    'idle',
+  );
+
+  await setSession(true);
+  await generate('1', 'A question', ['A cue']);
+  await expect(overlay.locator('[data-testid="idle-card"]')).toHaveCount(0);
+
+  // FR-053, FR-090: and whenever the trigger is paused, over a card that exists.
+  await pushToOverlay(app, 'overlay:mode', { interactive: false, paused: true });
+  await expect(overlay.locator('[data-testid="idle-card"]')).toBeVisible();
+  await expect(overlay.locator('[data-testid="idle-card"]')).toHaveAttribute('data-paused', 'true');
+  await expect(overlay.locator('[data-testid="suggestion-card"]')).toHaveCount(0);
+
+  // FR-102: an extended silence is this card, not an error and not a warning.
+  await expect(overlay.locator('[role="alert"]')).toHaveCount(0);
+
+  // Unpausing brings the cue back rather than leaving the user with nothing.
+  await pushToOverlay(app, 'overlay:mode', { interactive: false, paused: false });
+  await expect(overlay.locator('[data-testid="suggestion-card"]')).toHaveCount(1);
+});
+
+/* ------------------------------------------------------------------ *
+ * TC-111  the three-card cap
+ * ------------------------------------------------------------------ */
+
+test('TC-111 a fourth suggestion leaves exactly three cards, the oldest gone', async () => {
+  await setSession(true);
+  for (const id of ['1', '2', '3']) await generate(id, `Question ${id}`, [`Cue ${id}`]);
+  await expect(overlay.locator('[data-testid="suggestion-card"]')).toHaveCount(3);
+
+  await generate('4', 'Question 4', ['Cue 4']);
+  // FR-091, ASM-010. AnimatePresence keeps the leaving card mounted while it
+  // fades, so the count is polled rather than read once: asserting immediately
+  // would be asserting on the exit animation rather than on the cap.
+  await expect(overlay.locator('[data-testid="suggestion-card"]')).toHaveCount(3);
+  await expect(overlay.locator('[data-card-id="card-1"]')).toHaveCount(0);
+  for (const id of ['2', '3', '4']) {
+    await expect(overlay.locator(`[data-card-id="card-${id}"]`)).toHaveCount(1);
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * TC-112  reveal granularity
+ * ------------------------------------------------------------------ */
+
+/**
+ * FR-092, NFR-007: one element per completed bullet, and no per-word reveal
+ * anywhere. Counted against a line whose word count is far from its bullet
+ * count, so a per-word implementation cannot coincide with the right answer.
+ */
+test('TC-112 a reveal is one element per bullet, never per word or per character', async () => {
+  await setSession(true);
+  const lines = [
+    'Name the system and the symptom in one breath',
+    'Say what you measured before you changed anything',
+    'Close on the outcome, with a number if you have one',
+  ];
+  await generate('1', 'Tell me about a hard bug', lines);
+
+  const bullets = overlay.locator('[data-testid="suggestion-card"] [data-testid="bullet"]');
+  await expect(bullets).toHaveCount(lines.length);
+  for (const [index, text] of lines.entries()) {
+    await expect(bullets.nth(index)).toHaveText(text);
+  }
+
+  // Each bullet is one text node. A per-word reveal would have split it into an
+  // element per word, which is what FR-092 forbids and what this counts.
+  const elementsInside = await bullets.first().evaluate((el) => el.querySelectorAll('*').length);
+  expect(elementsInside, 'a bullet contains child elements, which a word split would produce').toBe(
+    0,
+  );
+
+  // NFR-007: nothing animates while idle. With no card on screen there is no
+  // animating element for the compositor to be running at all.
+  await pushToOverlay(app, 'overlay:mode', { interactive: false, paused: true });
+  await expect(overlay.locator('[data-testid="overlay"]')).toHaveAttribute(
+    'data-overlay-state',
+    'idle',
+  );
+  const animations = await overlay.evaluate(
+    () => document.getAnimations().filter((a) => a.playState === 'running').length,
+  );
+  expect(animations, 'an animation was running on an idle overlay').toBe(0);
+});
+
+/* ------------------------------------------------------------------ *
+ * TC-113  the font size
+ * ------------------------------------------------------------------ */
+
+/**
+ * FR-093: 22 px by default, movable between 16 and 32 from the in-overlay
+ * control **and** from the Dashboard, and persistent across a relaunch.
+ *
+ * The relaunch half reuses the first run's user data directory, because a page
+ * reload would only prove the renderer re-read its own state.
+ */
+test('TC-113 the text size defaults to 22 px, moves from both controls and persists', async () => {
+  const { min, max } = SETTINGS_LIMITS.overlayFontSizePx;
+
+  const renderedSize = async (): Promise<number> =>
+    overlay
+      .locator('[data-testid="overlay"]')
+      .evaluate((el) => Number.parseFloat(getComputedStyle(el).fontSize));
+
+  expect(await renderedSize()).toBe(22);
+
+  // The in-overlay control is offered in interactive mode only, which is where
+  // a click can reach it (FR-084).
+  await pushToOverlay(app, 'overlay:mode', { interactive: true, paused: false });
+  await overlay.click('[data-testid="font-larger"]');
+  await expect(overlay.locator('[data-testid="font-size-value"]')).toHaveText('24px');
+  await expect.poll(renderedSize).toBe(24);
+
+  // It cannot leave the supported range, whichever end it is driven to. The
+  // clicks stop exactly at the limit: the button disables itself there, and
+  // Playwright waits for an element to be enabled before clicking, so one
+  // press too many would hang the test rather than prove the clamp.
+  const presses = (from: number, to: number): number => Math.abs(to - from) / FONT_STEP_PX;
+  for (let i = 0; i < presses(24, max); i += 1) await overlay.click('[data-testid="font-larger"]');
+  await expect(overlay.locator('[data-testid="font-size-value"]')).toHaveText(`${max}px`);
+  await expect(overlay.locator('[data-testid="font-larger"]')).toBeDisabled();
+  for (let i = 0; i < presses(max, min); i += 1)
+    await overlay.click('[data-testid="font-smaller"]');
+  await expect(overlay.locator('[data-testid="font-size-value"]')).toHaveText(`${min}px`);
+  await expect(overlay.locator('[data-testid="font-smaller"]')).toBeDisabled();
+
+  // And from the Dashboard, which writes the same setting through config:set.
+  await dashboard.locator('[data-testid="overlay-font-size"]').focus();
+  for (let i = 0; i < 4; i += 1) await dashboard.keyboard.press('ArrowRight');
+  await expect.poll(renderedSize).toBe(min + 4);
+  await expect(overlay.locator('[data-testid="font-size-value"]')).toHaveText(`${min + 4}px`);
+
+  // Persisted. The commit resolves asynchronously, so the stored value is
+  // polled rather than assumed before the app is closed under it.
+  await expect
+    .poll(async () =>
+      dashboard.evaluate(async () => {
+        const settings = await window.copilot.invoke('config:get');
+        return 'theme' in settings ? settings.theme.overlayFontSizePx : null;
+      }),
+    )
+    .toBe(min + 4);
+
+  await app.close();
+  ({ app, dashboard } = await launchApp(userDataDir));
+  overlay = await overlayPage(app);
+  await expect.poll(renderedSize).toBe(min + 4);
+});
+
+/* ------------------------------------------------------------------ *
+ * TC-115  reduced motion
+ * ------------------------------------------------------------------ */
+
+/**
+ * NFR-010, FR-092: `prefers-reduced-motion: reduce` disables the slide and
+ * keeps the fade.
+ *
+ * The preference is read at mount, so the page is reloaded after it is
+ * emulated. The main process re-pushes the theme, the consent text and the mode
+ * on `did-finish-load`, so the reloaded renderer is in the same state as a
+ * fresh one.
+ */
+test('TC-115 reduced motion drops the slide and keeps the fade', async () => {
+  await overlay.emulateMedia({ reducedMotion: 'reduce' });
+  await overlay.reload();
+  await overlay.waitForSelector('[data-testid="overlay"]');
+  await expect(overlay.locator('[data-testid="overlay"]')).toHaveAttribute(
+    'data-reduced-motion',
+    'true',
+  );
+
+  await setSession(true);
+  await generate('1', 'A question', ['A cue']);
+  const bullet = overlay.locator('[data-testid="bullet"]').first();
+  await expect(bullet).toHaveAttribute('data-slide', 'off');
+
+  // The slide is a transform, so its absence is the absence of one. `none` and
+  // an identity matrix both count: neither moves the text.
+  const transform = await bullet.evaluate((el) => getComputedStyle(el).transform);
+  expect(['none', 'matrix(1, 0, 0, 1, 0, 0)']).toContain(transform);
+
+  // The fade remains: the bullet is fully opaque once it has revealed, having
+  // started from zero.
+  await expect.poll(async () => bullet.evaluate((el) => getComputedStyle(el).opacity)).toBe('1');
+});
+
+/* ------------------------------------------------------------------ *
+ * TC-116  live theme apply
+ * ------------------------------------------------------------------ */
+
+/**
+ * FR-085, FR-029: theme mode, translucency mode and opacity all reach the
+ * overlay with no **app** restart.
+ *
+ * Mode and opacity apply in place. Translucency cannot: acrylic and
+ * transparency are mutually exclusive window constructions, so `ADR-015`
+ * destroys the overlay and builds a new one. That the rebuilt window comes back
+ * in the new mode is this case's; that it keeps its position, its monitor, its
+ * click-through state and its card stack is `TC-142`'s.
+ */
+test('TC-116 theme mode, opacity and translucency apply with no app restart', async () => {
+  await dashboard.selectOption('[data-testid="theme-mode"]', 'dark');
+  await expect(overlay.locator('[data-testid="overlay"]')).toHaveAttribute('data-theme', 'dark');
+
+  await dashboard.selectOption('[data-testid="theme-mode"]', 'light');
+  await expect(overlay.locator('[data-testid="overlay"]')).toHaveAttribute('data-theme', 'light');
+
+  const surfaceAlpha = async (): Promise<number> =>
+    overlay
+      .locator('[data-testid="overlay"]')
+      .evaluate((el) =>
+        Number.parseFloat(getComputedStyle(el).getPropertyValue('--overlay-chrome-alpha')),
+      );
+
+  const before = await surfaceAlpha();
+  await dashboard.locator('[data-testid="overlay-opacity"]').focus();
+  for (let i = 0; i < 3; i += 1) await dashboard.keyboard.press('ArrowLeft');
+  await expect.poll(surfaceAlpha).toBeLessThan(before);
+
+  // FR-094: the cards are Tailwind-built, so the stylesheet is a real asset
+  // rather than styles assembled in the renderer, which the CSP would block.
+  const stylesheets = await overlay.evaluate(
+    () => document.querySelectorAll('link[rel="stylesheet"]').length,
+  );
+  expect(stylesheets).toBeGreaterThan(0);
+
+  // And the translucency mode, which rebuilds the window rather than applying
+  // in place. The page object is re-acquired because the old one belongs to a
+  // window that no longer exists.
+  await expect(overlay.locator('[data-testid="overlay"]')).toHaveAttribute(
+    'data-translucency',
+    'opacity',
+  );
+  await dashboard.selectOption('[data-testid="overlay-translucency"]', 'acrylic');
+  overlay = await overlayPage(app);
+  // The runner is Windows 11, so `CH-216` reports acrylic as supported and the
+  // effective mode is the requested one. On a build that cannot render it the
+  // renderer would resolve back to `opacity`, which is the point of sending
+  // `acrylicSupported` at all (ADR-038).
+  await expect(overlay.locator('[data-testid="overlay"]')).toHaveAttribute(
+    'data-translucency',
+    'acrylic',
+  );
+  // The app was never restarted: the same Electron process served both windows.
+  expect(app.windows().length).toBeGreaterThan(0);
+});
+
+/* ------------------------------------------------------------------ *
+ * TC-117  the mode affordance
+ * ------------------------------------------------------------------ */
+
+test('TC-117 click-through and interactive render a visibly different state', async () => {
+  const shell = overlay.locator('[data-testid="overlay"]');
+
+  await pushToOverlay(app, 'overlay:mode', { interactive: false, paused: false });
+  await expect(shell).toHaveAttribute('data-interactive', 'false');
+  // FR-083: no drag region while the window forwards mouse events, or it would
+  // swallow clicks meant for the application behind it.
+  await expect(shell).not.toHaveAttribute('data-drag-region', 'true');
+  await expect(overlay.locator('[data-testid="font-size-control"]')).toHaveCount(0);
+  const clickThroughBorder = await overlay
+    .locator('[data-testid="idle-card"]')
+    .evaluate((el) => getComputedStyle(el).borderColor);
+
+  await pushToOverlay(app, 'overlay:mode', { interactive: true, paused: false });
+  await expect(shell).toHaveAttribute('data-interactive', 'true');
+  await expect(shell).toHaveAttribute('data-drag-region', 'true');
+  await expect(overlay.locator('[data-testid="font-size-control"]')).toBeVisible();
+
+  // The difference is visible, not only structural (FR-084).
+  const interactiveBorder = await overlay
+    .locator('[data-testid="idle-card"]')
+    .evaluate((el) => getComputedStyle(el).borderColor);
+  expect(interactiveBorder, 'the two modes look the same').not.toBe(clickThroughBorder);
+});
+
+/* ------------------------------------------------------------------ *
+ * TC-138  the readiness gate, renderer half
+ * ------------------------------------------------------------------ */
+
+/**
+ * FR-008, ADR-016.
+ *
+ * The buffering itself, including "a second generation while buffered discards
+ * the first" and the full replay to a rebuilt renderer, is driven directly
+ * against `OverlayGate` in `tests/unit/overlay-surface.test.ts`, where every
+ * ordering can be built. It cannot be driven from here: nothing a test can
+ * reach feeds the gate except a live session, which needs provider credentials
+ * this suite has no way to supply, and delaying the overlay's renderer start
+ * would need a switch the app does not have.
+ *
+ * What this case asserts is the half that needs a window: the reminder is
+ * rendered before any suggestion reaches the screen, a whole generation
+ * replayed to a renderer that never saw it live is reconstructed into a card,
+ * and a second generation replaces the first rather than interleaving with it.
+ */
+test('TC-138 a replayed generation renders in full, after the reminder', async () => {
+  // Readiness is reported only once the reminder has painted (ADR-016), so the
+  // reminder existing before any card is the renderer's half of the gate.
+  await expect(overlay.locator('[data-testid="consent-reminder"]')).toBeVisible();
+  await expect(overlay.locator('[data-testid="suggestion-card"]')).toHaveCount(0);
+
+  await setSession(true);
+
+  // The whole of a generation, in the order the gate replays it.
+  await generate('1', 'First question', ['First cue', 'Second cue']);
+  await expect(overlay.locator('[data-card-id="card-1"] [data-testid="bullet"]')).toHaveCount(2);
+
+  // A second generation is its own card. FR-054's rule is that the first is
+  // discarded upstream; what the renderer must never do is put the second
+  // generation's lines onto the first generation's card.
+  await generate('2', 'Second question', ['Third cue']);
+  await expect(overlay.locator('[data-card-id="card-1"] [data-testid="bullet"]')).toHaveCount(2);
+  await expect(overlay.locator('[data-card-id="card-2"] [data-testid="bullet"]')).toHaveCount(1);
+  await expect(overlay.locator('[data-card-id="card-2"] [data-testid="bullet"]')).toHaveText(
+    'Third cue',
+  );
+
+  // A line whose begin never arrived is dropped, not rendered on the card that
+  // happens to be on screen.
+  await pushToOverlay(app, 'suggestion:line', {
+    generationId: 'gen-9',
+    cardId: 'card-9',
+    line: 'orphan',
+    index: 0,
+  });
+  await expect(overlay.locator('[data-testid="overlay"]')).not.toContainText('orphan');
+});
+
+/* ------------------------------------------------------------------ *
+ * TC-142  FR-089's Dashboard half
+ * ------------------------------------------------------------------ */
+
+/**
+ * FR-089: "on Windows 10 the acrylic option must be disabled in the Dashboard
+ * with an explanatory note".
+ *
+ * The build is simulated by pushing `CH-216`, which is how the Dashboard learns
+ * it on a real machine: the runner is Windows 11, so the only alternative would
+ * be asserting the enabled branch and calling `FR-089` covered. The window
+ * lifecycle half of `TC-142` stays with `TASK-005`.
+ */
+test('TC-142 the acrylic option is disabled on a Windows 10 build, with the reason', async () => {
+  const acrylic = dashboard.locator('[data-testid="overlay-translucency"] option[value="acrylic"]');
+  const note = dashboard.locator('[data-testid="translucency-note"]');
+
+  await pushToDashboard(app, 'notice:platform', { windowsBuild: 19045, acrylicSupported: false });
+  await expect(acrylic).toBeDisabled();
+  await expect(note).toContainText('Windows 11');
+  await expect(note).toContainText('19045');
+
+  await pushToDashboard(app, 'notice:platform', { windowsBuild: 26100, acrylicSupported: true });
+  await expect(acrylic).toBeEnabled();
+  await expect(note).not.toContainText('unavailable on this machine');
+});
+
+/* ------------------------------------------------------------------ *
+ * NFR-012  the capture warning, beside the consent reminder
+ * ------------------------------------------------------------------ */
+
+/**
+ * `NFR-012` puts the pre-19041 warning "alongside the consent reminder", which
+ * is the overlay. `CH-215` was documented as targeting the overlay, pushed to
+ * the Dashboard and missing from the overlay preload's allowlist, so all three
+ * disagreed and the window the sentence is about could never show it
+ * (TASK-032 follow-up, closed by TASK-043).
+ */
+test('NFR-012 the capture warning reaches the overlay, beside the reminder', async () => {
+  const message = 'This version of Windows cannot hide the overlay from screen capture.';
+  await pushToOverlay(app, 'notice:captureFidelity', { windowsBuild: 18363, message });
+
+  const notice = overlay.locator(
+    '[data-testid="consent-reminder"] [data-testid="capture-fidelity-notice"]',
+  );
+  await expect(notice).toBeVisible();
+  await expect(notice).toContainText('screen capture');
+
+  // The Dashboard keeps it too: FR-089 reads the build number there, and the
+  // overlay card is dismissible, so the Dashboard is where it can still be read.
+  await pushToDashboard(app, 'notice:captureFidelity', { windowsBuild: 18363, message });
+  await expect(dashboard.locator('[data-testid="capture-fidelity-notice"]')).toBeVisible();
+});

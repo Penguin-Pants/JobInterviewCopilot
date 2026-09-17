@@ -987,8 +987,8 @@ vague intention:
 | Drive the trigger from the live STT sessions, answer `onFire` with `RagEngine.query` plus `runGeneration`, and push `CH-207`/`CH-208`/`CH-209` through the overlay gate | `session:start` does not exist. `TurnFired` and `runGeneration` are the contract it will call | TASK-044 |
 | ~~Report a cancelled generation's token usage~~ **Answered in TASK-041.** The meter records what the provider reported and invents nothing, so a generation cancelled before any usage frame accounts zero (ADR-033) | An adapter that is aborted returns without yielding its terminal usage record, so a cancelled generation currently accounts zero tokens although the provider streamed some. The Cost Meter is where that decision belongs | TASK-041 |
 | `triggerConfigFrom` reads `supportsEndpointing` off the STT **primary**, even when health has failed over to the backup | The two models can disagree about native endpointing. Harmless today because nothing fails over yet: the trigger is never fed. The rebind belongs with the session that owns the failover boundary | TASK-044 |
-| Prove the overlay renders the idle card while paused, and that a suggestion buffered before `overlay:ready` reaches it | There is no overlay UI to assert against. `TC-087`'s integration half proves the main-process side; the renderer half needs `Overlay.tsx` | TASK-043 |
-| `CH-215 notice:captureFidelity` is documented as targeting the overlay, is pushed to the Dashboard, and is not in the overlay preload's allowlist | A Milestone 0 inconsistency, found by this milestone's `TC-096` test while enumerating the overlay surface. Not this milestone's to change: `NFR-012` decides which window should show it | TASK-043 |
+| ~~Prove the overlay renders the idle card while paused, and that a suggestion buffered before `overlay:ready` reaches it~~ **Closed in TASK-043.** `TC-110` asserts the idle card while paused; `TC-138` asserts the renderer half of the gate. The buffering itself stays where it can be driven exhaustively, against `OverlayGate` directly | There is no overlay UI to assert against. `TC-087`'s integration half proves the main-process side; the renderer half needs `Overlay.tsx` | TASK-043 |
+| ~~`CH-215 notice:captureFidelity` is documented as targeting the overlay, is pushed to the Dashboard, and is not in the overlay preload's allowlist~~ **Closed in TASK-043.** `NFR-012` says "alongside the consent reminder", so it goes to the overlay; the Dashboard keeps it because `FR-089` reads its build number there. Target is now `both` in the table, the code and the preload (ADR-038) | A Milestone 0 inconsistency, found by this milestone's `TC-096` test while enumerating the overlay surface. Not this milestone's to change: `NFR-012` decides which window should show it | TASK-043 |
 | A retrieved chunk's text is interpolated into the user message unescaped | The notes are the user's own documents, so this is not an injection path from a third party. A document containing a line like `CANDIDATE NOTES:` would still confuse the section structure | TASK-050 |
 
 ### TASK-030 Trigger state machine — COMPLETE
@@ -1055,9 +1055,14 @@ vague intention:
 
 ## Milestone 4 — Sessions, cost, UI
 
-**Status: IN PROGRESS.** `TASK-040`, `TASK-041`, `TASK-044` and `TASK-042` are
-complete. `TASK-044` is the live loop, split out of `TASK-042` by `ADR-034`.
-`TASK-043`, the Overlay UI, is the only task of this milestone not started.
+**Status: COMPLETE.** `TASK-040`, `TASK-041`, `TASK-044`, `TASK-042` and
+`TASK-043` are all complete. `TASK-044` is the live loop, split out of
+`TASK-042` by `ADR-034`.
+
+`TASK-043` closed the two follow-ups Milestone 3 carried to it, and `FR-089`'s
+Dashboard half, which `TASK-042` carried. One requirement is **partially met**
+and is carried forward rather than claimed: `FR-094`'s Magic UI half, because
+Magic UI's source is unreachable from the build environment (ADR-040).
 
 ### TASK-040 Session manager and transcript — COMPLETE
 **Traces** FR-088, FR-101, FR-105, FR-106, FR-107, FR-108, ADR-003, ADR-013, ADR-018
@@ -1473,7 +1478,7 @@ contract change and are carried below with the reason.
 | Item | Why it is not done here | Owner |
 |---|---|---|
 | `FR-025` is enforced in the Dashboard only. `config:set` still accepts a backup from the primary's provider | `FR-025` says the Dashboard must prevent the selection, which it does, and `TC-121` proves it. A second check in `config:set` is defense in depth against a renderer that is already compromised, which is the resilience task's subject | TASK-050 |
-| `FR-089`'s "on Windows 10 the acrylic option must be disabled in the Dashboard with an explanatory note" | No channel carries the Windows build to the Dashboard except `CH-215`, which fires only when the capture-fidelity notice does. `FR-089` is traced by TASK-005 and TASK-043, not by this task, and the option carries the note today without being disabled | TASK-043 |
+| ~~`FR-089`'s "on Windows 10 the acrylic option must be disabled in the Dashboard with an explanatory note"~~ **Closed in TASK-043**, which added `CH-216 notice:platform` to carry `{ windowsBuild, acrylicSupported }` to both windows on every load (ADR-038). `FR-089` is now traced by TASK-043 as well, which is what the note below assumed | No channel carries the Windows build to the Dashboard except `CH-215`, which fires only when the capture-fidelity notice does. `FR-089` is traced by TASK-005 and TASK-043, not by this task, and the option carries the note today without being disabled | TASK-043 |
 | `doc:import` still takes renderer-supplied paths for drag and drop | Unavoidable: only the renderer knows what was dropped. `CH-125` removes the button path and `basename` keeps the target inside `kb/` (ADR-037) | TASK-050 |
 | A read-only way for a renderer to ask for the current session state | `earlyPushes.ts` closes the practical race without a contract change, and a `CH-1xx session:get` is a contract change with no acceptance criterion in this task. It is the right fix if a second renderer ever needs the state mid-session | TASK-050 |
 | Nothing aborts an in-flight key validation once its deadline has passed | `validateWithinDeadline` stops the **save**, which is what `FR-026` is about, but the request and its socket stay alive until they settle, and each retry adds another. Threading an `AbortSignal` through `validateCredential` and every adapter's `validateKey` is a change to four adapters with no acceptance criterion here | TASK-050 |
@@ -1487,8 +1492,8 @@ contract change and are carried below with the reason.
 
 **Verified by** TC-120, TC-121, TC-122, TC-123, TC-124, TC-125, TC-154, TC-158
 
-### TASK-043 Overlay UI
-**Traces** FR-006, FR-007, FR-008, FR-076, FR-085, FR-090, FR-091, FR-092, FR-093, FR-094, FR-102, NFR-007, NFR-010
+### TASK-043 Overlay UI — COMPLETE
+**Traces** FR-006, FR-007, FR-008, FR-076, FR-085, FR-089, FR-090, FR-091, FR-092, FR-093, FR-094, FR-102, NFR-007, NFR-010, NFR-012
 **Depends on** TASK-032, TASK-005
 **Acceptance criteria**
 - The renderer sends `overlay:ready` after mounting and rendering the consent
@@ -1512,7 +1517,72 @@ contract change and are carried below with the reason.
 - Extended silence keeps the idle card visible and is never rendered as an
   error or a warning (FR-102).
 - No error state exists in the overlay component tree.
-**Verified by** TC-006, TC-110, TC-111, TC-112, TC-113, TC-114, TC-115, TC-116, TC-117, TC-138
+
+**Status: COMPLETE.** `npm run typecheck`, `npm run lint`, `npm run
+format:check`, `npm run licenses`, `npm run build`, `npm run smoke:main` and
+`python3 scripts/traceability.py` all pass. The unit and integration suites are
+green. `FR-094` is **partially met**; see the carried item below.
+
+**Two requirements gained a trace here** because this task implements them, and
+neither was traced by it before: `FR-089`, whose Dashboard half `TASK-042`
+carried with this task named as its owner, and `NFR-012`, whose warning
+`NFR-012` puts in the overlay and which nothing had ever rendered there.
+
+**Three contract changes, each recorded in `02-architecture.md` section 4 and
+in the decision log in the same change (DoD 9).**
+
+| Change | Why the contract had to move |
+|---|---|
+| `CH-215 notice:captureFidelity` target becomes **both**, and it reaches the overlay | The table said `overlay`, the code pushed to the Dashboard, and the overlay preload refused it: three places disagreeing since Milestone 0. `NFR-012` decides it, and it says "alongside the consent reminder" (ADR-038) |
+| `CH-216 notice:platform`, `{ windowsBuild, acrylicSupported }`, to both windows on every load | `FR-089` needs the build in the Dashboard and no channel carried it unless capture fidelity was **also** degraded, so a Windows 10 machine on build 19045 got nothing. The overlay needs `acrylicSupported` for a different reason: `overlayWindowOptions` silently builds a transparent window when acrylic cannot be rendered, and the card has to be styled for the window that exists (ADR-038) |
+| `CH-126 overlay:setFontSize`, `{ px }`, overlay to main | `FR-093` requires the size adjustable from the overlay and persistent. `config:set` could not be the way: the overlay's invoke allowlist exists so a compromised overlay renderer cannot write settings, rebind hotkeys or replace credentials (`FR-086`). One channel that changes one number, range-checked by its own schema |
+
+**`CH-120 consent:dismiss` gained its handler.** Milestone 0 allowlisted it and
+deliberately left it unimplemented, so every dismissal answered with an
+`IpcError` the renderer had to ignore. Dismissal is renderer state either way;
+the handler is what lets a log say whether the reminder was acknowledged.
+
+**Where each acceptance criterion is proved**
+
+| Criterion | Proved by |
+|---|---|
+| Readiness after the reminder renders, nothing dropped | `TC-138` (renderer half), and `OverlayGate` driven directly in `tests/unit/overlay-surface.test.ts` |
+| Idle card before the first suggestion and whenever paused | `TC-110`, plus `shouldShowIdle` in `tests/unit/overlay-cards.test.ts` |
+| Reminder before the first suggestion of **every** session, dismissible | `TC-006` |
+| At most 3 cards, a 4th fades the oldest through `AnimatePresence` | `TC-111`, plus the cap in `tests/unit/overlay-cards.test.ts` |
+| Fade plus upward slide, 200 to 300 ms, no per-word reveal | `TC-112`; the duration is `REVEAL_DURATION_SECONDS = 0.25` |
+| 22 px default, 16 to 32 from both controls, persists | `TC-113`, which relaunches against the same user data directory |
+| 4.5 to 1 in both themes at every opacity | `TC-114`, over every theme and every slider step (ADR-039) |
+| `prefers-reduced-motion` drops the slide, keeps the fade | `TC-115` |
+| Theme, translucency and opacity apply live | `TC-116`; translucency is `TC-142`'s, because it recreates the window (ADR-015) |
+| Interactive versus click-through is visually distinguishable | `TC-117` |
+| Extended silence is the idle card, never an error | `TC-110`, and the `FR-076` case that drives every ending |
+| No error state in the component tree | `TC-096` on the surface, and the `FR-076` E2E case on the rendered window |
+
+**Bugs found while implementing, each pinned**
+
+| Defect | Consequence | Fix |
+|---|---|---|
+| **The overlay had the Dashboard's replay race, with a worse ending.** `wireOverlayWindow` replays the theme, the consent text, the mode, the session state and both notices on `did-finish-load`, and every one is one-shot. A module script is evaluated while the document is still loading, so `did-finish-load` can reach the main process before a React effect has subscribed | On the Dashboard a missed replay rendered a live session as inactive. Here a missed `overlay:consent` means the renderer never reports `overlay:ready`, so the gate never opens and **not one suggestion reaches the user for the whole session**, with no channel to ask again and nothing that would ever re-push it | `src/renderer/overlay/earlyPushes.ts`, the same shape as the Dashboard's: subscribed at module evaluation, and every piece of state seeded from what it caught, then re-seeded once the effect's own subscription exists |
+| **A card's depth dimming and its entrance animation were two writers of one property.** The card passed `style={{ opacity: depthOpacity }}` and `animate={{ opacity: 1 }}` | framer-motion writes the animated value to `element.style`, so the card settled at whichever wrote last. Measured on the built renderer: the second card rendered fully opaque and the third dimmed, which is neither of the two designs | The depth opacity **is** the animated target. Measured again after the fix: 1.00, 0.78, 0.56, and a card now recedes smoothly as it is pushed down rather than jumping a step |
+| **The Dashboard's theme draft could silently undo an overlay-side size change.** Nothing pushes settings to the Dashboard, and its focus handler re-read only the profile list | A size set from the overlay left the Dashboard's Overlay and appearance draft on the old value, and the next theme edit there wrote that whole stale draft back. `FR-093` asks for two controls on one setting, not one control overwriting the other | The settings are re-read on focus beside the profile list, which is already what "a change made outside this window" means there |
+| **`TC-113` would have hung on CI rather than failed.** It pressed the size buttons a fixed number of times past the limit | The button disables itself at the limit and Playwright waits for an element to be enabled before clicking, so the extra press would have waited out the test timeout and reported nothing about the clamp | The press count is computed from the limits and the step, and the disabled state is asserted separately |
+| **The consent reminder could be pushed 2386 px off the top of the window.** Its text was sized in `em`, so it scaled with `FR-093`'s 16 to 32 px control, and the shell let the whole column overflow | At 32 px the reminder alone was 297 px in a 260 px window, and `justify-end` pushed it and most of the newest card off the top. `FR-006` requires the reminder to be **displayed**, and one that is entirely above the viewport is not | The reminder and the size control are chrome, not suggestion text, so they are sized in pixels. Exactly one region is allowed to overflow, the card stack, and it clips from the top: the newest cue sits against the bottom of the window and the oldest card is what goes. Measured again after the fix, and asserted by `TC-006` |
+| **`FR-093`'s contrast could not hold at 0.3 opacity** under any reading that a test can check | A dark card at 0.3 over a white desktop composites to about 70 percent grey, where white text is roughly 2 to 1. The requirement would have been true in the test and false in the product | The card surface carries an alpha floor computed from the palette, and `TC-114` asserts both that the raw minimum would fail and that a step below the floor already fails, so the floor cannot be removed or padded without the suite noticing (ADR-039) |
+
+**Deferred, with an owner**
+
+| Item | Why it is not done here | Owner |
+|---|---|---|
+| `FR-094`'s Magic UI half. The cards are on Tailwind and on the `FR-029` tokens; they are not Magic UI components | Magic UI's source is unreachable from the build environment: `magicui.design`, `raw.githubusercontent.com`, `cdn.jsdelivr.net` and `unpkg.com` are refused by the egress proxy, and its two npm packages are registry clients carrying no component source. Writing a `VENDORED.md` provenance row for code that was not copied from there would be a false statement in the file `NFR-016` exists to make trustworthy (ADR-040) | TASK-051 |
+| The buffering half of `TC-138` is driven against `OverlayGate` rather than through a window | Nothing a test can reach feeds the gate except a live session, which needs provider credentials the E2E suite cannot supply, and delaying the overlay renderer's start would need a switch the app does not have. A read-only "what is buffered" channel would be a contract change with no acceptance criterion here | TASK-050 |
+| `overlay:setFontSize` pushes `CH-211` to the overlay but nothing pushes settings to the Dashboard | The focus re-read closes the practical window without a contract change, the same way `earlyPushes.ts` closed the Dashboard's session-state race. A `CH-2xx settings:changed` push is the right fix if a third writer of one setting ever appears | TASK-050 |
+| A rebuilt overlay is replayed the card it missed, but the **idle** and **paused** state it rebuilds into comes from `CH-212` and `CH-201`, which are pushed on load rather than reconciled | Harmless today: both are pushed on `did-finish-load` and seeded from `earlyPushes`, so the window is correct by its first paint. It is the same reconciliation gap `TASK-042` carried for the settings, and it belongs with that one | TASK-050 |
+| `tailwindcss` and `@tailwindcss/vite` are devDependencies, so their `lightningcss` (MPL-2.0) is outside the license gate's `--production` scope | That scope is the existing policy, not an exception made here: `vite`, `electron-builder` and `typescript` are already outside it, and nothing of Tailwind reaches the shipped bundle. Whether the gate should also cover build-time licenses is a policy question for the release task | TASK-051 |
+| Three cards of five bullets do not fit in the overlay window at any size the user can choose | `OVERLAY_SIZE` is 420 by 260 and `FR-081` makes the window non-resizable, while `FR-091` asks for three cards, `FR-004` allows five lines each and `FR-093` allows 32 px text. The arithmetic does not close: one card of five wrapping bullets is about 390 px at 22 px. The stack therefore clips from the top, which puts the newest cue and the consent reminder where they belong and drops the oldest card, and the realistic case (short cues, reminder dismissed) fits with room to spare. Closing it properly means either growing `OVERLAY_SIZE`, which is `TASK-005`'s constant and carries `MW-01` and `MW-07` visual checks, or accepting the clip in the requirement. Neither is this task's to decide alone | TASK-051 |
+| The overlay is operable from the keyboard when it has focus, but nothing gives it focus | `NFR-010` requires the **Dashboard** to be keyboard navigable, and `TC-124` proves that. A click-through, non-activating overlay that took focus would take it from the interview, which is the opposite of what the product is for. Naming it so a later accessibility pass does not read the silence as an oversight | TASK-050 |
+
+**Verified by** TC-006, TC-110, TC-111, TC-112, TC-113, TC-114, TC-115, TC-116, TC-117, TC-138, TC-142
 
 ---
 

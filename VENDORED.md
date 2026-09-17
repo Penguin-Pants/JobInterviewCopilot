@@ -27,4 +27,27 @@ about it.
 
 | File | Source | Version or commit | License |
 |---|---|---|---|
-| _(none yet)_ | Magic UI card components arrive in TASK-043 | | |
+| _(none)_ | | | |
+
+## Why Magic UI is not here
+
+`TASK-043` was expected to add the Magic UI card components to the table above.
+It did not, and the empty table is the accurate record rather than an oversight.
+
+Magic UI's source could not be obtained in the build environment:
+`magicui.design`, `raw.githubusercontent.com`, `cdn.jsdelivr.net` and
+`unpkg.com` are all refused by the network egress proxy, and the two Magic UI
+packages on npm (`@magicuidesign/cli`, `@magicuidesign/mcp`) are thin clients
+that fetch the component registry from `magicui.design` at run time and carry no
+component source of their own.
+
+A row here names a source URL, a version and a license for a file copied from
+that source. Writing one for code that was not copied from there would be a
+false statement in the one file `NFR-016` exists to make trustworthy, and
+`scripts/check-licenses.mjs` reads this file as its input rather than as
+documentation about itself. So the overlay's cards are first-party components
+under `src/renderer/overlay/components/`, built on Tailwind and styled from the
+`FR-029` theme tokens, which is the rest of what `FR-094` asks for.
+
+`FR-094` is therefore partially met. The remainder is carried to `TASK-051`
+with this reason. See ADR-040.

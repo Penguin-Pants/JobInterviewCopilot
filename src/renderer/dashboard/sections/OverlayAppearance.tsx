@@ -11,19 +11,35 @@ import { useEffect, useRef, useState, type JSX } from 'react';
 import { SETTINGS_LIMITS } from '../../../shared/defaults.js';
 import type { OverlayTranslucency, Settings, ThemeMode } from '../../../shared/types.js';
 import { call } from '../call.js';
+import type { PlatformState } from '../state.js';
 
 const THEME_MODES: ThemeMode[] = ['light', 'dark', 'system'];
 const TRANSLUCENCY: OverlayTranslucency[] = ['opacity', 'acrylic'];
 
+/**
+ * The Windows build acrylic needs (ADR-015, FR-089).
+ *
+ * Repeated here rather than imported: the authority is `MIN_BUILD_FOR_ACRYLIC`
+ * in `src/main/windows.ts`, which imports Electron and so cannot be reached
+ * from a renderer. Nothing branches on this number, `platform.acrylicSupported`
+ * does that, so the worst a drift could cause is a sentence naming the wrong
+ * build rather than a wrong control. Pinned by a guardrail so it cannot drift
+ * silently anyway.
+ */
+const MIN_BUILD_FOR_ACRYLIC = 22000;
+
 export interface OverlayAppearanceProps {
   settings: Settings;
   captureNotice: string | null;
+  /** What the host machine supports (`CH-216`). Gates acrylic (FR-089). */
+  platform: PlatformState;
   onSettingsChanged: () => Promise<void>;
 }
 
 export function OverlayAppearance({
   settings,
   captureNotice,
+  platform,
   onSettingsChanged,
 }: OverlayAppearanceProps): JSX.Element {
   const [theme, setTheme] = useState(settings.theme);
@@ -158,14 +174,27 @@ export function OverlayAppearance({
         onChange={(e) => writeTheme({ overlayTranslucency: e.target.value as OverlayTranslucency })}
       >
         {TRANSLUCENCY.map((mode) => (
-          <option key={mode} value={mode}>
+          <option
+            key={mode}
+            value={mode}
+            // FR-089: on Windows 10 the acrylic option is disabled, with the
+            // reason beside it. It was offered on every build until `CH-216`
+            // carried one here, and choosing it there left the settings saying
+            // acrylic over a window `overlayWindowOptions` had quietly built
+            // transparent instead.
+            disabled={mode === 'acrylic' && !platform.acrylicSupported}
+          >
             {mode}
+            {mode === 'acrylic' && !platform.acrylicSupported ? ' (needs Windows 11)' : ''}
           </option>
         ))}
       </select>
       <p data-testid="translucency-note">
-        Acrylic needs Windows 11. Changing this mode rebuilds the overlay window, keeping its
-        position, its monitor and its click-through state.
+        {platform.acrylicSupported
+          ? 'Changing this mode rebuilds the overlay window, keeping its position, its monitor and its click-through state.'
+          : `Acrylic needs Windows 11 (build ${MIN_BUILD_FOR_ACRYLIC} or later) and is unavailable on this machine${
+              platform.windowsBuild > 0 ? `, which reports build ${platform.windowsBuild}` : ''
+            }. Changing this mode rebuilds the overlay window, keeping its position, its monitor and its click-through state.`}
       </p>
 
       <label htmlFor="overlay-opacity">

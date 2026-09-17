@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { SETTINGS_LIMITS } from './defaults.js';
 
 /**
  * The IPC contract. Mirrors `docs/02-architecture.md` section 4.
@@ -179,7 +180,7 @@ const healthState = z.discriminatedUnion('kind', [
 ]);
 
 /* ------------------------------------------------------------------ *
- * CH-101 .. CH-120  renderer to main, request/response
+ * CH-101 .. CH-126  renderer to main, request/response
  * ------------------------------------------------------------------ */
 
 export const invokeChannels = {
@@ -381,10 +382,35 @@ export const invokeChannels = {
     payload: z.object({ profileId: z.string() }),
     response: z.array(documentRecord),
   },
+  /**
+   * The in-overlay text size control (FR-093, TASK-043, DoD 9).
+   *
+   * `FR-093` requires the size to be adjustable from the overlay as well as
+   * from the Dashboard, and to persist. The overlay cannot be handed
+   * `config:set` to do it: that channel writes the whole settings object, and
+   * the overlay preload is allowlisted precisely so a compromised overlay
+   * renderer cannot rebind hotkeys or replace credentials (FR-086). So the
+   * overlay gets one channel that can change one number.
+   *
+   * The range is the schema's, not the handler's, so a value outside
+   * `SETTINGS_LIMITS.overlayFontSizePx` is refused at the boundary rather than
+   * clamped somewhere further in, where the two limits could drift apart.
+   */
+  'overlay:setFontSize': {
+    id: 'CH-126',
+    payload: z.object({
+      px: z
+        .number()
+        .int()
+        .min(SETTINGS_LIMITS.overlayFontSizePx.min)
+        .max(SETTINGS_LIMITS.overlayFontSizePx.max),
+    }),
+    response: ok,
+  },
 } as const;
 
 /* ------------------------------------------------------------------ *
- * CH-201 .. CH-214  main to renderer, push
+ * CH-201 .. CH-216  main to renderer, push
  * ------------------------------------------------------------------ */
 
 export const pushChannels = {
@@ -488,6 +514,30 @@ export const pushChannels = {
   'notice:captureFidelity': {
     id: 'CH-215',
     payload: z.object({ windowsBuild: z.number(), message: z.string() }),
+  },
+  /**
+   * What the host platform supports, pushed on every renderer load (FR-089,
+   * ADR-038, TASK-043, DoD 9).
+   *
+   * Two windows need this and neither could ask for it. `FR-089` requires the
+   * Dashboard to disable the acrylic option on Windows 10 with a note, and
+   * `CH-215` was the only channel carrying a build number: it fires only when
+   * capture fidelity is degraded, so a Windows 10 machine on build 19045 got
+   * no build number at all and the option stayed enabled.
+   *
+   * The overlay needs it for a different reason. `overlayWindowOptions` falls
+   * back to a transparent window when acrylic is selected on a build that
+   * cannot render it, so the stored translucency and the window actually built
+   * can disagree, and the overlay would style a transparent window as if it
+   * were acrylic. `acrylicSupported` is what lets the renderer resolve the
+   * **effective** mode, which is the one its contrast depends on (FR-093).
+   *
+   * Nothing about it is a failure: it describes the machine, so it is not an
+   * error channel and the overlay may receive it (FR-076).
+   */
+  'notice:platform': {
+    id: 'CH-216',
+    payload: z.object({ windowsBuild: z.number(), acrylicSupported: z.boolean() }),
   },
 } as const;
 

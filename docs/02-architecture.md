@@ -722,6 +722,7 @@ payload is rejected and logged, never passed through.
 | CH-123 | `doc:retry` | `{ docId, profileId }` | `DocumentRecord` |
 | CH-124 | `model:ensure` | none | `ModelDownloadState` |
 | CH-125 | `doc:pickFiles` | `{ profileId }` | `DocumentRecord[]` |
+| CH-126 | `overlay:setFontSize` | `{ px }` | `{ ok: true }` |
 
 **Changes made in Milestone 2 (ADR-030, DoD 9).** `CH-121` and `CH-122` landed
 in Milestone 0 and are recorded here for the first time. The rest are new:
@@ -776,12 +777,36 @@ in Milestone 0 and are recorded here for the first time. The rest are new:
 | CH-212 | `overlay:mode` | overlay | `{ interactive, paused }` |
 | CH-213 | `rag:progress` | dashboard | `{ docId, state, percent }` |
 | CH-214 | `model:download` | dashboard | `ModelDownloadState` |
-| CH-215 | `notice:captureFidelity` | overlay | `{ windowsBuild, message }` |
+| CH-215 | `notice:captureFidelity` | both | `{ windowsBuild, message }` |
+| CH-216 | `notice:platform` | both | `{ windowsBuild, acrylicSupported }` |
 
 `CH-215` landed in Milestone 0 with `NFR-012`, the pre-19041 capture warning
 shown once per session next to the consent reminder. It is recorded here for the
 first time; the contract test now asserts the table and the code agree in both
 directions, so a channel cannot be added in code and left undocumented again.
+
+**Changes made in Milestone 4 by `TASK-043` (ADR-038, DoD 9).**
+
+- `CH-215`'s target is **both**, and it is now pushed to both windows. It was
+  written down as `overlay`, implemented as dashboard-only, and left out of the
+  overlay preload's allowlist, so all three disagreed. `NFR-012` decides it:
+  the warning belongs "alongside the consent reminder", which is the overlay.
+  The Dashboard keeps it because `FR-089` needs the build number there and
+  because a user who has dismissed the overlay card can still read it.
+- `CH-216` `notice:platform` is new. `FR-089` requires the acrylic option to be
+  disabled on Windows 10 with a note, and no channel carried the build number
+  to the Dashboard except `CH-215`, which fires only when capture fidelity is
+  degraded. A Windows 10 machine on build 19045 therefore got no build number
+  at all. It is pushed to both windows on every load: the overlay needs
+  `acrylicSupported` to know whether the acrylic it asked for is the window it
+  actually got, because `overlayWindowOptions` silently falls back to a
+  transparent window when it cannot be rendered.
+- `CH-126` `overlay:setFontSize` is new. `FR-093` requires the overlay's text
+  size to be adjustable from an in-overlay control and to persist. `config:set`
+  cannot be the way: the overlay's invoke allowlist exists so a compromised
+  overlay renderer cannot write settings, rebind hotkeys or replace
+  credentials (`FR-086`). One channel that changes one number, range-checked by
+  its own schema, keeps that boundary intact.
 
 ```ts
 /** CH-124 and CH-214 both carry this (ADR-011, ADR-026, ADR-030). */
@@ -1107,9 +1132,9 @@ is preferable to a network call during an interview.
 | `chokidar` | Knowledge base folder watch | FR-068 | Low |
 | `zod` | IPC and settings validation | FR-033, CMP-10 | Low |
 | `react`, `react-dom` | Both renderers | FR-002 | Low |
-| `tailwindcss` | Styling | FR-094 | Low |
-| `framer-motion` | Card animation | FR-091 | Low |
-| Magic UI | Card components, copied into the repo, not an npm dependency. Listed in `VENDORED.md` with source, version and license, because the npm license check cannot see it | FR-094, NFR-016 | Medium, invisible to CI licensing without `VENDORED.md` |
+| `framer-motion` | Card animation and `AnimatePresence`, which `FR-091` names | FR-091, FR-092 | Low |
+| *(build only)* | `tailwindcss` and `@tailwindcss/vite` are **devDependencies**, not runtime ones: they compile the overlay's stylesheet into a static CSS asset at build time and nothing of them reaches the shipped bundle. That is also why the license gate, which scans `--production`, does not see their `lightningcss` (MPL-2.0) — the same scope that already excludes `vite`, `electron-builder` and `typescript` (TASK-043, DoD 6) | FR-094 | Low |
+| Magic UI | **Not vendored. See ADR-040.** Its source is unreachable from the build environment: `magicui.design`, `raw.githubusercontent.com`, `cdn.jsdelivr.net` and `unpkg.com` are refused by the network egress proxy, and its two npm packages are registry clients that embed no component source. The cards are first-party components on Tailwind instead, and `VENDORED.md` records that rather than a provenance row for code that was not copied. `FR-094` is partially met and the remainder is carried to `TASK-051` | FR-094, NFR-016 | Medium, `FR-094` is partially met |
 | *(none)* | Acrylic translucency uses Electron's built-in `backgroundMaterial`. No native blur module is added | FR-089 | Low |
 | *(none)* | The Whisper WAV container is written by hand in `src/main/ai/stt/wav.ts`, about 44 bytes of header. No encoder package | FR-049 | Low |
 
