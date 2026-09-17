@@ -188,6 +188,11 @@ export function Dashboard(): JSX.Element {
         secrets={data.secrets}
         providers={data.providers}
         sessionActive={data.session.active}
+        sessionNotice={
+          data.sessionNotice && data.sessionNotice.sessionId === data.session.sessionId
+            ? data.sessionNotice.message
+            : null
+        }
         onSettingsChanged={data.reloadSettings}
         onSecretsChanged={data.reloadSecrets}
       />

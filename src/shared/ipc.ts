@@ -539,6 +539,34 @@ export const pushChannels = {
     id: 'CH-216',
     payload: z.object({ windowsBuild: z.number(), acrylicSupported: z.boolean() }),
   },
+  /**
+   * A session-level fault the user has to be told about (`NFR-008`, `FR-102`,
+   * `TASK-050`, `TC-132`).
+   *
+   * `CMP-15` reports every failure it survives through `onError`, and until this
+   * channel existed the whole of that went to `main.log`. The one that must not:
+   * a session that starts with no usable speech-to-text model runs, records and
+   * bills, and never transcribes a word. `NFR-008` requires a session start with
+   * no network to **warn**, and a log line the user will never open is not a
+   * warning.
+   *
+   * Not on the health badges, deliberately. `CMP-12` is keyed by credential and
+   * describes a provider that is failing; these are configuration faults that
+   * never reach a provider, and routing them through `runFor` would take a
+   * perfectly good key to `CONFIG_REQUIRED` (`ADR-024`).
+   *
+   * Dashboard only. The overlay never shows a failure (`FR-076`).
+   *
+   * The payload names the session it belongs to, so the renderer can show it
+   * only while that session is the live one. Clearing on a session boundary
+   * instead would race: `session:start` pushes `CH-201` before it brings the
+   * loop up, so the clear and the notice arrive in that order and a clearing
+   * effect would wipe the message it was sent to replace.
+   */
+  'notice:session': {
+    id: 'CH-217',
+    payload: z.object({ sessionId: z.string(), message: z.string() }),
+  },
 } as const;
 
 /* ------------------------------------------------------------------ *

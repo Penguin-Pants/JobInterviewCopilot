@@ -268,6 +268,13 @@ On every pull request, in order, fail fast:
 
 Nightly, additionally: `npm run test:soak` (TC-131) and `npm run package`.
 
+`.github/workflows/nightly.yml` runs the soak on a schedule and on demand. It
+has its own config, `vitest.soak.config.ts`, rather than a third project in
+`vitest.config.ts`: `vitest run --coverage` runs every project, and a pull
+request must not wait an hour for it. `SOAK_MINUTES` shortens the run for a
+local smoke check and defaults to the full hour `NFR-004` names. The `package`
+half of this line is still outstanding and belongs to TASK-051.
+
 ---
 
 ## 6. Manual Windows release checklist

@@ -31,6 +31,7 @@ import { LiveSessionLoop } from './live.js';
 import { getLogger, initLogger } from './logger.js';
 import { OverlayGate, type GatedMessage } from './overlay-gate.js';
 import { RagEngine, SUPPORTED_EXTENSIONS } from './rag.js';
+import { installGlobalHandlers, useAppOwnedTempDir } from './resilience.js';
 import { SecretVaultStore } from './secrets.js';
 import {
   SessionManager,
@@ -182,9 +183,13 @@ async function bootstrap(): Promise<void> {
   const userData = app.getPath('userData');
   initLogger({ dir: join(userData, 'logs'), console: !app.isPackaged });
 
-  // A live session must survive a stray rejection (NFR-009).
-  process.on('uncaughtException', (err) => getLogger().error('uncaughtException', err));
-  process.on('unhandledRejection', (reason) => getLogger().error('unhandledRejection', reason));
+  // A live session must survive a stray rejection (NFR-009, TASK-050).
+  installGlobalHandlers({ onFault: (kind, value) => getLogger().error(kind, value) });
+
+  // Before anything that could spool a request body. Every temporary file a
+  // dependency writes now lands somewhere the app owns, which is what lets
+  // TC-137 assert the place is empty at session end (NFR-002, ADR-019).
+  useAppOwnedTempDir(userData);
 
   config = new ConfigStore({
     dir: userData,
@@ -327,7 +332,21 @@ async function bootstrap(): Promise<void> {
     // batch window, because health can put the session on the backup and the
     // two models can disagree about both.
     onSttChoice: (choice) => trigger.setConfig(triggerConfigFrom(config.get(), choice)),
-    onError: (message, detail) => getLogger().error(message, detail),
+    // Logged and shown. Every fault CMP-15 survives used to reach main.log and
+    // stop there, which left the one that matters most invisible: a session
+    // that starts with no usable speech-to-text model runs, records and bills
+    // while transcribing nothing. NFR-008 requires a session start with no
+    // network to warn, and a log file the user will never open is not a
+    // warning (CH-217, TASK-050, TC-132).
+    //
+    // The detail stays in the log. It is a provider error object, and the
+    // renderer has no use for one it cannot act on (FR-034, NFR-003).
+    onError: (message, detail) => {
+      getLogger().error(message, detail);
+      const sessionId = sessions.current?.id;
+      if (!sessionId) return;
+      push(dashboardWindow?.webContents, 'notice:session', { sessionId, message });
+    },
     onInfo: (message, detail) => getLogger().info(message, detail),
   });
 

@@ -1,0 +1,42 @@
+name: Nightly
+
+# TC-131 is an hour long, so it runs here rather than on every pull request
+# (04-test-strategy.md section 5, TASK-050).
+#
+# `workflow_dispatch` is deliberate: a change to the live session loop should be
+# soakable on demand, without waiting for the small hours or landing first.
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      soak_minutes:
+        description: 'Soak duration in minutes. Leave empty for the full hour NFR-004 names.'
+        required: false
+        type: string
+
+concurrency:
+  group: nightly-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  soak:
+    name: TC-131 60-minute soak
+    runs-on: ubuntu-latest
+    # The run itself is an hour. The margin covers npm ci and the Electron
+    # download, and still fails rather than hanging a runner all day.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Soak a live session and measure RSS
+        env:
+          # A sample taken after a collection measures retention rather than
+          # collector timing. The test runs without it, less sharply.
+          NODE_OPTIONS: --expose-gc
+          SOAK_MINUTES: ${{ inputs.soak_minutes }}
+        run: npm run test:soak

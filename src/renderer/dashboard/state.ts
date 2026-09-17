@@ -19,6 +19,8 @@ export type ModelState = PushPayload<'model:download'>;
 export type UsageWarning = PushPayload<'usage:warning'>;
 /** What the host machine supports (`CH-216`, FR-089, NFR-012). */
 export type PlatformState = PushPayload<'notice:platform'>;
+/** A session-level fault and the session it belongs to (`CH-217`). */
+export type SessionNotice = PushPayload<'notice:session'>;
 
 export interface DocProgress {
   state: DocumentState;
@@ -36,6 +38,11 @@ export interface DashboardData {
   model: ModelState | null;
   warnings: UsageWarning[];
   captureNotice: string | null;
+  /**
+   * The last session-level fault and the session it belongs to, or null
+   * (`CH-217`, NFR-008). A consumer shows it only while that session is live.
+   */
+  sessionNotice: SessionNotice | null;
   platform: PlatformState;
   docProgress: Record<string, DocProgress>;
   activeProfile: Profile | null;
@@ -90,6 +97,14 @@ export function useDashboardData(): DashboardData {
   const [captureNotice, setCaptureNotice] = useState<string | null>(
     () => lastSeen('notice:captureFidelity')?.message ?? null,
   );
+  /**
+   * The last thing that went wrong with the session itself (`CH-217`, NFR-008).
+   *
+   * Not replayed. It is pushed while a session is being brought up, which a
+   * renderer loaded before then cannot miss, and one loaded afterwards is
+   * better off showing nothing than showing a fault it cannot place.
+   */
+  const [sessionNotice, setSessionNotice] = useState<SessionNotice | null>(null);
   /**
    * What the host machine supports (`CH-216`, FR-089).
    *
@@ -197,6 +212,7 @@ export function useDashboardData(): DashboardData {
       window.copilot.on('model:download', setModel),
       window.copilot.on('notice:captureFidelity', (p) => setCaptureNotice(p.message)),
       window.copilot.on('notice:platform', setPlatform),
+      window.copilot.on('notice:session', setSessionNotice),
       window.copilot.on('usage:warning', (w) =>
         // At most one of each per session (FR-103, FR-109), so a repeat within
         // one session is a main-process defect rather than something to stack
@@ -305,6 +321,7 @@ export function useDashboardData(): DashboardData {
     model,
     warnings,
     captureNotice,
+    sessionNotice,
     platform,
     docProgress,
     activeProfile,

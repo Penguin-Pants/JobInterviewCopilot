@@ -1675,7 +1675,9 @@ a comment or a component that claimed a guarantee the code does not make.
 
 ## Milestone 5 — Hardening and release
 
-### TASK-050 Global resilience
+**Status: IN PROGRESS.** `TASK-050` is complete. `TASK-051` has not started.
+
+### TASK-050 Global resilience — COMPLETE
 **Traces** NFR-001, NFR-002, NFR-004, NFR-005, NFR-008, NFR-009
 **Depends on** all of Milestone 4
 **Acceptance criteria**
@@ -1694,6 +1696,55 @@ a comment or a component that claimed a guarantee the code does not make.
   p95 under 4.0 s) is measured and recorded by MW-06 before release.
 **Verified by** TC-130, TC-131, TC-132, TC-133, TC-137, MW-06
 
+**Status: COMPLETE, 2026-09-17.** `npm run typecheck`, `npm run lint`,
+`npm run format:check`, `npm run licenses`, `npm run trace` and 913 unit and
+integration tests all pass. Line coverage is 96.3 percent against an 80 percent
+floor; `src/main/resilience.ts`, the one new production module, is at 100
+percent lines.
+
+What landed:
+
+| Criterion | Where it lives | Verified |
+|---|---|---|
+| Global handlers log and continue | `src/main/resilience.ts`, called from `bootstrap` | `TC-130`, `tests/integration/resilience.test.ts` |
+| 60-minute soak, RSS under 600 MB, no upward trend | `tests/soak/session-soak.test.ts`, `vitest.soak.config.ts`, `npm run test:soak` | `TC-131`, nightly workflow |
+| Filesystem write monitor, no PCM, temp directory empty | `tests/fakes/fs-monitor.ts`, `tests/integration/audio-privacy.test.ts` | `TC-137` |
+| Offline with a cached model; session start warns | `tests/integration/offline.test.ts`, `CH-217` | `TC-132` |
+| App-side overhead under 150 ms | `tests/integration/latency.test.ts` | `TC-133` |
+
+Three things were found during the task rather than planned into it, and all
+three are landed rather than deferred:
+
+- **The handlers were in `index.ts` and therefore untestable.** `TC-130` asks
+  for a test that injects a rejection during a session. `index.ts` cannot be
+  imported without an Electron app, and it is the one file excluded from
+  coverage. The handlers moved to `src/main/resilience.ts` behind an injected
+  emitter, so the wiring, the real runtime behavior and the in-session behavior
+  are each asserted separately.
+- **`ADR-019`'s temp-directory clause had never been implemented.** The ADR says
+  the app points `TMPDIR` and `TEMP` at a directory it owns so a third-party
+  spool can be caught. Nothing did. `useAppOwnedTempDir` does, and `TC-137`
+  asserts the directory is empty at session end with `os.tmpdir()` genuinely
+  pointed at it, so the assertion can fail.
+- **The transcription warning reached `main.log` and stopped there.** `CMP-15`
+  reported it through `onError`, which `index.ts` only logged. `NFR-008`
+  requires a session start with no network to *warn*, and a log file the user
+  will never open is not a warning. `CH-217` `notice:session` carries it to the
+  Dashboard, tagged with the session it belongs to.
+
+Deferred, deliberately, and not part of this task:
+
+- `MW-06`'s end-to-end `NFR-001` numbers need real providers on a real
+  connection. `TC-133` measures the app's own share of that budget and records
+  it; the rest is `TASK-051`'s release checklist.
+- The nightly `npm run package` job named in `04-test-strategy.md` section 5.
+  `.github/workflows/nightly.yml` carries the soak only. Packaging is
+  `TASK-051`'s first acceptance criterion and the job belongs with it.
+- `NFR-005`, average CPU under 15 percent, is traced to this task and is not
+  measured here. A CI runner's CPU share is not the 4-core machine the
+  requirement names, so the number would be meaningless. It stays with the
+  manual checklist. Recorded as a follow-up on `TASK-051`.
+
 ### TASK-051 Release pipeline
 **Traces** NFR-011, NFR-013, NFR-015
 **Depends on** TASK-050
@@ -1709,3 +1760,16 @@ a comment or a component that claimed a guarantee the code does not make.
   MW-11 latency numbers included. MW-12 confirms a documented limitation and
   cannot fail the release.
 **Verified by** TC-001, MW-01 to MW-13
+
+**Status: NOT STARTED.** Three follow-ups handed over by `TASK-050`, to be
+closed by this task rather than tracked separately:
+
+- Add the nightly `npm run package` job to `.github/workflows/nightly.yml`.
+  The workflow exists and carries `TC-131`'s soak; the packaging half of
+  `04-test-strategy.md` section 5 is still missing.
+- Record `MW-06`'s and `MW-11`'s end-to-end latency numbers against the tag.
+  `TC-133` measures the app's own share of the `NFR-001` budget in CI and
+  records it; neither the real network nor a real provider is reachable there.
+- Measure `NFR-005`, average CPU under 15 percent of one core on a 4-core
+  machine, on the release checklist. `TASK-050` traces it but cannot measure it:
+  a shared CI runner is not the machine the requirement names.

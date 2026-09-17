@@ -53,6 +53,7 @@ const ALLOWED_PUSH: readonly PushChannel[] = [
   'model:download',
   'notice:captureFidelity',
   'notice:platform',
+  'notice:session',
 ];
 
 const allowedInvoke = new Set<string>(ALLOWED_INVOKE);

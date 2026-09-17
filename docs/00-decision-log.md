@@ -1516,6 +1516,76 @@ a decision to confirm, not as work that was blocked.
 repository's history was rejected by the license gate for having no
 `VENDORED.md` row, which is exactly what `NFR-016` asks of it.
 
+### ADR-043 — A warning the user cannot see is not a warning
+
+**Context.** `TASK-050` asked for "session start warns that transcription is
+unavailable" (`NFR-008`). The warning existed: `CMP-15` produces the sentence
+whenever no speech-to-text model can be opened, and `live.ts` carried a comment
+saying the user is told rather than left with a session that silently never
+suggests anything. They were not told. `index.ts` wired the loop's `onError` to
+`getLogger().error` and nothing else, so every fault `CMP-15` survives, that one
+included, reached `main.log` and stopped there.
+
+The failure mode this leaves is the worst one the app has. A session with no
+usable model starts, runs, records a transcript and bills for the audio it
+hands to nobody, and the only signal is an absence: no cues ever appear. The
+user cannot tell that from a quiet interviewer.
+
+**Decision.** `CH-217` `notice:session` carries a session-level fault to the
+Dashboard, and `index.ts` pushes it alongside the log line.
+
+- Dashboard only. The overlay never shows a failure (`FR-076`).
+- Not on the health badges. `ADR-017` keys those by credential and they describe
+  a provider that is failing. A model missing from the registry and a key that
+  was never saved never reach a provider, and `ADR-024` already establishes that
+  routing them through `runFor` would take a good key to `CONFIG_REQUIRED`.
+- The payload names its session, and the Dashboard renders it only while that
+  session is the live one. Clearing on a session boundary instead would race:
+  `session:start` pushes `CH-201` before it brings the loop up, so the clear and
+  the notice arrive in that order and the clear would wipe the message it was
+  sent to replace.
+- The detail stays in the log. It is a provider error object and the renderer
+  has no use for one it cannot act on (`FR-034`, `NFR-003`).
+
+**Reason.** `NFR-008` says warn. A log file the user will never open is not a
+warning, and a requirement verified by a test that only reads the log would have
+passed while the product failed.
+
+### ADR-044 — The global handlers left `index.ts`, and `ADR-019`'s temp directory arrived
+
+**Context.** Two `TASK-050` criteria could not be met where their code lived.
+
+`TC-130` asks for a test that injects a rejection during a session and asserts
+the session stays active. The handlers were two lines inside `bootstrap` in
+`index.ts`, which cannot be imported without an Electron app and which is the
+one file excluded from coverage. The criterion was unverifiable by construction.
+
+`ADR-019` states that the app sets `TMPDIR` and `TEMP` for its own child
+processes to a directory it owns and asserts it is empty at session end. Nothing
+had ever implemented it. `TC-137`'s "the app-owned temp directory is empty"
+would have been an assertion about a directory nothing ever wrote to, which is
+the one answer that cannot fail.
+
+**Decision.** `src/main/resilience.ts` holds both, and `bootstrap` calls them.
+
+- `installGlobalHandlers` takes the emitter and the log sink, so a test drives
+  it on an emitter of its own. It swallows a sink that throws: a throw inside an
+  `uncaughtException` listener is what terminates a process, so a logging defect
+  must not become the session loss `NFR-009` guards against.
+- `useAppOwnedTempDir` points `TMPDIR`, `TEMP` and `TMP` at `userData/tmp`
+  before anything that could spool a request body runs. `TC-137` sets it on the
+  real environment for the length of the test, so `os.tmpdir()` genuinely
+  resolves there and a dependency's spool would land where the assertion looks.
+- `appOwnedTempEntries` rethrows anything that is not `ENOENT`. A missing
+  directory means nothing was spooled; an unreadable one reported as empty would
+  make the same assertion unfailable a second way.
+
+The module imports no Electron and no logger. `index.ts` owns the logger
+singleton and passes a sink in, which is what keeps the module testable.
+
+**Reason.** A criterion whose code cannot be reached from a test is not a
+criterion. Both moves are the smallest change that makes the stated check real.
+
 ---
 
 ## 5. Out of scope for v1
