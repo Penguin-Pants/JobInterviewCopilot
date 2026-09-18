@@ -500,6 +500,26 @@ whatever card is held; `depthOpacity` and every multi-card branch this module
 and `SuggestionCardView` (11) once carried are deleted, not defaulted to a cap
 of 1. A `'reset'` event (a session boundary) empties the held card.
 
+**A `'cancelled'` `'end'` removes the card, not just its `status` field —
+corrected during a fifth round of spec review (`ADR-047`).** Before this
+milestone, `reduceCards`'s `'end'` case only ever overwrote the matching
+card's `status`; nothing removed it from the array. Under the pre-milestone
+3-card cap that went unnoticed in practice because a cancelled card was
+pushed off the front by the next three `begin`s soon enough, but with the
+cap now 1 (above) a cancelled card **is** the only card, and nothing evicts
+it if the next `suggestion:begin` is delayed or never comes (the interviewer
+moves to small talk the actionability filter now suppresses, `ADR-045`, or
+the interview simply ends there). `FR-054`'s "the cancelled partial output
+must be removed from the overlay" predates this milestone and was never
+actually implemented by eviction alone. Fixed now: `reduceCards`'s `'end'`
+case, when `event.payload.status === 'cancelled'`, removes the matching card
+from the array entirely instead of updating its `status` in place — so
+`shouldShowIdle` sees zero cards and the overlay falls back to its idle card
+immediately, the same as after a `'reset'` or a pause. `'complete'` and
+`'nonconforming'` are unchanged: both are terminal states `FR-076`/`FR-102`
+already require to stay visible until replaced or held, and this milestone
+does not touch either branch.
+
 ---
 
 ## 3. Key interfaces
@@ -885,15 +905,33 @@ back to `'actionable'`.
 
 **The `classify` call is a single best-effort attempt, not routed through
 `CMP-12`'s retry/failover machinery (`ADR-045`).** `live.ts`'s implementation
-of `classify` reads the LLM primary credential's current health state
-(`CMP-12`, `ADR-017`, `ADR-024`) before calling — a read, not a `runFor`
-attempt. `CONFIG_REQUIRED`, or `DEGRADED` with its backoff not yet due, skips
-the call entirely and fails open to `'actionable'` immediately, with no
-network attempt and no effect on the health state either way. Otherwise
-exactly one attempt is made against `llm.generate`, under an 800ms
-client-side timeout (`ASM-020`) local to the classification call, distinct
-from and shorter than any retry-driven timeout `runFor` applies to a real
-generation. A timeout or any other failure resolves to `'actionable'`
+of `classify` reads the LLM primary credential's current health state —
+`CredentialHealth.current.kind` (`src/main/ai/health.ts`), a plain property
+read, never a `run`/`runFor` attempt — before calling. **The call is
+attempted only when that read is exactly `'using-primary'`.** Every other
+`HealthState.kind` — `'retrying'`, `'using-backup'`, `'degraded'`,
+`'config-required'` — skips the call entirely and fails open to
+`'actionable'` immediately, with no network attempt and no effect on the
+health state either way. This is corrected from an earlier, finer-grained
+version of this rule that tried to distinguish `DEGRADED` "not yet due for
+its next retry" from `DEGRADED` that is due: `CredentialHealth` exposes no
+such eligibility query (`DEGRADED`'s backoff is slept inside its own retry
+attempt, not tracked as a separately readable deadline), so that version
+could not actually be implemented against `CMP-12` as it exists, and adding
+a new query to answer it would be a needless widening of `CMP-12`'s public
+surface for a check this narrow. Checking only `.current.kind` against the
+single value `'using-primary'` needs nothing `CMP-12` does not already
+expose, and it is also more correct than the version it replaces: that
+version's `CONFIG_REQUIRED`/`DEGRADED`-only skip would have kept calling
+`llm.generate` against a primary that real generations had already stopped
+using while `'using-backup'` or `'retrying'`, hitting a failed-over-from or
+still-recovering credential on every ambiguous turn. Otherwise exactly one
+attempt is made against `llm.generate`, using the *primary*'s
+`ProviderChoice` (never the backup's — `'using-backup'` skips per the rule
+above, so this call never needs its own target-selection logic), under an
+800ms client-side timeout (`ASM-020`) local to the classification call,
+distinct from and shorter than any retry-driven timeout `runFor` applies to
+a real generation. A timeout or any other failure resolves to `'actionable'`
 (`ADR-045`, same fallback as above) and is never itself reported to `CMP-12`
 as a probe outcome — classification calls observe health state, they never
 drive it.
@@ -960,18 +998,35 @@ Respond with the one word and nothing else.
 User message template: `TURN:\n${text.trim()}`. Parameters: `maxTokens: 5`
 (one word, with margin for tokenization), `temperature: 0`.
 
-`classifyWithLlm(text, llm, signal)` builds this request and calls
-`llm.generate(req, signal)`. It drains the whole iterable before deciding
-anything — concatenating every `{ delta }` item into one string and keeping
-the terminal `{ usage }` item — not just the first delta: `maxTokens: 5` caps
-the response to about one word, so draining to completion is near-instant,
-and only a fully-drained response can be checked against **both** verdict
-words reliably. The accumulated string is checked in this order — because
-the string `"NON_ACTIONABLE"` contains `"ACTIONABLE"` as a substring, a
-case-insensitive match on `NON_ACTIONABLE` is checked **first** and resolves
-`'non-actionable'`; only if that does not match, a case-insensitive match on
-`ACTIONABLE` resolves `'actionable'`. Anything else — including an empty
-response, a stream that ends without a recognizable token, or the same
+`classifyWithLlm(text, classificationId, choice, llm, signal)` builds this
+request and calls `llm.generate(req, signal)`. `classificationId` and
+`choice: ProviderChoice` are passed in by the caller (`live.ts`'s `classify`
+closure below), not invented inside this function — `GenerationRequest`
+requires both (`generationId`, `choice`, 3.2) and `LlmProvider` (the `llm`
+argument) exposes only a registry `id: string`, not a `ProviderChoice`, so
+this function has no way to synthesize either on its own. `choice` is always
+the LLM primary's own `ProviderChoice` (never the backup's), matching the
+health-check rule above.
+
+It drains the whole iterable before deciding anything — concatenating every
+`{ delta }` item into one string and keeping the terminal `{ usage }` item —
+not just the first delta: `maxTokens: 5` caps the response to about one word,
+so draining to completion is near-instant, and only a fully-drained response
+can be checked reliably at all. **The accumulated string is trimmed and
+checked for exact, case-insensitive equality to one of the two verdict
+words — never substring containment.** `NON_ACTIONABLE` (exact) resolves
+`'non-actionable'`; `ACTIONABLE` (exact) resolves `'actionable'`. This is
+corrected from an earlier version that checked whether the accumulated
+string *contained* `NON_ACTIONABLE` or `ACTIONABLE` (ordered to dodge
+`"ACTIONABLE"` being a substring of `"NON_ACTIONABLE"`): a response like
+`"NON_ACTIONABLE because this is small talk"` or one naming both words
+still contains `NON_ACTIONABLE` under that scheme and would have resolved
+`'non-actionable'` even though it is not cleanly one verdict, contradicting
+`FR-111`'s own "not cleanly one verdict fails open" rule. Exact equality
+after trimming has no such gap, and needs no check-order dependency either
+(two disjoint exact strings cannot collide the way a substring scan can).
+Anything else — extra words, both tokens together, an empty response, a
+stream that ends without a recognizable token, or the same
 non-aborted-stream-ends-early failure 3.2 already defines as a
 `ProviderError` — resolves to `'actionable'` (`ADR-045`).
 
@@ -993,6 +1048,19 @@ generation's `<generationId>#<attempt>` scheme (`ADR-036`) because no real
 also what the request's own `generationId` field (3.2) is set to, so nothing
 extra needs inventing for that field either.
 
+**Session teardown must wait for this accounting, not just for a real
+generation's.** `LiveSessionLoop.stop()` (`CMP-15`, `src/main/live.ts`)
+already tracks one in-flight generation in a `generation: Promise<void> |
+null` field and awaits it before closing streams and letting the Session
+Manager compact the session file. It has no equivalent for a classification:
+a classification aborted by `trigger.stop()` (itself called at the top of
+`stop()`) can still be inside the `try`/`finally` above, reporting usage,
+after `stop()` has already returned and usage has already been snapshotted.
+`LiveSessionLoop` gains a second tracked field, `classification: Promise<void>
+| null`, set by the `classify` closure the moment it is invoked and cleared
+once the closure's own `try`/`finally` completes; `stop()` awaits it
+alongside `generation`, in the same step, before proceeding to close streams.
+
 ### 3.7 Staleness check (`FR-114`, `CMP-15`, `ADR-048`)
 
 `TurnFired` is declared in `src/main/ai/trigger.ts`, the module that
@@ -1013,47 +1081,80 @@ interface TurnFired {
                              // the classifier themselves cost.
 }
 
-type GenerationStatus = 'complete' | 'cancelled' | 'nonconforming' | 'stale';
-// GenerationStatus (ai/llm.ts) and TranscriptEntry's independently-declared
-// 'suggestion' status union (2.5) are two separate declarations, not one
-// shared type despite the similar name — both gain 'stale' in this milestone,
-// so both need editing. Neither CH-209's wire schema (4) nor CardStatus
-// (2.6a) gains it: the suggestion:begin that would carry it to the overlay is
-// exactly what this check guarantees is never sent, so the wire value and
-// the renderer's status union would both be unreachable by construction —
-// the same standard ADR-044 and ADR-047 already hold this project to.
+// 'stale' does NOT go on GenerationStatus (ai/llm.ts). That type is also the
+// exact type GenerationEvents.onEnd's payload carries, i.e. CH-209's wire
+// status — adding 'stale' there would add it to the wire in the same stroke.
+// GenerationStatus is untouched by this milestone. 'stale' instead goes on:
+//  - TranscriptEntry's 'suggestion' variant (src/shared/types.ts) — the
+//    transcript-facing status, a plain inline literal union, not an alias of
+//    GenerationStatus;
+//  - sessionSchema's matching z.enum(...) on the 'suggestion' branch of
+//    transcriptEntry (src/shared/ipc.ts) — the PERSISTED schema. The other
+//    z.enum(...) in the same file, on CH-209's own payload schema, is a
+//    separate declaration and stays exactly as it is;
+//  - SessionManager.appendSuggestion's parameter type (src/main/session.ts).
+// CardStatus (2.6a) does not gain 'stale': a generation caught at checkpoint
+// 1 below never reaches the renderer at all, and one caught at checkpoint 2
+// reaches it labeled 'cancelled', the existing wire value, never a new one.
 ```
 
-`CMP-15` compares `Date.now() - firedAt` against `STALE_DISCARD_MS` (20000,
-`ASM-017`) exactly once, immediately before the first `onSuggestion` call it
-would make for that generation (`suggestion:begin`). Over the threshold: no
-`onSuggestion` call is made for any of `begin`, `line` or `end`; the generation
-still runs to completion, because the cost of one wasted LLM call is cheaper
-than an early-abort path this milestone does not build (`ADR-048`); the
-transcript entry is appended with `status: 'stale'`. `CardStatus` in
-`cards.ts` (2.6a) does **not** gain `'stale'`: a stale generation never reaches
-the renderer, so the renderer's status union has no reachable use for the
-value.
+**Two checkpoints, not one.** `CMP-15` compares `Date.now() - firedAt`
+against `STALE_DISCARD_MS` (20000, `ASM-017`) at two points, not one:
 
-**One checkpoint, evaluated once per generation, not once per attempt.** A
-single `generationId` can be billed across several attempts when the health
-machine retries or fails over (`ADR-036`: each attempt accounted under
-`<generationId>#<attempt>`), and `onSuggestion` for `suggestion:begin` is
-still called at most once for that `generationId` — on whichever attempt
-finally succeeds enough to produce output. The staleness check sits at that
-one call site, so it is checked exactly once regardless of how many attempts
-preceded it, and the elapsed time it measures already includes every attempt
-before the one that succeeded — a generation that burned through the full
-retry ladder before finally going out is exactly the case this check is
-meant to catch.
+1. **Before the first `onSuggestion` call for `suggestion:begin`.** Over the
+   threshold here: no `onSuggestion` call is made for any of `begin`, `line`
+   or `end`; the transcript entry is appended with `status: 'stale'`
+   (the transcript-facing type above, not `GenerationStatus`).
+2. **Before the first `onSuggestion` call for `suggestion:line`** (i.e.
+   before this generation's first real content would reach the overlay),
+   but only reached if checkpoint 1 already passed and `begin` already went
+   out. Over the threshold here: no further `suggestion:line` is forwarded,
+   and exactly one `suggestion:end` is forwarded with the existing wire
+   status `'cancelled'` — never `'stale'`, which is not a wire value — so
+   the already-shown card is removed via the same path `2.6a`'s `'cancelled'`
+   removal rule already provides. The transcript entry is still appended
+   with the true outcome, `status: 'stale'` — the overlay and the transcript
+   are allowed to disagree here, the same way `ai/llm.ts`'s
+   `GenerationOutcome.error` already lets a failed generation be shown as
+   `'cancelled'` while the real failure is recorded and surfaced elsewhere.
 
-**One checkpoint is enough.** The failure mode this guards against is a
-generation that sits *unstarted* too long — retrieval plus however many failed
-attempts the health machine's retry ladder ran (capped at 10 s, `ADR-024`)
-before a request finally goes out. Once streaming has begun, its length is
+At both checkpoints, the underlying generation still runs to completion in
+the background regardless of outcome — the cost of one wasted LLM call is
+cheaper than an early-abort path this milestone does not build (`ADR-048`).
+
+**Why checkpoint 1 alone is not enough, corrected during a fifth round of
+spec review.** `runGeneration` (`src/main/ai/llm.ts`) calls `events.onBegin`
+**before** it starts iterating `provider.generate` — synchronously, before
+any part of the LLM's own response has arrived. A checkpoint placed only
+"before begin," as this section originally specified, is therefore evaluated
+at essentially `firedAt` plus retrieval time, regardless of how long the LLM
+itself goes on to take — a provider whose first token takes 25 seconds
+passes checkpoint 1 immediately and then streams its now-obsolete answer to
+the overlay in full, exactly the failure this check exists to prevent.
+Checkpoint 2 catches that case; checkpoint 1 alone could not, no matter how
+the "once streaming begins, length is bounded" reasoning below is read.
+
+**Once past checkpoint 2, no further checkpoint is needed.** The reasoning
+that originally justified "one checkpoint" still holds for everything after
+checkpoint 2: once real content has started arriving, total length is
 already bounded by `GENERATION_PARAMS.maxTokens` (200) and the line buffer's
-own caps (3.3), so an unbounded slow drip after `suggestion:begin` is not a
-failure mode anything else in this architecture produces either.
+own caps (3.3), so an unbounded slow drip *between* lines is not a failure
+mode anything else in this architecture produces either. The correction
+above is about *where* the meaningful checkpoint sits relative to the first
+byte of real output, not about needing a third one.
+
+**Both checkpoints are evaluated once per generation, not once per
+attempt.** A single `generationId` can be billed across several attempts
+when the health machine retries or fails over (`ADR-036`: each attempt
+accounted under `<generationId>#<attempt>`), and `onSuggestion` for
+`suggestion:begin` (checkpoint 1) and the first `suggestion:line`
+(checkpoint 2) are each still called at most once for that `generationId` —
+on whichever attempt finally produces output. Each checkpoint sits at its
+one call site, so each is checked exactly once regardless of how many
+attempts preceded it, and the elapsed time both measure already includes
+every attempt before the one that succeeded — a generation that burned
+through the full retry ladder before finally going out is exactly the case
+checkpoint 1 is meant to catch.
 
 ### 3.8 Card hold buffer (`FR-115`, `CMP-14`, `ADR-049`)
 
@@ -1063,8 +1164,11 @@ interface HoldBufferOptions {
   now?: () => number;         // injected for fake-timer tests
 }
 
-/** Sits in front of reduceCards (2.6a). Not a change to reduceCards or to the
- *  tests that already describe it. */
+/** Sits in front of reduceCards (2.6a). Not a change to reduceCards's
+ *  'begin'/'line'/'reset' handling or the tests already describing them;
+ *  reduceCards's 'end' case does change, per 2.6a's cancelled-card-removal
+ *  fix (ADR-047) — a change orthogonal to this buffer, made by TASK-063,
+ *  not by this task. */
 interface HoldBuffer {
   onEvent(event: CardEvent): void;   // dispatches immediately, or queues
   onPause(): void;                   // CH-212's pause transition; not a CardEvent
@@ -1431,9 +1535,23 @@ CMP-05   timer elapses, or a native endpoint fires -> guard FR-051 (>=3 words, >
            -> enter GENERATING, TurnFired carries the firedAt stamped above
 CMP-15   onFire -> CMP-06 query(boundProfileId, questionText, 3)
 CMP-07   build prompt, call provider
-CMP-15   staleness check FR-114: Date.now() - firedAt > threshold?
-         over threshold -> no CH-207/208/209 at all, TranscriptEntry 'stale'
+CMP-15   staleness checkpoint 1 (FR-114): Date.now() - firedAt > threshold?
+         over threshold -> no CH-207/208/209 at all, TranscriptEntry 'stale',
+           generation still runs to completion in the background (usage
+           still accounted), stops here
          within threshold -> CH-207 suggestion:begin
+CMP-07   provider.generate begins iterating (events.onBegin above already
+           fired BEFORE this line, synchronously, not gated on the first
+           delta - checkpoint 1 above is evaluated at ~firedAt+retrieval
+           time, not at "first token ready"; that gap is exactly what
+           checkpoint 2 below exists to cover)
+CMP-15   staleness checkpoint 2 (FR-114): first real delta ready ->
+           Date.now() - firedAt > threshold?
+         over threshold -> no CH-208 ever sent for this generation; exactly
+           one CH-209 suggestion:end 'cancelled' sent instead (wire status,
+           not 'stale'); TranscriptEntry still 'stale', not 'cancelled';
+           generation still runs to completion in the background, stops here
+         within threshold -> proceed normally, no further checkpoint
 CMP-07   buffer deltas, flush per line -> CH-208 suggestion:line (xN)
 CMP-07   stream ends -> CH-209 suggestion:end 'complete'
 CMP-14   hold buffer FR-115: dispatch now, or queue until minHoldMs elapses
@@ -1442,11 +1560,20 @@ CMP-09   add token usage, recompute spend, maybe CH-205 usage:warning
 ```
 
 **The staleness check sits between retrieval and the first push, not before
-retrieval.** Checking `firedAt` before `CMP-06` even runs would save a wasted
-RAG query on a turn already stale, but retrieval is fast (`FR-065`'s 50 ms
-ceiling at the documented scale) next to an LLM round trip, and the simpler
-invariant — one check, immediately before the overlay could show anything —
-is worth more than the query it would occasionally skip.
+retrieval — and has a second checkpoint at the first real delta, not only
+before `begin` (3.7, corrected during a fifth round of spec review).**
+Checking `firedAt` before `CMP-06` even runs would save a wasted RAG query on
+a turn already stale, but retrieval is fast (`FR-065`'s 50 ms ceiling at the
+documented scale) next to an LLM round trip, so checkpoint 1 sits after
+retrieval, immediately before the overlay could show anything from
+`suggestion:begin`. That checkpoint alone is not enough, because
+`runGeneration`'s `events.onBegin` fires synchronously before
+`provider.generate` is even iterated — before any part of the LLM's own
+response exists — so a slow-to-first-token provider passes checkpoint 1
+regardless of how long it goes on to take. Checkpoint 2, at the first real
+delta, is what actually bounds that wait; see 3.7 for the full reasoning and
+why the two together (rather than moving checkpoint 1 later) keep the
+common, fast-answering case showing its card immediately.
 
 Three rules `CMP-15` adds to that sequence, each from a case the diagram does
 not show. All three are asserted by `TC-164` and the cases beside it.
@@ -1501,7 +1628,18 @@ CLASSIFYING     --new interim/final-->        CLASSIFYING (new text accumulates,
                                                follows the rule above)
 CLASSIFYING     --resolved non-actionable-->  LISTENING
 CLASSIFYING     --resolved actionable, or
-                   classifier fails/aborts--> GENERATING (fail open, ADR-045)
+                   classifier times out/
+                   errors (genuine failure,
+                   still THIS turn's own
+                   in-flight op)-->           GENERATING (fail open, ADR-045)
+CLASSIFYING     --classifier's signal aborted
+                   because a NEWER turn's
+                   guard-pass superseded it--> (no transition from here: the
+                                               machine is already wherever the
+                                               newer turn's own guard-pass
+                                               sequence put it; this
+                                               settlement is discarded as
+                                               stale, ADR-045)
 GENERATING      --stream end-->               LISTENING
 any live state  --Ctrl+Shift+P-->             PAUSED
 PAUSED          --Ctrl+Shift+P-->             LISTENING
@@ -1535,6 +1673,20 @@ not a new mechanism: `inFlight` was always described as one slot, and
 survives its predecessor exactly as it always did for `GENERATING`: new
 speech arms its own gap timer without disturbing whatever is currently in
 flight.
+
+**The two arrows out of `CLASSIFYING` above are not one arrow — corrected
+during a fifth round of spec review.** An earlier version of this diagram
+drew a single transition, "resolved actionable, or classifier fails/aborts
+→ `GENERATING`." Read literally that sends every abort to `GENERATING`,
+including the one case 3.6's "aborted classification's eventual settlement
+is a stale settle report" rule exists specifically to prevent: a
+classification aborted because a *newer* turn's own guard-pass already
+superseded it. That abort is not this diagram's transition to draw at all —
+by the time it settles, the trigger's current in-flight marker no longer
+names it, and the newer turn's own guard-pass sequence has already decided
+where the machine is. Only a genuine failure or timeout on the
+classification that is still the turn the trigger considers current fails
+open to `GENERATING`; a superseded abort is discarded, full stop, per 3.6.
 
 Three further rules, each from a case the diagram does not show. All were found
 by the review on `TASK-030`'s pull request and are recorded here because they

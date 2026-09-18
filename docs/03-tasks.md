@@ -1879,16 +1879,22 @@ classifier. Build `TASK-061` first regardless of the numbering.
   `LlmProvider` or anything network-capable** — `CMP-05` (`ai/trigger.ts`) may
   not "call an LLM provider directly" (`02-architecture.md` section 1), and
   this file is what `trigger.ts` is allowed to import.
-- `classifyWithLlm(text, llm, signal)`, the LLM-backed half, also lives in
-  `actionability.ts` but is imported and called only from `live.ts` (`CMP-15`),
-  using the fixed classification prompt and the `GenerationRequest.promptOverride`
-  field (`02-architecture.md` 3.2, 3.6a) — not the fixed interview-cue system
-  prompt. `TriggerOptions` gains `classify: (text, signal) => Promise<ActionabilityVerdict>`;
-  `live.ts` constructs it as a closure over the configured LLM primary and
-  passes it in at wiring time, the same pattern `onFire` already is.
-  `trigger.ts` calls `this.options.classify(...)` only when
-  `classifyHeuristically` returns `null`; it never imports `classifyWithLlm`
-  or `LlmProvider` itself.
+- `classifyWithLlm(text, classificationId, choice, llm, signal)`, the
+  LLM-backed half, also lives in `actionability.ts` but is imported and
+  called only from `live.ts` (`CMP-15`), using the fixed classification
+  prompt and the `GenerationRequest.promptOverride` field
+  (`02-architecture.md` 3.2, 3.6a) — not the fixed interview-cue system
+  prompt. `classificationId` and `choice: ProviderChoice` are passed in by
+  the caller: `LlmProvider` (the `llm` parameter) exposes only a registry
+  `id`, not a `ProviderChoice`, and `GenerationRequest` requires both fields,
+  so `classifyWithLlm` cannot synthesize either on its own. `TriggerOptions`
+  gains `classify: (text, signal) => Promise<ActionabilityVerdict>` — that
+  signature is unchanged, the trigger never needs to know a
+  `classificationId` or `choice` exists. `live.ts` constructs `classify` as
+  a closure over the configured LLM primary and passes it in at wiring time,
+  the same pattern `onFire` already is. `trigger.ts` calls
+  `this.options.classify(...)` only when `classifyHeuristically` returns
+  `null`; it never imports `classifyWithLlm` or `LlmProvider` itself.
 - `live.ts`'s `classify` closure generates its own fresh `classificationId`
   per call (not threaded through `TriggerOptions.classify`'s signature), sets
   it as the `GenerationRequest.generationId` for this call, and — wrapped in
@@ -1898,9 +1904,16 @@ classifier. Build `TASK-061` first regardless of the numbering.
   classification call is real, billable spend and must not be silently
   dropped from the session estimate (`FR-103`).
 - `classifyWithLlm` drains the full response (not just the first delta)
-  before checking it against `NON_ACTIONABLE`/`ACTIONABLE` — `maxTokens: 5`
-  keeps this fast — since only a fully-drained response carries the terminal
-  `TokenUsage` the cost-accounting bullet above depends on.
+  before checking it — `maxTokens: 5` keeps this fast — since only a
+  fully-drained response carries the terminal `TokenUsage` the
+  cost-accounting bullet above depends on. The drained response is trimmed
+  and checked for **exact**, case-insensitive equality to `NON_ACTIONABLE`
+  or to `ACTIONABLE` — never substring containment. A response like
+  `"NON_ACTIONABLE because this is small talk"` contains `NON_ACTIONABLE`
+  as a substring but is not cleanly one verdict, so a substring check would
+  wrongly resolve it `'non-actionable'`; exact equality after trimming
+  correctly falls through to the "anything else resolves `'actionable'`"
+  rule below instead.
 - A turn neither rule resolves calls `this.options.classify`, sharing the
   turn's own `AbortController` (the same controller `firedAt` was stamped
   alongside, `TASK-062`).
@@ -1919,15 +1932,24 @@ classifier. Build `TASK-061` first regardless of the numbering.
   has already moved past, and must never be treated as this turn's own
   `'actionable'` fallback.
 - **`live.ts`'s `classify` closure checks the LLM primary credential's health
-  state (`CMP-12`) before calling, as a read, never as a `runFor` attempt.**
-  `CONFIG_REQUIRED`, or `DEGRADED` with its backoff not yet due, skips the
-  network call entirely and fails open to `'actionable'` immediately.
-  Otherwise exactly one attempt is made, under an 800 ms client-side timeout
-  (`ASM-020`) local to this call and distinct from any retry-driven timeout
-  `runFor` applies to a real generation. A timeout or any other failure
-  resolves to `'actionable'` and is never itself reported to `CMP-12` as a
-  probe outcome — this call is not routed through the retry/failover
-  machinery and never drives credential health state either way.
+  state (`CredentialHealth.current.kind`, `src/main/ai/health.ts`) before
+  calling, as a plain property read, never a `run`/`runFor` attempt.** The
+  call is attempted only when that read is exactly `'using-primary'`; every
+  other kind — `'retrying'`, `'using-backup'`, `'degraded'`,
+  `'config-required'` — skips the network call entirely and fails open to
+  `'actionable'` immediately. (Checking only `CONFIG_REQUIRED`/`DEGRADED`
+  was tried first and rejected: `CredentialHealth` has no way to answer
+  "is `DEGRADED`'s backoff due yet," so that version could not actually be
+  built, and it also missed `'using-backup'`/`'retrying'`, which would have
+  kept calling an already-failed-over-from primary.) Otherwise exactly one
+  attempt is made, against the primary's own `ProviderChoice` (never the
+  backup's — `'using-backup'` skips per the rule above), under an 800 ms
+  client-side timeout (`ASM-020`) local to this call and distinct from any
+  retry-driven timeout `runFor` applies to a real generation. A timeout or
+  any other failure resolves to `'actionable'` and is never itself reported
+  to `CMP-12` as a probe outcome — this call is not routed through the
+  retry/failover machinery and never drives credential health state either
+  way.
 - A turn classified `'non-actionable'` returns to `LISTENING` with no card, no
   generation and no transcript entry: the same path a `FR-051` guard failure
   already takes, not a new one.
@@ -1945,7 +1967,15 @@ classifier. Build `TASK-061` first regardless of the numbering.
 - The LLM-confirm path adds no more than 400 ms at p95 to the existing latency
   harness (`NFR-018`), measured with scripted fakes at fixed delays. `TC-133`
   is unaffected because its fixtures resolve via the heuristic path only.
-**Verified by** TC-167, TC-168, TC-169, TC-178, TC-180, TC-181, TC-182, TC-183, TC-184, TC-187
+- `LiveSessionLoop` (`CMP-15`) gains a second tracked field,
+  `classification: Promise<void> | null`, set by the `classify` closure the
+  moment it is invoked and cleared once the closure's own `try`/`finally`
+  (cost-accounting bullet above) completes. `stop()` awaits it alongside the
+  existing `generation` field, in the same step, before closing streams —
+  a session stopped while `CLASSIFYING` must not let teardown, usage
+  snapshotting and compaction finish ahead of that classification's own
+  cost-accounting `finally`.
+**Verified by** TC-167, TC-168, TC-169, TC-178, TC-180, TC-181, TC-182, TC-183, TC-184, TC-187, TC-188
 
 ### TASK-061 STT confidence capability and gate
 **Traces** FR-112, FR-113, ASM-016
@@ -1997,24 +2027,63 @@ classifier. Build `TASK-061` first regardless of the numbering.
   turn). It must measure true turn-end-to-now, confidence gate and classifier
   cost included, which is only possible because it is stamped before either
   runs.
-- Immediately before `CMP-15` would call `onSuggestion` for `suggestion:begin`,
-  it checks `Date.now() - firedAt` against `STALE_DISCARD_MS` (20000). Over the
-  threshold, no `onSuggestion` call is made for `begin`, `line` or `end` — the
-  overlay receives nothing for that generation.
-- A discarded generation still runs to completion and its usage still reaches
-  the Cost Meter (`FR-103`); only the overlay push is suppressed, not the
-  underlying LLM call.
-- The transcript entry for a discarded generation is appended with
-  `status: 'stale'`, distinct from `'cancelled'`.
-- `GenerationStatus` and `TranscriptEntry`'s `'suggestion'` variant both carry
-  `'stale'`. `CH-209`'s wire schema does **not** — the `suggestion:begin` that
-  would carry it is exactly what this task guarantees is never sent, so a wire
-  branch for it would be unreachable by construction. `CardStatus` in
-  `cards.ts` is unchanged for the same reason.
-- A test drives a scripted delay past the threshold and asserts zero
-  `suggestion:begin`/`line`/`end` pushes plus one `'stale'` transcript entry; a
-  delay under the threshold asserts the existing behavior is unaffected.
-**Verified by** TC-172, TC-173, TC-179
+- **Two checkpoints, both comparing `Date.now() - firedAt` against
+  `STALE_DISCARD_MS` (20000), not one.** Checkpoint 1, immediately before
+  `CMP-15` would call `onSuggestion` for `suggestion:begin`: over the
+  threshold, no `onSuggestion` call is made for `begin`, `line` or `end` at
+  all. Checkpoint 2, immediately before `CMP-15` would call `onSuggestion`
+  for this generation's *first* `suggestion:line` (reached only if
+  checkpoint 1 already passed and `begin` already went out): over the
+  threshold, no further `suggestion:line` is forwarded, and exactly one
+  `suggestion:end` is forwarded with wire status `'cancelled'` — not
+  `'stale'`, which is never a wire value — clearing the already-shown card
+  through the same path a superseded generation's cancellation already uses.
+- **Checkpoint 2 exists because checkpoint 1 alone cannot catch a slow
+  first token.** `runGeneration` (`src/main/ai/llm.ts`) calls
+  `events.onBegin` synchronously, before it starts iterating
+  `provider.generate` — before any part of the LLM's own response has
+  arrived. Checkpoint 1 alone is therefore evaluated at essentially
+  `firedAt` plus retrieval time regardless of how long the LLM itself takes,
+  so a provider whose first token takes 25 seconds passes checkpoint 1
+  immediately and streams its obsolete answer in full unless checkpoint 2
+  also runs.
+- At both checkpoints, the generation still runs to completion in the
+  background and its usage still reaches the Cost Meter (`FR-103`); only the
+  overlay push is suppressed or truncated, not the underlying LLM call.
+- The transcript entry for a generation caught at **either** checkpoint is
+  appended with `status: 'stale'`, distinct from `'cancelled'` — even for one
+  caught at checkpoint 2, where the overlay itself was told `'cancelled'`.
+  The transcript and the overlay are allowed to disagree here, the same way
+  `ai/llm.ts`'s `GenerationOutcome.error` already lets a failed generation
+  show as `'cancelled'` while the real failure is recorded elsewhere.
+- `'stale'` is added to **`TranscriptEntry`'s `'suggestion'` variant**
+  (`src/shared/types.ts`), to **`sessionSchema`'s matching `z.enum(...)`**
+  on the `'suggestion'` branch of `transcriptEntry` (`src/shared/ipc.ts` —
+  the *persisted* schema; the separate `z.enum(...)` on `CH-209`'s own
+  payload schema in the same file is untouched), and to
+  **`SessionManager.appendSuggestion`'s parameter type**
+  (`src/main/session.ts`). It is **not** added to `GenerationStatus`
+  (`src/main/ai/llm.ts`) — that type is also the type `CH-209`'s wire
+  payload carries, so adding it there would add it to the wire in the same
+  stroke, contradicting "`CH-209`'s wire schema does not gain it." Missing
+  the `sessionSchema` change specifically would be silent until the first
+  stale entry is written and the session file is later reread:
+  `sessionSchema.safeParse` would then reject the file and the interview
+  would disappear from Session History.
+- `CardStatus` in `cards.ts` is unchanged: a generation caught at checkpoint
+  1 never reaches the renderer, and one caught at checkpoint 2 reaches it
+  labeled `'cancelled'`, the existing value, never a new one.
+- A test drives a scripted delay past the threshold **before `begin`** and
+  asserts zero `suggestion:begin`/`line`/`end` pushes plus one `'stale'`
+  transcript entry. A second test drives a scripted delay past the
+  threshold **between `begin` and the first `line`** (a slow-first-token
+  fake provider) and asserts `begin` was sent, no `line` was ever sent, one
+  `suggestion:end` with wire status `'cancelled'` was sent, and the
+  transcript entry still carries `'stale'`. A third asserts a delay under
+  the threshold at both points is unaffected. A fourth writes a session
+  containing a `'stale'` entry, stops the session, and reads it back via
+  `session:read` to prove `sessionSchema` accepts the persisted file.
+**Verified by** TC-172, TC-173, TC-179, TC-189, TC-190
 
 ### TASK-063 Single-card overlay
 **Traces** FR-091 (amended), ASM-010
@@ -2023,6 +2092,21 @@ classifier. Build `TASK-061` first regardless of the numbering.
 - `MAX_CARDS` is deleted as an exported, tunable constant. `reduceCards`'s
   `'begin'` case holds at most one card; nothing in the module can be
   configured back to a stack.
+- **`reduceCards`'s `'end'` case, for `status: 'cancelled'`, removes the
+  matching card from the array instead of only updating its `status`
+  field — found during a fifth round of spec review (`ADR-047`).** Before
+  this task, `'end'` only ever overwrote `status` in place; nothing removed
+  a card. That went unnoticed under the pre-milestone 3-card cap because a
+  cancelled card was pushed off the front by three more `begin`s soon
+  enough, but with the cap now 1, a cancelled card **is** the only card and
+  nothing evicts it if the next `suggestion:begin` is delayed or never
+  comes. `FR-054`'s "the cancelled partial output must be removed from the
+  overlay" predates this milestone and was never actually implemented by
+  eviction alone; this closes it now that eviction no longer masks the gap.
+  `shouldShowIdle` must see zero cards (and the overlay must show its idle
+  card) immediately after a `'cancelled'` `'end'`, the same as after a
+  `'reset'` or a pause. `'complete'` and `'nonconforming'` are unchanged —
+  both stay visible until replaced or held, per `FR-076`/`FR-102`.
 - `depthOpacity`, the eviction-fade transition, and every prop or code path in
   `SuggestionCardView` that exists only to support more than one simultaneous
   card are removed, not kept behind a cap of 1 (`ADR-047`).
@@ -2049,15 +2133,19 @@ classifier. Build `TASK-061` first regardless of the numbering.
   Lowering the default changes what a stored `null` resolves to; it does not
   touch a stored number. No migration step is needed beyond shipping the new
   default.
-**Verified by** TC-111
+**Verified by** TC-111, TC-191
 
 ### TASK-064 Card hold buffer
 **Traces** FR-115, ASM-018
 **Depends on** TASK-063
 **Acceptance criteria**
 - A `HoldBuffer` sits between the overlay's IPC subscriptions and dispatch into
-  `reduceCards`. `reduceCards` itself, and every existing test describing it,
-  is unchanged.
+  `reduceCards`. `reduceCards`'s `'begin'`/`'line'`/`'reset'` handling, and
+  every existing test describing them, is unchanged by this task. `reduceCards`'s
+  `'end'` case does change, but that change is `TASK-063`'s
+  cancelled-card-removal fix (`ADR-047`), made before this task and orthogonal
+  to it — this task builds the hold buffer in front of whichever `reduceCards`
+  `TASK-063` leaves behind, and does not touch `reduceCards` itself again.
 - **An event whose `generationId` matches the currently shown card's always
   dispatches immediately**, regardless of that card's age — this is not an
   edge case, it is the common case (a shown card's own later lines) and must
