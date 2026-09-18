@@ -1,4 +1,12 @@
-import { useCallback, useRef, type JSX, type PointerEvent as ReactPointerEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type JSX,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from 'react';
 import { SETTINGS_LIMITS } from '../../../shared/defaults.js';
 
 /**
@@ -29,6 +37,9 @@ export interface ResizeGripProps {
 
 const LIMITS = SETTINGS_LIMITS;
 
+/** One arrow-key press, in pixels. There is no drag to derive a step from. */
+const KEYBOARD_STEP_PX = 20;
+
 function clamp(value: number, min: number, max: number): number {
   return Math.round(Math.min(max, Math.max(min, value)));
 }
@@ -42,6 +53,25 @@ export function ResizeGrip({ onResize }: ResizeGripProps): JSX.Element {
    * overlay for each frame of a drag.
    */
   const origin = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
+
+  /**
+   * The window's current size, for the separator's ARIA value (NFR-010).
+   *
+   * A focusable `role="separator"` is a widget with a value, and this one
+   * carries two: `window.innerWidth`/`Height` are the source of truth, so
+   * both are read from there rather than accumulated from resize deltas,
+   * same reason `onPointerMove` and `onKeyDown` do. The `resize` listener
+   * catches every cause, not only this grip's own drag and key presses: a
+   * size the main process clamped, or one restored from a persisted setting
+   * on load, moves the window without either handler ever running.
+   */
+  const [size, setSize] = useState({ width: window.innerWidth, height: window.innerHeight });
+  useEffect(() => {
+    const handleWindowResize = (): void =>
+      setSize({ width: window.innerWidth, height: window.innerHeight });
+    window.addEventListener('resize', handleWindowResize);
+    return () => window.removeEventListener('resize', handleWindowResize);
+  }, []);
 
   const onPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     // Pointer capture is what keeps the drag alive once the pointer leaves the
@@ -84,6 +114,45 @@ export function ResizeGrip({ onResize }: ResizeGripProps): JSX.Element {
     }
   }, []);
 
+  /**
+   * The grip used to be pointer-only, which left resizing entirely
+   * unreachable from the keyboard (NFR-010). Arrow keys step both dimensions
+   * from the current window size, the same values a drag would end on, and
+   * are clamped through the same `LIMITS` a drag is.
+   */
+  const onKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      let dx = 0;
+      let dy = 0;
+      switch (event.key) {
+        case 'ArrowRight':
+          dx = KEYBOARD_STEP_PX;
+          break;
+        case 'ArrowLeft':
+          dx = -KEYBOARD_STEP_PX;
+          break;
+        case 'ArrowDown':
+          dy = KEYBOARD_STEP_PX;
+          break;
+        case 'ArrowUp':
+          dy = -KEYBOARD_STEP_PX;
+          break;
+        default:
+          return;
+      }
+      event.preventDefault();
+      onResize({
+        width: clamp(window.innerWidth + dx, LIMITS.overlayWidthPx.min, LIMITS.overlayWidthPx.max),
+        height: clamp(
+          window.innerHeight + dy,
+          LIMITS.overlayHeightPx.min,
+          LIMITS.overlayHeightPx.max,
+        ),
+      });
+    },
+    [onResize],
+  );
+
   return (
     <div
       data-testid="overlay-resize-grip"
@@ -93,12 +162,22 @@ export function ResizeGrip({ onResize }: ResizeGripProps): JSX.Element {
       className="overlay-resize-grip"
       role="separator"
       aria-orientation="vertical"
-      aria-label="Resize the overlay"
+      aria-label="Resize the overlay. Arrow keys resize; drag for free resizing."
+      // Two dimensions, and a single `aria-valuenow` names only one. Width is
+      // that one, since it is the axis `aria-orientation` already names as
+      // primary; `aria-valuetext` carries the whole state, height included,
+      // for anything that reads it instead of the bare number.
+      aria-valuemin={LIMITS.overlayWidthPx.min}
+      aria-valuemax={LIMITS.overlayWidthPx.max}
+      aria-valuenow={size.width}
+      aria-valuetext={`${size.width} by ${size.height} pixels`}
       title="Drag to resize"
+      tabIndex={0}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
+      onKeyDown={onKeyDown}
     />
   );
 }

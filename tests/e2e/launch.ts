@@ -84,6 +84,18 @@ export async function overlayPage(app: ElectronApplication, replacing?: Page): P
 }
 
 /**
+ * Open a Dashboard sidebar tab (`App.tsx`).
+ *
+ * Every section but Company Profiles sits behind a tab that starts hidden, so
+ * a test that reaches into one has to open it first or every Playwright action
+ * on its controls times out waiting for something that is not displayed.
+ */
+export async function openDashboardTab(dashboard: Page, id: string): Promise<void> {
+  await dashboard.click(`[data-testid="tab-${id}"]`);
+  await dashboard.waitForSelector(`[data-testid="tab-${id}"][aria-selected="true"]`);
+}
+
+/**
  * Push a main-to-renderer message into the overlay.
  *
  * The suggestion channels are driven directly for the same reason the

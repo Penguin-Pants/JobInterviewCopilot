@@ -6,18 +6,21 @@
  * estimate the Dashboard worked out for itself would be a second answer to a
  * question the meter already answers, and the two would disagree the moment a
  * failover moved a stream to a model at a different price (ADR-033).
+ *
+ * The live timer and spend, and any threshold warning, are rendered in the
+ * Dashboard's header rather than here, so they stay visible on every tab
+ * rather than only this one (`App.tsx`). This section keeps the rest of the
+ * live detail and the threshold settings themselves.
  */
 import { useEffect, useState, type JSX } from 'react';
 import type { Settings } from '../../../shared/types.js';
 import { call } from '../call.js';
-import { formatElapsed, formatUsd } from '../format.js';
-import type { SessionState, UsageState, UsageWarning } from '../state.js';
+import type { SessionState, UsageState } from '../state.js';
 
 export interface CostAndUsageProps {
   settings: Settings;
   session: SessionState;
   usage: UsageState | null;
-  warnings: UsageWarning[];
   onSettingsChanged: () => Promise<void>;
 }
 
@@ -25,7 +28,6 @@ export function CostAndUsage({
   settings,
   session,
   usage,
-  warnings,
   onSettingsChanged,
 }: CostAndUsageProps): JSX.Element {
   const [costUsd, setCostUsd] = useState(String(settings.thresholds.costUsd));
@@ -67,12 +69,6 @@ export function CostAndUsage({
       <h2 id="cost-heading">Cost and Usage</h2>
 
       <dl data-testid="live-usage" data-session-active={session.active ? 'true' : 'false'}>
-        <dt>Session time</dt>
-        <dd data-testid="live-timer">{formatElapsed(usage?.elapsedSeconds ?? 0)}</dd>
-
-        <dt>Estimated spend</dt>
-        <dd data-testid="live-spend">{formatUsd(usage?.estimatedUsd ?? 0)}</dd>
-
         <dt>Audio transcribed</dt>
         <dd data-testid="live-audio-seconds">{Math.round(audioSeconds)} seconds</dd>
 
@@ -97,15 +93,6 @@ export function CostAndUsage({
           No session is running. The timer and the estimate move once a session starts.
         </p>
       ) : null}
-
-      {warnings.map((warning) => (
-        <p role="alert" key={warning.kind} data-testid={`usage-warning-${warning.kind}`}>
-          {warning.kind === 'cost'
-            ? `Estimated spend has passed ${formatUsd(warning.threshold)} and is now ${formatUsd(warning.value)}.`
-            : `This session has passed ${warning.threshold} minutes and is now ${Math.round(warning.value)} minutes long.`}{' '}
-          The session is still running. This is a notice, not a stop.
-        </p>
-      ))}
 
       <h3>Thresholds</h3>
       <p>Each threshold warns once per session. Neither one stops a session.</p>
