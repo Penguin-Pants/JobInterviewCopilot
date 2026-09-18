@@ -21,10 +21,11 @@ import type { InvokeChannel, PushChannel, PushPayload } from '../shared/ipc.js';
  * write, and each one's range is enforced by the contract's own schema
  * (CH-126, CH-127).
  *
- * `overlay:setConsentHitTest` is the sixth, and it writes nothing at all: it
- * reports which side of the consent card the pointer is on, so the window can
- * be clickable over the reminder and click-through everywhere else (CH-128,
- * FR-006, FR-083).
+ * `overlay:setPointerOverControls` is the sixth, and it writes nothing at all:
+ * it reports whether the pointer is over one of the overlay's own controls, so
+ * the window can be clickable over the consent reminder and the resize grip
+ * while passing clicks through everywhere else (CH-128, FR-006, FR-081,
+ * FR-083).
  *
  * The push allowlist deliberately carries no error channel. The overlay has two
  * states, idle and suggestions, and no error state (FR-076, TC-096).
@@ -45,7 +46,7 @@ const ALLOWED_INVOKE: readonly InvokeChannel[] = [
   'consent:dismiss',
   'overlay:setFontSize',
   'overlay:setSize',
-  'overlay:setConsentHitTest',
+  'overlay:setPointerOverControls',
 ];
 
 const ALLOWED_PUSH: readonly PushChannel[] = [

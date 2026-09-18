@@ -184,22 +184,24 @@ let overlayInteractive = false;
 let consentReminderPending = false;
 
 /**
- * Whether the pointer is over the consent card (FR-006, FR-083, CH-128).
+ * Whether the pointer is over one of the overlay's own controls (FR-006,
+ * FR-081, FR-083, CH-128).
  *
- * A `BrowserWindow` is a rectangle, so suspending click-through for the
- * reminder suspends it for the whole overlay, and clicks meant for the
- * application behind every other part of the window are intercepted until the
- * reminder is dismissed. `FR-006` says the reminder must not block interaction
- * with other applications, so the window follows the pointer: clickable over
- * the card, click-through everywhere else.
+ * A `BrowserWindow` is a rectangle, so making one control clickable makes the
+ * whole overlay clickable, and clicks meant for the application behind every
+ * other part of it are intercepted. `FR-006` says the consent reminder must not
+ * block interaction with other applications, and the same reasoning covers the
+ * resize grip. So the window follows the pointer: clickable over a control,
+ * click-through everywhere else.
  *
- * It defaults to `true` and is reset to `true` at the start of every reminder.
- * A renderer that never reports, or reports late, therefore leaves the window
- * clickable rather than leaving the dismiss button dead, which is the bug this
- * whole change exists to fix. The blast radius is the failure this can have;
- * an undismissable reminder is not.
+ * It starts `false`, so a click-through overlay is click-through until the
+ * renderer says the pointer has reached something. The one exception is a live
+ * consent reminder, which sets it `true` (see `setConsentReminderPending`): a
+ * renderer that never reports then leaves the dismiss button working rather
+ * than dead, which is the bug this whole change exists to fix. Being briefly
+ * too clickable is a failure this can have; an undismissable reminder is not.
  */
-let consentPointerOverCard = true;
+let pointerOverControls = false;
 
 /**
  * A single instance owns the app. A second launch focuses the existing
@@ -427,6 +429,13 @@ async function bootstrap(): Promise<void> {
     overlayWindow = win;
     wireOverlayWindow();
   });
+
+  // The stored interaction mode, applied to the window just built (FR-083).
+  // `createOverlayWindow` always starts a window click-through, because that is
+  // the shipped default; a user who chose a solid overlay last time would
+  // otherwise get a click-through one on every launch and have to press the
+  // hotkey again. Not persisted, because nothing was chosen here.
+  setOverlayInteractive(!settings.overlayWindow.clickThrough);
 
   registerHotkeys();
 
@@ -738,8 +747,10 @@ function wireOverlayWindow(): void {
 function registerHotkeys(): void {
   const { hotkeys: bindings } = config.get();
 
+  // Persisted: the hotkey is the user choosing how the overlay should behave,
+  // so the next launch opens the way they left it (FR-083, FR-084).
   const interaction = hotkeys.register('toggleInteraction', bindings.toggleInteraction, () =>
-    setOverlayInteractive(!overlayInteractive),
+    setOverlayInteractive(!overlayInteractive, { persist: true }),
   );
   if (!interaction.ok) getLogger().warn('interaction hotkey unavailable', interaction);
 
@@ -801,8 +812,23 @@ async function applyThemeChange(before: Settings, after: Settings): Promise<void
   push(overlayWindow.webContents, 'overlay:theme', after.theme);
 }
 
-function setOverlayInteractive(interactive: boolean): void {
+/**
+ * Set the overlay's interaction mode (FR-083, FR-084).
+ *
+ * `persist` writes the choice to settings, so the next launch opens the way the
+ * user left it. The hotkey and the Dashboard toggle both persist, because both
+ * are the user saying which behavior they want. Reset Overlay does not: it
+ * forces the overlay reachable to rescue a stranded window (`FR-009`), and a
+ * rescue must not silently change a preference.
+ */
+function setOverlayInteractive(interactive: boolean, { persist = false } = {}): void {
   overlayInteractive = interactive;
+  if (persist) {
+    const stored = config.get().overlayWindow;
+    if (stored.clickThrough === interactive) {
+      config.set({ overlayWindow: { ...stored, clickThrough: !interactive } });
+    }
+  }
   applyOverlayClickThrough();
   pushOverlayMode();
 }
@@ -817,7 +843,7 @@ function setOverlayInteractive(interactive: boolean): void {
  */
 function applyOverlayClickThrough(): void {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
-  const clickable = overlayInteractive || (consentReminderPending && consentPointerOverCard);
+  const clickable = overlayInteractive || pointerOverControls;
   // `forward: true` in both directions, and load-bearing in the ignoring one:
   // it is what keeps mouse **move** events reaching the renderer while the
   // window passes clicks through, which is how `CH-128` can report the pointer
@@ -835,10 +861,12 @@ function applyOverlayClickThrough(): void {
 function setConsentReminderPending(pending: boolean): void {
   if (consentReminderPending === pending) return;
   consentReminderPending = pending;
-  // Each reminder starts clickable. A stale "the pointer is elsewhere" from the
-  // last one would open this one with the dismiss button already dead, and the
-  // renderer cannot correct it until the pointer moves (CH-128).
-  if (pending) consentPointerOverCard = true;
+  // Each reminder starts clickable, and hands click-through back when it goes.
+  // A stale "the pointer is elsewhere" would open the next reminder with its
+  // dismiss button already dead, and a stale "the pointer is on the card" would
+  // leave the overlay solid after the card had gone; the renderer corrects
+  // neither until the pointer moves (CH-128).
+  pointerOverControls = pending;
   applyOverlayClickThrough();
 }
 
@@ -1195,8 +1223,14 @@ function registerIpcHandlers(): void {
     return { ok: true as const };
   });
 
+  /**
+   * The Dashboard's click-through toggle (`CH-118`, FR-083).
+   *
+   * Persisted, like the hotkey and for the same reason: this is the user
+   * stating which behavior they want, not a transient nudge.
+   */
   router.handle('overlay:setInteractive', ({ interactive }) => {
-    setOverlayInteractive(interactive);
+    setOverlayInteractive(interactive, { persist: true });
     return { ok: true as const };
   });
 
@@ -1267,14 +1301,22 @@ function registerIpcHandlers(): void {
    * an `IpcError` the overlay had to ignore.
    */
   /**
-   * The pointer crossed onto or off the consent card (`CH-128`, FR-006).
+   * The pointer crossed onto or off one of the overlay's controls (`CH-128`,
+   * FR-006, FR-081, FR-083).
    *
-   * Ignored unless a reminder is actually up, so a renderer cannot use it to
-   * hold the overlay clickable outside the one moment it is meant for.
+   * This is what lets a click-through overlay still own its own dismiss button
+   * and its own resize grip: the window is clickable exactly while the pointer
+   * is on one of them, and passes clicks through everywhere else.
+   *
+   * It is not a capability worth guarding beyond the allowlist. The worst a
+   * renderer can do with it is hold the overlay clickable, which is what the
+   * interaction hotkey does openly, and it cannot make the overlay
+   * click-through while the user has asked for a solid window, because
+   * `overlayInteractive` wins in the applier either way.
    */
-  router.handle('overlay:setConsentHitTest', ({ over }) => {
-    if (!consentReminderPending || consentPointerOverCard === over) return { ok: true as const };
-    consentPointerOverCard = over;
+  router.handle('overlay:setPointerOverControls', ({ over }) => {
+    if (pointerOverControls === over) return { ok: true as const };
+    pointerOverControls = over;
     applyOverlayClickThrough();
     return { ok: true as const };
   });
@@ -1302,7 +1344,14 @@ function registerIpcHandlers(): void {
     // corner is as unreachable as one dragged off-screen (FR-009, FR-081).
     const asIfFresh = {
       ...config.get(),
-      overlayWindow: { x: null, y: null, width: null, height: null, displayId: null },
+      overlayWindow: {
+        ...config.get().overlayWindow,
+        x: null,
+        y: null,
+        width: null,
+        height: null,
+        displayId: null,
+      },
     };
     const pos = resolveOverlayPosition(asIfFresh, displays, primary.id);
 
@@ -1335,6 +1384,7 @@ function registerIpcHandlers(): void {
     overlaySizeWrites.cancel();
     config.set({
       overlayWindow: {
+        ...config.get().overlayWindow,
         x: pos.x,
         y: pos.y,
         width: null,

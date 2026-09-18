@@ -67,7 +67,7 @@ export type OverlayTranslucency = 'acrylic' | 'opacity';
 
 /** Non-secret settings, persisted by electron-store (FR-020). */
 export interface Settings {
-  schemaVersion: 2;
+  schemaVersion: 3;
   activeProfileId: string;
   providers: {
     stt: { primary: ProviderChoice; backup: ProviderChoice | null };
@@ -111,6 +111,20 @@ export interface Settings {
     width: number | null;
     height: number | null;
     displayId: string | null;
+    /**
+     * Whether the overlay passes clicks to whatever is behind it (FR-083).
+     *
+     * True, the shipped default, is the teleprompter behavior: the overlay is
+     * visible and the application underneath still takes every click. False
+     * makes it a solid window that blocks what it covers.
+     *
+     * It is a setting rather than only a hotkey because the overlay is always
+     * on top: it hides part of the screen either way, and a user who is covering
+     * browser toolbar buttons wants the thing that covers them to behave like a
+     * window rather than like a decal. The hotkey still toggles it, and writes
+     * the result here, so what the user last chose is what the next launch does.
+     */
+    clickThrough: boolean;
   };
   firstRun: { modelDownloaded: boolean };
 }

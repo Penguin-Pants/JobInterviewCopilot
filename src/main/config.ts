@@ -44,7 +44,7 @@ const ElectronStore = ((ElectronStoreImport as unknown as { default?: unknown })
 const MAX_CORRUPT_FILES = 3;
 
 /** Bump when the Settings shape changes, and add a step to MIGRATIONS. */
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 3;
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -68,6 +68,21 @@ export const MIGRATIONS: Record<number, (input: UnknownRecord) => UnknownRecord>
       ...input,
       schemaVersion: 2,
       overlayWindow: { width: null, height: null, ...stored },
+    };
+  },
+  /**
+   * 2 -> 3: click-through became a setting rather than only a hotkey (FR-083).
+   *
+   * True for everyone upgrading, because that is what the overlay did before
+   * this field existed. Turning it into a window that blocks what it covers is
+   * a change the user asks for, never one an upgrade makes for them.
+   */
+  2: (input) => {
+    const stored = isPlainObject(input.overlayWindow) ? input.overlayWindow : {};
+    return {
+      ...input,
+      schemaVersion: 3,
+      overlayWindow: { clickThrough: true, ...stored },
     };
   },
 };

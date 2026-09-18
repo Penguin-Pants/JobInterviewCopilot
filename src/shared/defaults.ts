@@ -54,7 +54,7 @@ export const SETTINGS_LIMITS = {
 
 export function defaultSettings(): Settings {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     activeProfileId: '',
     providers: {
       stt: { primary: { providerId: 'deepgram', modelId: 'nova-3' }, backup: null },
@@ -86,7 +86,14 @@ export function defaultSettings(): Settings {
       timeMinutes: 60,
     },
     consentReminderText: DEFAULT_CONSENT_REMINDER_TEXT,
-    overlayWindow: { x: null, y: null, width: null, height: null, displayId: null },
+    overlayWindow: {
+      x: null,
+      y: null,
+      width: null,
+      height: null,
+      displayId: null,
+      clickThrough: true,
+    },
     firstRun: { modelDownloaded: false },
   };
 }

@@ -369,12 +369,22 @@ in its default position.
 **FR-083** The overlay must default to click-through using
 `setIgnoreMouseEvents(true, { forward: true })`.
 
-While an undismissed consent reminder is on screen, the overlay must accept
-clicks over the reminder card so that it can be dismissed (`FR-006`), and must
-stay click-through everywhere else so it does not block interaction with other
-applications. This hit test must fail towards accepting clicks: a reminder that
-cannot be dismissed is a worse failure than an overlay that briefly intercepts
-one.
+Click-through must be a persisted user setting, not only a hotkey. The overlay
+is always on top, so it hides part of the screen either way; the setting is
+whether it also takes the clicks it covers. The shipped default is
+click-through. The `FR-084` hotkey and the Dashboard control both write it, so
+the next launch behaves the way the user left it.
+
+While the overlay is click-through, it must still accept clicks over its own
+controls, which are the consent reminder's dismiss button (`FR-006`) and the
+resize grip (`FR-081`), and must pass clicks through everywhere else so it does
+not block interaction with other applications. Those controls must be reachable
+without the hotkey: an affordance that exists only for a user who already knows
+a keystroke is not an affordance.
+
+The hit test must fail towards accepting clicks while a reminder is on screen: a
+reminder that cannot be dismissed is a worse failure than an overlay that
+briefly intercepts a click.
 
 **FR-084** The `Ctrl+Shift+I` hotkey must toggle between click-through mode and
 interactive mode. The overlay must show a clear visual state difference between
