@@ -67,7 +67,7 @@ export type OverlayTranslucency = 'acrylic' | 'opacity';
 
 /** Non-secret settings, persisted by electron-store (FR-020). */
 export interface Settings {
-  schemaVersion: 1;
+  schemaVersion: 2;
   activeProfileId: string;
   providers: {
     stt: { primary: ProviderChoice; backup: ProviderChoice | null };
@@ -96,9 +96,20 @@ export interface Settings {
     timeMinutes: number;
   };
   consentReminderText: string;
+  /**
+   * Where the overlay sits and how big it is (FR-081, FR-082).
+   *
+   * `width` and `height` are null until the user resizes, which means "use the
+   * shipped default size". Storing the default as a number instead would freeze
+   * whatever 420 by 260 happened to be on the day the file was written, so a
+   * later change to the default could never reach a user who had already run
+   * the app once.
+   */
   overlayWindow: {
     x: number | null;
     y: number | null;
+    width: number | null;
+    height: number | null;
     displayId: string | null;
   };
   firstRun: { modelDownloaded: boolean };

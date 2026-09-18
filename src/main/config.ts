@@ -44,18 +44,32 @@ const ElectronStore = ((ElectronStoreImport as unknown as { default?: unknown })
 const MAX_CORRUPT_FILES = 3;
 
 /** Bump when the Settings shape changes, and add a step to MIGRATIONS. */
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 
 type UnknownRecord = Record<string, unknown>;
 
 /**
- * Migration chain. Version 1 is the baseline so the chain has only the step
- * that stamps it, but the mechanism exists and is exercised by a fake version 0
- * in tests (TC-032). Each step takes the previous shape and returns the next.
+ * Migration chain. Each step takes the previous shape and returns the next.
  */
 export const MIGRATIONS: Record<number, (input: UnknownRecord) => UnknownRecord> = {
   // 0 -> 1: the pre-release shape had no schemaVersion field.
   0: (input) => ({ ...input, schemaVersion: 1 }),
+  /**
+   * 1 -> 2: the overlay became resizable, so its stored geometry gained a size
+   * (FR-081, TASK-052).
+   *
+   * Null, not the default numbers. A user upgrading has never resized, so they
+   * should keep following the shipped default rather than being pinned to
+   * whatever it was on the day they upgraded.
+   */
+  1: (input) => {
+    const stored = isPlainObject(input.overlayWindow) ? input.overlayWindow : {};
+    return {
+      ...input,
+      schemaVersion: 2,
+      overlayWindow: { width: null, height: null, ...stored },
+    };
+  },
 };
 
 function clamp(value: number, min: number, max: number): number {
@@ -92,7 +106,28 @@ export function clampSettings(settings: Settings): Settings {
         clamp(settings.trigger.turnEndGapMs, limits.turnEndGapMs.min, limits.turnEndGapMs.max),
       ),
     },
+    // Null is the default size and must survive clamping as null. Clamping it
+    // to the minimum would silently pin every never-resized overlay to 320 by
+    // 180 on the first load after the upgrade (FR-081).
+    overlayWindow: {
+      ...settings.overlayWindow,
+      width: clampNullable(
+        settings.overlayWindow.width,
+        limits.overlayWidthPx.min,
+        limits.overlayWidthPx.max,
+      ),
+      height: clampNullable(
+        settings.overlayWindow.height,
+        limits.overlayHeightPx.min,
+        limits.overlayHeightPx.max,
+      ),
+    },
   };
+}
+
+/** `clamp` for a value whose null means "unset", which is left alone. */
+function clampNullable(value: number | null, min: number, max: number): number | null {
+  return value === null ? null : Math.round(clamp(value, min, max));
 }
 
 /** Run the migration chain from the file's claimed version up to current. */

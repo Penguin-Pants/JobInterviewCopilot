@@ -33,7 +33,7 @@ const validationResult = z.object({
 });
 
 export const settingsSchema = z.object({
-  schemaVersion: z.literal(1),
+  schemaVersion: z.literal(2),
   activeProfileId: z.string(),
   providers: z.object({
     stt: z.object({ primary: providerChoice, backup: providerChoice.nullable() }),
@@ -65,6 +65,9 @@ export const settingsSchema = z.object({
   overlayWindow: z.object({
     x: z.number().nullable(),
     y: z.number().nullable(),
+    // Null means "the shipped default size". See `Settings.overlayWindow`.
+    width: z.number().nullable(),
+    height: z.number().nullable(),
     displayId: z.string().nullable(),
   }),
   firstRun: z.object({ modelDownloaded: z.boolean() }),
@@ -404,6 +407,39 @@ export const invokeChannels = {
         .int()
         .min(SETTINGS_LIMITS.overlayFontSizePx.min)
         .max(SETTINGS_LIMITS.overlayFontSizePx.max),
+    }),
+    response: ok,
+  },
+  /**
+   * The in-overlay resize grip (`FR-081`, TASK-052).
+   *
+   * The overlay is frameless, and a frameless window has no border for the
+   * operating system to resize by. Electron also warns that a `transparent`
+   * window may stop working when it is made resizable, and the flat-opacity
+   * translucency mode builds exactly such a window. So the window carries
+   * `resizable: true` for the acrylic case, and the renderer carries a grip
+   * that drives this channel for every case. One of the two always works, and
+   * the grip behaves the same in both, which is what keeps the two modes from
+   * being two different products.
+   *
+   * It exists rather than `config:set` for the same reason `CH-126` does: one
+   * channel that can change two numbers cannot be turned into a settings write
+   * (FR-086). The range is the schema's, so an out-of-range value is refused at
+   * the boundary rather than clamped further in.
+   */
+  'overlay:setSize': {
+    id: 'CH-127',
+    payload: z.object({
+      width: z
+        .number()
+        .int()
+        .min(SETTINGS_LIMITS.overlayWidthPx.min)
+        .max(SETTINGS_LIMITS.overlayWidthPx.max),
+      height: z
+        .number()
+        .int()
+        .min(SETTINGS_LIMITS.overlayHeightPx.min)
+        .max(SETTINGS_LIMITS.overlayHeightPx.max),
     }),
     response: ok,
   },

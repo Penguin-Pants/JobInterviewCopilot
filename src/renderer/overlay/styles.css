@@ -41,6 +41,51 @@ input,
   -webkit-app-region: no-drag;
 }
 
+/*
+ * The resize grip (FR-081, CH-127, TASK-052).
+ *
+ * Drawn from the same custom properties as every other piece of chrome, so it
+ * follows the theme and the contrast floor rather than carrying its own colour.
+ * The diagonal is `repeating-linear-gradient` rather than an image or an icon
+ * font: it is three lines, it scales, and it adds no asset to a window that has
+ * to paint within a frame of a suggestion arriving (NFR-007).
+ */
+.overlay-resize-grip {
+  width: 14px;
+  height: 14px;
+  margin-top: 0.25rem;
+  flex: none;
+  cursor: nwse-resize;
+  border-radius: 3px;
+  touch-action: none;
+  background-image: repeating-linear-gradient(
+    135deg,
+    transparent 0 2px,
+    color-mix(in srgb, var(--overlay-text) calc(var(--overlay-chrome-alpha) * 70%), transparent) 2px
+      3px
+  );
+}
+
+/*
+ * The scroll region inside the overlay (TASK-052).
+ *
+ * A default Chromium scrollbar is an opaque light grey band, and the overlay is
+ * a translucent window over the user's desktop, so the bar would be the most
+ * solid thing on screen. It is drawn from the theme instead, and it is thin:
+ * this scrolls only when the content does not fit, which is the case the resize
+ * grip exists to let the user fix.
+ */
+.overlay-surface,
+[data-testid='overlay'] > div {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(
+      in srgb,
+      var(--overlay-text) calc(var(--overlay-chrome-alpha) * 45%),
+      transparent
+    )
+    transparent;
+}
+
 /* The card surface, from the alpha `theme.ts` proved safe (FR-093, ADR-039). */
 .overlay-surface {
   background-color: color-mix(

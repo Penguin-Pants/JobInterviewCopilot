@@ -46,8 +46,9 @@ import {
   createOverlayWindow,
   hasTrueCaptureExclusion,
   overlayBoundsFor,
+  OVERLAY_SIZE,
   resolveOverlayPosition,
-  saveOverlayPosition,
+  saveOverlayBounds,
   supportsAcrylic,
   translucencyChangeNeedsRecreate,
   windowsBuildNumber,
@@ -163,6 +164,24 @@ async function profilesReadyWithin(ms: number): Promise<void> {
 let dashboardWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
 let overlayInteractive = false;
+
+/**
+ * Whether an undismissed consent reminder is on screen (FR-006, FR-083).
+ *
+ * The overlay is click-through by default, which means the operating system
+ * passes every click straight through it to whatever is behind. That is right
+ * for a teleprompter and wrong for the one piece of overlay UI that has to be
+ * clicked: the reminder's dismiss button received no click at all, so the
+ * reminder could not be dismissed and sat over the user's meeting for the whole
+ * session. The hotkey was the only way out and the card does not mention it.
+ *
+ * So click-through is suspended while the reminder is up, and restored to
+ * whatever the user had chosen the moment it is dismissed. This is deliberately
+ * not the same flag as `overlayInteractive`: that one is the user's choice and
+ * has to survive the reminder, and it also turns on the drag region and the
+ * text-size control, neither of which belongs on screen unasked.
+ */
+let consentReminderPending = false;
 
 /**
  * A single instance owns the app. A second launch focuses the existing
@@ -661,7 +680,17 @@ function wireOverlayWindow(): void {
   });
 
   overlayWindow.on('moved', () => {
-    if (overlayWindow) saveOverlayPosition(overlayWindow, config);
+    if (overlayWindow) saveOverlayBounds(overlayWindow, config);
+  });
+  /**
+   * A native resize is persisted like a move (FR-081, FR-082).
+   *
+   * `resized` rather than `resize`: the first fires once when the drag ends,
+   * the second fires for every frame of it, and each one is a synchronous
+   * settings write on the process running the live audio loop.
+   */
+  overlayWindow.on('resized', () => {
+    if (overlayWindow) saveOverlayBounds(overlayWindow, config);
   });
   overlayWindow.on('closed', () => {
     overlayWindow = null;
@@ -728,7 +757,9 @@ async function applyThemeChange(before: Settings, after: Settings): Promise<void
       wireOverlayWindow();
     });
     if (x !== undefined && y !== undefined) rebuilt.setPosition(x, y);
-    rebuilt.setIgnoreMouseEvents(!overlayInteractive, { forward: true });
+    // Through the one applier, so a rebuild during a live consent reminder does
+    // not re-arm click-through over a button that still has to be clicked.
+    applyOverlayClickThrough();
     if (wasVisible) rebuilt.showInactive();
     return;
   }
@@ -738,9 +769,35 @@ async function applyThemeChange(before: Settings, after: Settings): Promise<void
 
 function setOverlayInteractive(interactive: boolean): void {
   overlayInteractive = interactive;
-  if (!overlayWindow || overlayWindow.isDestroyed()) return;
-  overlayWindow.setIgnoreMouseEvents(!interactive, { forward: true });
+  applyOverlayClickThrough();
   pushOverlayMode();
+}
+
+/**
+ * Apply click-through from the two facts that decide it (FR-006, FR-083).
+ *
+ * The single place that calls `setIgnoreMouseEvents`, so the reminder's
+ * suspension cannot be undone by a later caller that only knows about the
+ * user's toggle. The window rebuild on a translucency change went through such
+ * a caller and would have re-armed click-through over a live reminder.
+ */
+function applyOverlayClickThrough(): void {
+  if (!overlayWindow || overlayWindow.isDestroyed()) return;
+  const clickable = overlayInteractive || consentReminderPending;
+  overlayWindow.setIgnoreMouseEvents(!clickable, { forward: true });
+}
+
+/**
+ * The consent reminder went up, or came down (FR-006).
+ *
+ * Going up is reported by `overlay:ready`, which the renderer sends only once
+ * the card has painted, and it is sent again at every session boundary because
+ * `FR-006` is about every live session. Coming down is `consent:dismiss`.
+ */
+function setConsentReminderPending(pending: boolean): void {
+  if (consentReminderPending === pending) return;
+  consentReminderPending = pending;
+  applyOverlayClickThrough();
 }
 
 /**
@@ -867,6 +924,9 @@ function triggerConfigFrom(settings: Settings, serving?: ProviderChoice | null):
  */
 const FONT_SIZE_WRITE_INTERVAL_MS = 200;
 
+/** The same bound, for the same reason, on the resize grip's writes (CH-127). */
+const OVERLAY_SIZE_WRITE_INTERVAL_MS = 200;
+
 /**
  * The throttled writer behind `overlay:setFontSize` (FR-093, CH-126).
  *
@@ -881,6 +941,21 @@ const overlayFontSizeWrites = throttleWrites<number>((px) => {
   const after = config.set({ theme: { ...theme, overlayFontSizePx: px } });
   push(overlayWindow?.webContents, 'overlay:theme', after.theme);
 }, FONT_SIZE_WRITE_INTERVAL_MS);
+
+/**
+ * The throttled writer behind `overlay:setSize` (FR-081, CH-127).
+ *
+ * The grip sends a size per pointer move, so this is rate limited for exactly
+ * the reason `CH-126` is: each commit is a synchronous settings write on the
+ * event loop carrying the live audio and STT loop.
+ *
+ * The **window** is resized on every request rather than only on commit, in the
+ * handler below. Dragging a grip has to track the pointer, and a resize that
+ * moved in 200 ms steps would not. Only the persistence is coalesced.
+ */
+const overlaySizeWrites = throttleWrites<{ width: number; height: number }>(() => {
+  if (overlayWindow && !overlayWindow.isDestroyed()) saveOverlayBounds(overlayWindow, config);
+}, OVERLAY_SIZE_WRITE_INTERVAL_MS);
 
 /** `CH-201`, from the Session Manager rather than from a second copy of the state. */
 function pushSessionState(): void {
@@ -1079,7 +1154,10 @@ function registerIpcHandlers(): void {
   });
 
   router.handle('overlay:savePosition', ({ x, y, displayId }) => {
-    config.set({ overlayWindow: { x, y, displayId } });
+    // Merged onto the stored geometry rather than replacing it. This channel
+    // carries a position only, and writing it as the whole `overlayWindow`
+    // would drop the size the user had dragged the overlay to (FR-081).
+    config.set({ overlayWindow: { ...config.get().overlayWindow, x, y, displayId } });
     return { ok: true as const };
   });
 
@@ -1110,6 +1188,27 @@ function registerIpcHandlers(): void {
   });
 
   /**
+   * The in-overlay resize grip (`CH-127`, FR-081).
+   *
+   * The range is the channel's schema, so an out-of-range size is refused by
+   * the router and never reaches here (CMP-10).
+   *
+   * The window is moved now and stored later: see `overlaySizeWrites`. The
+   * top-left corner is held fixed, so the overlay grows down and to the right
+   * from where the user put it rather than drifting across the screen as it
+   * grows.
+   */
+  router.handle('overlay:setSize', ({ width, height }) => {
+    if (!overlayWindow || overlayWindow.isDestroyed()) {
+      throw new Error('There is no overlay window to resize.');
+    }
+    const { x, y } = overlayWindow.getBounds();
+    overlayWindow.setBounds({ x, y, width, height });
+    overlaySizeWrites.request({ width, height });
+    return { ok: true as const };
+  });
+
+  /**
    * The consent reminder was dismissed (`CH-120`, FR-006).
    *
    * Dismissal is renderer state: the card disappears whether or not this call
@@ -1122,6 +1221,10 @@ function registerIpcHandlers(): void {
    */
   router.handle('consent:dismiss', () => {
     getLogger().info('consent reminder dismissed');
+    // The card is gone, so the overlay goes back to the click-through state the
+    // user chose. Doing this here rather than in the renderer keeps the two
+    // halves of `FR-083` in the process that owns the window (FR-006).
+    setConsentReminderPending(false);
     return { ok: true as const };
   });
 
@@ -1134,7 +1237,13 @@ function registerIpcHandlers(): void {
     const primary = screen.getPrimaryDisplay();
     // Resolve against a cleared position without persisting the cleared state,
     // so a crash between the two writes cannot leave the position blank.
-    const asIfFresh = { ...config.get(), overlayWindow: { x: null, y: null, displayId: null } };
+    // Size is cleared along with position. Reset Overlay is the escape hatch for
+    // an overlay the user cannot reach, and one dragged to 320 by 180 in a
+    // corner is as unreachable as one dragged off-screen (FR-009, FR-081).
+    const asIfFresh = {
+      ...config.get(),
+      overlayWindow: { x: null, y: null, width: null, height: null, displayId: null },
+    };
     const pos = resolveOverlayPosition(asIfFresh, displays, primary.id);
 
     // No overlay is a failure, not a success. Skipping the move and still
@@ -1152,7 +1261,7 @@ function registerIpcHandlers(): void {
     // where it was and made Reset Overlay look like a no-op.
     if (!overlayWindow.isVisible()) overlayWindow.showInactive();
 
-    const bounds = overlayBoundsFor(pos);
+    const bounds = overlayBoundsFor(pos, OVERLAY_SIZE);
     overlayWindow.setBounds(bounds);
     // setBounds and setPosition take different paths on Windows; the second is
     // the direct move and costs nothing when the first already worked.
@@ -1161,7 +1270,18 @@ function registerIpcHandlers(): void {
 
     setOverlayInteractive(true);
     hotkeys.reregisterAll();
-    config.set({ overlayWindow: { x: pos.x, y: pos.y, displayId: pos.displayId } });
+    // A queued grip write carries the size the reset just discarded, and it
+    // would land after this one. Cancelled rather than flushed (CH-127).
+    overlaySizeWrites.cancel();
+    config.set({
+      overlayWindow: {
+        x: pos.x,
+        y: pos.y,
+        width: null,
+        height: null,
+        displayId: pos.displayId,
+      },
+    });
 
     const [appliedX, appliedY] = overlayWindow.getPosition();
     getLogger().info('overlay reset', { requested: pos, applied: { x: appliedX, y: appliedY } });
@@ -1188,6 +1308,11 @@ function registerIpcHandlers(): void {
       buffered: overlayGate.pending,
     });
     overlayGate.noteReady();
+    // Readiness means the consent card has painted, which is exactly the moment
+    // the overlay has to start accepting clicks: a click-through window makes
+    // the card's dismiss button unclickable (FR-006, FR-083). It is reported
+    // again at every session boundary, which is when the card comes back.
+    setConsentReminderPending(true);
     return { ok: true as const };
   });
 
@@ -1289,6 +1414,10 @@ function registerIpcHandlers(): void {
     // nothing to say and sits over whatever the user does next. The gate is
     // cleared with it, so the card cannot outlive the interview it belongs to.
     overlayGate.reset();
+    // And the reminder's claim on click-through goes with it. A hidden window
+    // that still refuses to pass clicks through would be invisible and in the
+    // way, which is the worst of both (FR-083).
+    setConsentReminderPending(false);
     if (overlayWindow && !overlayWindow.isDestroyed()) overlayWindow.hide();
 
     pushSessionState();

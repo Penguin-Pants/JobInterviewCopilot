@@ -2,7 +2,7 @@ import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { ConfigStore } from '../../src/main/config.js';
+import { ConfigStore, CURRENT_SCHEMA_VERSION } from '../../src/main/config.js';
 import { defaultSettings } from '../../src/shared/defaults.js';
 
 /**
@@ -43,7 +43,7 @@ describe('TC-031 settings store recovery through electron-store', () => {
 
     const store = new ConfigStore({ dir });
 
-    expect(store.get().schemaVersion).toBe(1);
+    expect(store.get().schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
     expect(readdirSync(dir).some((n) => n.startsWith('settings.corrupt-'))).toBe(true);
   });
 

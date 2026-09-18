@@ -13,7 +13,7 @@ import {
   translucencyChangeNeedsRecreate,
   windowsBuildNumber,
 } from '../../src/main/windows.js';
-import { defaultSettings } from '../../src/shared/defaults.js';
+import { defaultSettings, SETTINGS_LIMITS } from '../../src/shared/defaults.js';
 
 const DISPLAYS = [
   { id: 1, bounds: { x: 0, y: 0, width: 1920, height: 1080 } },
@@ -67,13 +67,31 @@ describe('TC-004 content protection is never disabled', () => {
 
 /** TC-005 support: the overlay's construction flags. */
 describe('TC-005 overlay window flags', () => {
-  it('is frameless, non-resizable, always on top and off the taskbar', () => {
+  it('is frameless, resizable, always on top and off the taskbar', () => {
     const opts = overlayWindowOptions(defaultSettings(), '/preload.js', 22631);
     expect(opts.frame).toBe(false);
-    expect(opts.resizable).toBe(false);
+    // `FR-081` was amended (TASK-052). The fixed 420 by 260 box could not show
+    // the text it was given at any font size the user was allowed to pick.
+    expect(opts.resizable).toBe(true);
+    expect(opts.minWidth).toBe(SETTINGS_LIMITS.overlayWidthPx.min);
+    expect(opts.minHeight).toBe(SETTINGS_LIMITS.overlayHeightPx.min);
     expect(opts.alwaysOnTop).toBe(true);
     expect(opts.skipTaskbar).toBe(true);
     expect(opts.show).toBe(false);
+  });
+
+  it('opens at the shipped default size until the user has resized (FR-081)', () => {
+    const opts = overlayWindowOptions(defaultSettings(), '/preload.js', 22631);
+    expect(opts.width).toBe(OVERLAY_SIZE.width);
+    expect(opts.height).toBe(OVERLAY_SIZE.height);
+  });
+
+  it('opens at the stored size once the user has resized (FR-081)', () => {
+    const s = defaultSettings();
+    s.overlayWindow = { ...s.overlayWindow, width: 720, height: 480 };
+    const opts = overlayWindowOptions(s, '/preload.js', 22631);
+    expect(opts.width).toBe(720);
+    expect(opts.height).toBe(480);
   });
 
   it('hardens every renderer the same way (FR-086)', () => {
@@ -120,13 +138,13 @@ describe('TC-142 translucency modes are different window constructions', () => {
 describe('TC-036 overlay position', () => {
   it('restores a stored position on a display that still exists', () => {
     const s = defaultSettings();
-    s.overlayWindow = { x: 2000, y: 300, displayId: '2' };
+    s.overlayWindow = { ...s.overlayWindow, x: 2000, y: 300, displayId: '2' };
     expect(resolveOverlayPosition(s, DISPLAYS, 1)).toEqual({ x: 2000, y: 300, displayId: '2' });
   });
 
   it('falls back to the primary display default when the stored display is gone', () => {
     const s = defaultSettings();
-    s.overlayWindow = { x: 2000, y: 300, displayId: '99' };
+    s.overlayWindow = { ...s.overlayWindow, x: 2000, y: 300, displayId: '99' };
     const pos = resolveOverlayPosition(s, DISPLAYS, 1);
     expect(pos.displayId).toBe('1');
     expect(pos.x).toBe(1920 - OVERLAY_SIZE.width - 48);
@@ -134,7 +152,7 @@ describe('TC-036 overlay position', () => {
 
   it('falls back when the stored point is outside its display bounds', () => {
     const s = defaultSettings();
-    s.overlayWindow = { x: 99999, y: 300, displayId: '2' };
+    s.overlayWindow = { ...s.overlayWindow, x: 99999, y: 300, displayId: '2' };
     expect(resolveOverlayPosition(s, DISPLAYS, 1).displayId).toBe('1');
   });
 
@@ -186,5 +204,61 @@ describe('FR-009 overlay reset bounds', () => {
 
   it('carries the resolved position through unchanged', () => {
     expect(overlayBoundsFor({ x: 12, y: 34 })).toMatchObject({ x: 12, y: 34 });
+  });
+
+  it('takes the size it is given, so a reset can restore the default one', () => {
+    expect(overlayBoundsFor({ x: 0, y: 0 }, { width: 900, height: 600 })).toEqual({
+      x: 0,
+      y: 0,
+      width: 900,
+      height: 600,
+    });
+  });
+});
+
+/**
+ * FR-083 regression: the consent reminder could not be dismissed (TASK-052).
+ *
+ * The overlay is click-through, so the operating system passed the click on the
+ * "Got it" button to whatever was behind the overlay and the button never saw
+ * it. The reminder then sat over the user's meeting for the whole session.
+ *
+ * A static scan, for the reason TC-004's is: whether a window ignores mouse
+ * events is an operating-system hit-test property, and the E2E suite drives
+ * clicks through the Chrome DevTools Protocol straight into the renderer, which
+ * bypasses that hit test entirely. Every click assertion in that suite passed
+ * against a window no human could click. What can be checked here is the
+ * invariant that made the bug possible: more than one place deciding
+ * click-through, so one of them could re-arm it over a live reminder.
+ */
+describe('FR-083 click-through has exactly one applier', () => {
+  it('only the constructor default and the one applier touch it', () => {
+    const files = execSync('git ls-files src', { encoding: 'utf8' })
+      .trim()
+      .split('\n')
+      .filter(Boolean);
+
+    const callSites = files.flatMap((file) => {
+      const matches = readFileSync(file, 'utf8').match(/\.setIgnoreMouseEvents\s*\(/g) ?? [];
+      return matches.map(() => file);
+    });
+
+    // `windows.ts` sets the shipped default on a new window and never changes
+    // it; every change goes through `index.ts`. A third site would be a second
+    // opinion about a state the consent reminder depends on.
+    expect(callSites.sort()).toEqual(['src/main/index.ts', 'src/main/windows.ts']);
+    expect(readFileSync('src/main/windows.ts', 'utf8')).toContain(
+      'setIgnoreMouseEvents(true, { forward: true })',
+    );
+  });
+
+  it('the applier consults the consent reminder, not only the user toggle', () => {
+    const source = readFileSync('src/main/index.ts', 'utf8');
+    const applier = source.slice(
+      source.indexOf('function applyOverlayClickThrough'),
+      source.indexOf('function setConsentReminderPending'),
+    );
+    expect(applier).toContain('consentReminderPending');
+    expect(applier).toContain('overlayInteractive');
   });
 });

@@ -345,8 +345,21 @@ reported only through the Dashboard status badge. (`FR-100`)
 the theme mode setting.
 
 **FR-081** The overlay window must be created with `transparent: true`,
-`frame: false`, `alwaysOnTop: true`, `skipTaskbar: true`, `resizable: false`,
+`frame: false`, `alwaysOnTop: true`, `skipTaskbar: true`, `resizable: true`,
 and content protection enabled. (`FR-005`, ASM-005)
+
+The overlay must be resizable by the user, between 320 by 180 and 1600 by 1200,
+and its size must persist with its position (`FR-082`). Because the window is
+frameless, and because Electron does not guarantee that a `transparent` window
+can be resized by its edges, the overlay must also carry its own resize grip in
+interactive mode. Any text that does not fit the window must be reachable by
+scrolling; text must not be clipped away.
+
+> **Amended.** This requirement previously specified `resizable: false` and a
+> fixed 420 by 260 window. That size could not show three cards (`FR-091`) of
+> five lines (`FR-004`) at the text sizes `FR-093` allows, so the overlay
+> clipped its own content and the text-size control hid more text the larger it
+> was set. The window is the thing that had to give.
 
 **FR-082** The overlay must be draggable to any position on any connected
 monitor. Its last position and monitor must persist. On relaunch, if the stored

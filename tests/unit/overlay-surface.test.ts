@@ -91,6 +91,7 @@ describe('TC-096 no overlay error channel', () => {
         // number, rather than `config:set`, which would hand a compromised
         // overlay renderer the settings, the hotkeys and the credentials.
         'overlay:setFontSize',
+        'overlay:setSize',
       ].sort(),
     );
   });

@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { IpcMain } from 'electron';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { CURRENT_SCHEMA_VERSION } from '../../src/main/config.js';
 import { IpcRouter } from '../../src/main/ipc/router.js';
 import { initLogger } from '../../src/main/logger.js';
 import { isIpcError } from '../../src/shared/ipc.js';
@@ -90,7 +91,9 @@ describe('TC-002 router payload validation', () => {
   it('passes a well-formed settings object through unchanged', async () => {
     const settings = defaultSettings();
     router.handle('config:get', () => settings);
-    expect(await ipc.invoke('config:get', undefined)).toMatchObject({ schemaVersion: 1 });
+    expect(await ipc.invoke('config:get', undefined)).toMatchObject({
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+    });
   });
 
   it('refuses to register the same channel twice', () => {

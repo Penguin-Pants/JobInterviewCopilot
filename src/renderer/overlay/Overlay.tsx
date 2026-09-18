@@ -19,6 +19,7 @@ import { resolveOverlayTheme } from './theme.js';
 import { ConsentReminder } from './components/ConsentReminder.js';
 import { FontSizeControl } from './components/FontSizeControl.js';
 import { IdleCard } from './components/IdleCard.js';
+import { ResizeGrip } from './components/ResizeGrip.js';
 import { SuggestionCardView } from './components/SuggestionCardView.js';
 import './styles.css';
 
@@ -273,6 +274,17 @@ function Overlay(): JSX.Element {
     void window.copilot.invoke('consent:dismiss');
   }, []);
 
+  /**
+   * The resize grip's channel (FR-081, CH-127).
+   *
+   * Nothing optimistic here, unlike `setFontSize` above. The window's size is
+   * the window's, so what the user sees is the resize actually applied rather
+   * than a renderer-side guess that the main process may clamp.
+   */
+  const setWindowSize = useCallback((size: { width: number; height: number }) => {
+    void window.copilot.invoke('overlay:setSize', size);
+  }, []);
+
   const setFontSize = useCallback((px: number) => {
     // Shown at once, stored when the main process gets to it. The draft above
     // is cleared as soon as `overlay:theme` comes back carrying this size, so
@@ -305,19 +317,28 @@ function Overlay(): JSX.Element {
       ) : null}
 
       {/*
-        The one region allowed to overflow, and it clips from the top.
-        `OVERLAY_SIZE` is 420 by 260 and cannot be resized (`FR-081`), so three
-        cards of five bullets do not fit at any size the user can choose. What
-        must never be pushed off screen is the newest cue and the consent
-        reminder; what may be is the oldest card, which is the least useful
-        thing on screen. `justify-end` inside `min-h-0 overflow-hidden` puts the
-        newest card against the bottom and clips the rest off the top.
+        The one region allowed to overflow, and it scrolls rather than clips
+        (`FR-081`, TASK-052).
+
+        It used to clip from the top, because the window was a fixed 420 by 260
+        that the user could not resize, so three cards of five bullets did not
+        fit at any font size `FR-093` allowed and something had to go. Text the
+        user could neither read nor reach is not a display, and the text-size
+        control made it worse rather than better: a larger size hid more. The
+        window is resizable now, and what still does not fit scrolls.
+
+        `mt-auto` on the inner stack rather than `justify-end` on the scroller.
+        They look the same until the content overflows, and then they differ in
+        the way that matters: with `justify-end` the overflow goes off the top
+        of the scroll container and cannot be scrolled back to, which is the
+        clipping this change exists to end. A top margin of `auto` pins the
+        newest card to the bottom while leaving the older ones reachable.
       */}
-      <div className="flex min-h-0 flex-1 flex-col justify-end overflow-hidden">
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overflow-x-hidden">
         {idle ? (
           <IdleCard paused={paused} sessionActive={sessionActive} />
         ) : (
-          <div data-testid="card-stack" className="flex flex-col gap-1">
+          <div data-testid="card-stack" className="mt-auto flex flex-col gap-1">
             {/*
               FR-091: a fourth card entering fades the oldest out. The cap lives
               in `cards.ts`; AnimatePresence is what makes the eviction visible
@@ -351,7 +372,15 @@ function Overlay(): JSX.Element {
       </div>
 
       {interactive ? (
-        <FontSizeControl fontSizePx={resolved.fontSizePx} onChange={setFontSize} />
+        /* The two overlay-side controls share one row. `FontSizeControl` keeps
+           its own right alignment, so it takes the free space and the grip sits
+           in the corner, which is where a resize affordance is looked for. */
+        <div className="flex shrink-0 items-end gap-1">
+          <div className="min-w-0 flex-1">
+            <FontSizeControl fontSizePx={resolved.fontSizePx} onChange={setFontSize} />
+          </div>
+          <ResizeGrip onResize={setWindowSize} />
+        </div>
       ) : null}
     </div>
   );

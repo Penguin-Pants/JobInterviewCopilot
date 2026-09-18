@@ -30,15 +30,31 @@ export const KB_CEILING = {
   reembedTargetMs: 5000,
 } as const;
 
+/**
+ * The shipped overlay size, and the range the user may resize it to (FR-081).
+ *
+ * Kept in `shared` rather than beside the window code, because three parties
+ * need the same numbers: the main process builds the window from them, the
+ * settings store clamps a hand-edited file against them, and the overlay's own
+ * resize grip has to stop where they stop.
+ *
+ * The minimum is the smallest box that still shows one suggestion card and the
+ * dismiss button together. The maximum is a guard against a stored value that
+ * would open the overlay larger than any display.
+ */
+export const OVERLAY_DEFAULT_SIZE = { width: 420, height: 260 } as const;
+
 export const SETTINGS_LIMITS = {
   overlayOpacity: { min: 0.3, max: 1.0 },
   overlayFontSizePx: { min: 16, max: 32 },
   turnEndGapMs: { min: 500, max: 1500 },
+  overlayWidthPx: { min: 320, max: 1600 },
+  overlayHeightPx: { min: 180, max: 1200 },
 } as const;
 
 export function defaultSettings(): Settings {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     activeProfileId: '',
     providers: {
       stt: { primary: { providerId: 'deepgram', modelId: 'nova-3' }, backup: null },
@@ -70,7 +86,7 @@ export function defaultSettings(): Settings {
       timeMinutes: 60,
     },
     consentReminderText: DEFAULT_CONSENT_REMINDER_TEXT,
-    overlayWindow: { x: null, y: null, displayId: null },
+    overlayWindow: { x: null, y: null, width: null, height: null, displayId: null },
     firstRun: { modelDownloaded: false },
   };
 }

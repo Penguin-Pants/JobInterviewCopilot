@@ -6,13 +6,14 @@ import {
   assertBackupDiffersFromPrimary,
   clampSettings,
   ConfigStore,
+  CURRENT_SCHEMA_VERSION,
   dropInvalidBackups,
   migrate,
   pruneCorruptFiles,
   quarantineCorruptFile,
   quarantineIfCorrupt,
 } from '../../src/main/config.js';
-import { defaultSettings } from '../../src/shared/defaults.js';
+import { defaultSettings, SETTINGS_LIMITS } from '../../src/shared/defaults.js';
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), 'icp-settings-'));
@@ -22,7 +23,7 @@ function tmp(): string {
 describe('TC-030 defaults', () => {
   it('matches docs/02-architecture.md section 2.1', () => {
     const s = defaultSettings();
-    expect(s.schemaVersion).toBe(1);
+    expect(s.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
     expect(s.providers.stt.primary).toEqual({ providerId: 'deepgram', modelId: 'nova-3' });
     expect(s.providers.stt.backup).toBeNull();
     expect(s.providers.llm.primary).toEqual({
@@ -94,15 +95,46 @@ describe('TC-031 corrupt settings recovery', () => {
 
 /** TC-032: the migration chain runs from a fake version 0. */
 describe('TC-032 migration chain', () => {
-  it('stamps schemaVersion 1 onto a version 0 shape', () => {
+  it('runs a version 0 shape all the way to the current version', () => {
     const migrated = migrate({ activeProfileId: 'x' });
-    expect(migrated.schemaVersion).toBe(1);
+    expect(migrated.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
     expect(migrated.activeProfileId).toBe('x');
   });
 
   it('leaves a current-version object untouched', () => {
-    const input = { schemaVersion: 1, a: 1 };
+    const input = { schemaVersion: CURRENT_SCHEMA_VERSION, a: 1 };
     expect(migrate(input)).toEqual(input);
+  });
+
+  /**
+   * 1 -> 2: the overlay became resizable (FR-081, TASK-052).
+   *
+   * The stored size is null, not the default numbers. A user upgrading has
+   * never resized, so they follow the shipped default rather than being pinned
+   * to whatever it happened to be on the day they upgraded.
+   */
+  it('adds a null overlay size to a version 1 file and keeps its position', () => {
+    const migrated = migrate({
+      schemaVersion: 1,
+      overlayWindow: { x: 100, y: 200, displayId: '2' },
+    });
+
+    expect(migrated.schemaVersion).toBe(2);
+    expect(migrated.overlayWindow).toEqual({
+      x: 100,
+      y: 200,
+      width: null,
+      height: null,
+      displayId: '2',
+    });
+  });
+
+  it('does not overwrite a size that is already stored', () => {
+    const migrated = migrate({
+      schemaVersion: 1,
+      overlayWindow: { x: 0, y: 0, width: 800, height: 600, displayId: '1' },
+    });
+    expect(migrated.overlayWindow).toMatchObject({ width: 800, height: 600 });
   });
 });
 
@@ -118,6 +150,27 @@ describe('TC-033 clamping', () => {
     expect(clamped.theme.overlayOpacity).toBe(1.0);
     expect(clamped.theme.overlayFontSizePx).toBe(16);
     expect(clamped.trigger.turnEndGapMs).toBe(500);
+  });
+
+  /**
+   * The overlay size is nullable, and null is the shipped default rather than
+   * an out-of-range number (FR-081, TASK-052). Clamping it to the minimum would
+   * pin every never-resized overlay to 320 by 180 on the first load after the
+   * upgrade.
+   */
+  it('leaves an unset overlay size unset', () => {
+    const clamped = clampSettings(defaultSettings());
+    expect(clamped.overlayWindow.width).toBeNull();
+    expect(clamped.overlayWindow.height).toBeNull();
+  });
+
+  it('clamps a stored overlay size to its documented range', () => {
+    const s = defaultSettings();
+    s.overlayWindow = { ...s.overlayWindow, width: 99_999, height: 10 };
+
+    const clamped = clampSettings(s);
+    expect(clamped.overlayWindow.width).toBe(SETTINGS_LIMITS.overlayWidthPx.max);
+    expect(clamped.overlayWindow.height).toBe(SETTINGS_LIMITS.overlayHeightPx.min);
   });
 
   it('clamps the low and high ends symmetrically', () => {

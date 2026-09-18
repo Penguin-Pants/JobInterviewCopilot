@@ -41,7 +41,11 @@ export function ConsentReminder({
   return (
     <section
       data-testid="consent-reminder"
-      className="overlay-surface max-h-[55%] shrink-0 overflow-hidden rounded-xl px-3 py-2 shadow-lg"
+      // Scrolls rather than clips (TASK-052). The cap keeps the reminder from
+      // taking the whole window, but a cap that hid the end of a consent notice,
+      // and could hide the dismiss button with it, was not a reminder that had
+      // been displayed (`FR-006`).
+      className="overlay-surface max-h-[55%] shrink-0 overflow-y-auto rounded-xl px-3 py-2 shadow-lg"
     >
       <p className="m-0 text-[13px] leading-snug">{text}</p>
 
