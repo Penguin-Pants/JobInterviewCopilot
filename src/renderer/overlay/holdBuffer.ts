@@ -23,7 +23,16 @@ export class HoldBuffer {
   private queuedId: string | null = null;
   private queuedAt = 0;
   private queue: QueuedEvent[] = [];
-  private timers: unknown[] = [];
+  /**
+   * The queued candidate's own deadline, kept apart from `replayTimers`.
+   *
+   * They shared one array once, and discarding a queued candidate then
+   * cancelled the paced line replays of the card already on screen: that card
+   * silently lost bullets it had already received.
+   */
+  private holdTimer: unknown = null;
+  /** The paced replays of the card being promoted. Only a pause clears these. */
+  private replayTimers: unknown[] = [];
 
   constructor(dispatch: (event: CardEvent) => void, options: HoldBufferOptions) {
     this.dispatch = dispatch;
@@ -36,7 +45,7 @@ export class HoldBuffer {
 
   onEvent(event: CardEvent): void {
     if (event.kind === 'reset') {
-      this.clearQueued();
+      this.clearAll();
       this.shownId = null;
       this.dispatch(event);
       return;
@@ -62,7 +71,7 @@ export class HoldBuffer {
       this.queuedId = id;
       this.queuedAt = this.now();
       const delay = Math.max(0, this.shownAt + this.minHoldMs - this.now());
-      this.timers.push(this.setTimer(() => this.replay(), delay));
+      this.holdTimer = this.setTimer(() => this.replay(), delay);
     }
     if (this.queuedId === id) {
       this.queue.push({
@@ -73,12 +82,15 @@ export class HoldBuffer {
   }
 
   onPause(): void {
-    this.clearQueued();
+    // Everything, not only the queued candidate: a pause takes the overlay to
+    // the idle card, so the promoted card's outstanding lines have nothing
+    // left to land on either.
+    this.clearAll();
     this.shownId = null;
   }
 
   dispose(): void {
-    this.clearQueued();
+    this.clearAll();
     this.shownId = null;
   }
 
@@ -86,10 +98,10 @@ export class HoldBuffer {
     const queued = this.queue;
     this.queue = [];
     this.queuedId = null;
-    this.timers = [];
+    this.holdTimer = null;
     for (const item of queued) {
       if (item.offsetMs === 0) this.dispatchNow(item.event);
-      else this.timers.push(this.setTimer(() => this.dispatchNow(item.event), item.offsetMs));
+      else this.replayTimers.push(this.setTimer(() => this.dispatchNow(item.event), item.offsetMs));
     }
   }
 
@@ -103,10 +115,18 @@ export class HoldBuffer {
     }
   }
 
+  /** Drop the queued candidate. The shown card's own replays are untouched. */
   private clearQueued(): void {
-    for (const timer of this.timers) this.clearTimer(timer);
-    this.timers = [];
+    if (this.holdTimer !== null) this.clearTimer(this.holdTimer);
+    this.holdTimer = null;
     this.queue = [];
     this.queuedId = null;
+  }
+
+  /** A session boundary or a pause: the queued candidate and the replays both. */
+  private clearAll(): void {
+    this.clearQueued();
+    for (const timer of this.replayTimers) this.clearTimer(timer);
+    this.replayTimers = [];
   }
 }

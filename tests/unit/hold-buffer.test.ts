@@ -49,6 +49,38 @@ describe('TC-174 through TC-177 and TC-186 hold buffer', () => {
     expect(seen.at(-1)).toEqual(end('four', 'cancelled'));
   });
 
+  /**
+   * Discarding a queued candidate must not cancel the shown card's own replays.
+   *
+   * The queued candidate's deadline and the paced replays of the card being
+   * promoted shared one timer array once, so cancelling a newly queued
+   * generation cleared the promoted card's pending lines with it and that card
+   * silently lost bullets the renderer had already received.
+   */
+  it("keeps the promoted card's paced lines when a later candidate is discarded", () => {
+    vi.useFakeTimers();
+    const seen: CardEvent[] = [];
+    const buffer = new HoldBuffer((event) => seen.push(event), { minHoldMs: 1500 });
+
+    // 'one' is shown, then 'two' queues behind it with a line 100 ms later.
+    buffer.onEvent(begin('one'));
+    buffer.onEvent(begin('two'));
+    vi.advanceTimersByTime(100);
+    buffer.onEvent(line('two', 1));
+
+    // The hold elapses: 'two' is promoted and its line is scheduled, not flushed.
+    vi.advanceTimersByTime(1400);
+    expect(seen).toEqual([begin('one'), begin('two')]);
+
+    // 'three' queues behind the freshly shown 'two', then is cancelled before
+    // it is ever shown. That must take only its own entries with it.
+    buffer.onEvent(begin('three'));
+    buffer.onEvent(end('three', 'cancelled'));
+
+    vi.advanceTimersByTime(100);
+    expect(seen).toEqual([begin('one'), begin('two'), line('two', 1)]);
+  });
+
   it('reset and pause discard queued work and let the next card through', () => {
     vi.useFakeTimers();
     const seen: CardEvent[] = [];

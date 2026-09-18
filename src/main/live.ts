@@ -706,6 +706,18 @@ export class LiveSessionLoop {
           turn.signal,
           {
             onBegin: (payload) => {
+              // Checkpoint 1 is about this generation's **first** begin, and
+              // this callback can run more than once: `runFor` re-enters the
+              // closure on each retry and on a failover (`health.ts`
+              // `runPrimaryWithLadder`, `runOnBackup`, `runDegraded`), and
+              // `runGeneration` calls `onBegin` at the top of every attempt.
+              // Re-running the clock here stranded a card: a retry starting
+              // past the threshold marked the whole generation stale, which
+              // suppressed the real `onEnd` while the cancellation that clears
+              // the card lives in `onLine` alone, so attempt 1's card stayed on
+              // screen for good. A retry of an already-begun generation is
+              // checkpoint 2's to catch, at its first line.
+              if (began) return;
               if (Date.now() - turn.firedAt > STALE_DISCARD_MS) {
                 stale = true;
                 return;

@@ -22,7 +22,11 @@ import type {
 } from '../../src/shared/types.js';
 import type { SttSession } from '../../src/main/ai/stt.js';
 import type { TurnFired } from '../../src/main/ai/trigger.js';
-import { LiveSessionLoop, type LiveSessionLoopOptions } from '../../src/main/live.js';
+import {
+  LiveSessionLoop,
+  STALE_DISCARD_MS,
+  type LiveSessionLoopOptions,
+} from '../../src/main/live.js';
 import type { GenerationOutcome, LlmProvider } from '../../src/main/ai/llm.js';
 
 const PROFILE_ID = 'p1';
@@ -99,7 +103,7 @@ interface StubOptions {
   resolveLlmProvider?: (choice: ProviderChoice) => LlmProvider;
   runFor?: LiveSessionLoopOptions['health']['runFor'];
   appendTurn?: (source: TranscriptSource, text: string) => Promise<number>;
-  appendSuggestion?: () => Promise<number>;
+  appendSuggestion?: (entry: { status: string }) => Promise<number>;
   /** Makes the one call that sits outside the loop's own try blocks throw. */
   settleThrows?: boolean;
 }
@@ -110,6 +114,7 @@ function makeLoop(stub: StubOptions = {}) {
   const opened: StubSttSession[] = [];
   const settled: string[] = [];
   const noted: { generationId: string; choice: ProviderChoice }[] = [];
+  const pushes: string[] = [];
   const endpoints: number[] = [];
   const settings: Settings = { ...defaultSettings(), ...stub.settings };
 
@@ -146,7 +151,7 @@ function makeLoop(stub: StubOptions = {}) {
     retrieve: stub.retrieve ?? (() => Promise.resolve([])),
     keyFor: stub.keyFor ?? (() => 'k'),
     onTranscript: () => {},
-    onSuggestion: () => {},
+    onSuggestion: (push) => pushes.push(push.channel),
     onSttChoice: () => {},
     onError: (message, detail) => errors.push({ message, detail }),
     onInfo: (message) => infos.push(message),
@@ -161,7 +166,7 @@ function makeLoop(stub: StubOptions = {}) {
     resolveLlmProvider: stub.resolveLlmProvider ?? (() => ({}) as LlmProvider),
   });
 
-  return { loop, errors, infos, opened, settled, noted, endpoints, settings };
+  return { loop, errors, infos, opened, settled, noted, endpoints, settings, pushes };
 }
 
 describe('start and stop', () => {
@@ -610,6 +615,76 @@ describe('answering a turn', () => {
     // Two billable requests, two keys, so neither is lost under the other.
     expect(noted.map((n) => n.generationId)).toEqual(['g1#1', 'g1#2']);
     await loop.stop();
+  });
+
+  /**
+   * TASK-062. Checkpoint 1 belongs to this generation's **first** begin.
+   *
+   * `runFor` re-enters its closure on a retry and on a failover, and
+   * `runGeneration` calls `onBegin` at the top of every attempt, so the
+   * callback runs once per attempt rather than once per generation. Re-running
+   * the staleness clock there stranded a card: a retry starting past the
+   * threshold marked the whole generation stale, and the cancellation that
+   * clears a card lives in `onLine` alone, so attempt 1's card had nothing left
+   * to remove it. A retry of an already-begun generation is checkpoint 2's.
+   */
+  it('does not strand a card when a retry re-enters onBegin past the stale threshold', async () => {
+    const firedAt = 1_000_000;
+    let clock = firedAt;
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+
+    const failure = new Error('the provider hung up') as ProviderError;
+    failure.class = 'server';
+    failure.providerId = 'anthropic';
+    failure.retryable = true;
+
+    const statuses: string[] = [];
+    let call = 0;
+    const { loop, pushes } = makeLoop({
+      appendSuggestion: (entry) => {
+        statuses.push(entry.status);
+        return Promise.resolve(1);
+      },
+      runFor: async (_capability, fn) => {
+        try {
+          return await fn('primary');
+        } catch {
+          // The retry starts well past the threshold, which is the whole point.
+          clock = firedAt + STALE_DISCARD_MS + 1;
+          return await fn('primary');
+        }
+      },
+      generate: (_provider, _request, _signal, events) => {
+        call += 1;
+        events.onBegin({ generationId: 'g1', cardId: 'card-g1', question: 'q' });
+        events.onLine({
+          generationId: 'g1',
+          cardId: 'card-g1',
+          line: `one-${String(call)}`,
+          index: 0,
+        });
+        if (call === 1) return Promise.reject(failure);
+        events.onEnd({ generationId: 'g1', status: 'complete' });
+        return Promise.resolve(outcome());
+      },
+    });
+    await loop.start(PROFILE_ID);
+
+    loop.onFire(turn({ firedAt }));
+    await loop.whenSettled();
+
+    // One begin, both attempts' lines, and the real end: nothing is suppressed
+    // and no card is left on screen with no way to clear it.
+    expect(pushes).toEqual([
+      'suggestion:begin',
+      'suggestion:line',
+      'suggestion:line',
+      'suggestion:end',
+    ]);
+    expect(statuses).toEqual(['complete']);
+
+    await loop.stop();
+    now.mockRestore();
   });
 
   it('does nothing for a turn that was already aborted before it was answered', async () => {

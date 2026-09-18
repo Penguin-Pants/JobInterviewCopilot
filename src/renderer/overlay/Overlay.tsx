@@ -188,6 +188,11 @@ function Overlay(): JSX.Element {
     if (earlyMode) {
       setInteractive(earlyMode.interactive);
       setPaused(earlyMode.paused);
+      // `onPause()` too, exactly as the live handler above does. An overlay
+      // rebuilt while the trigger is already paused reseeds from here and never
+      // sees that `CH-212`, so without this the buffer would still believe a
+      // card is shown and could hold the first suggestion after the resume.
+      if (earlyMode.paused) holdBuffer.onPause();
     }
     const earlySession = lastSeen('state:session');
     if (earlySession) {
