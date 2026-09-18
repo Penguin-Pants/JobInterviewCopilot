@@ -60,7 +60,7 @@ export interface ConnectSpec {
 
 /** What the session hands an adapter so it can emit normalized events. */
 export interface Emitter {
-  transcript(text: string, isFinal: boolean): void;
+  transcript(text: string, isFinal: boolean, confidence?: number): void;
   endpoint(): void;
   error(err: ProviderError): void;
 }
@@ -187,13 +187,14 @@ export class SocketSttSession implements SttSession {
   }
 
   private readonly emitter: Emitter = {
-    transcript: (text, isFinal) => {
+    transcript: (text, isFinal, confidence) => {
       const event: TranscriptEvent = {
         source: this.source,
         text,
         isFinal,
         timestamp: Date.now(),
         providerId: this.choice.providerId,
+        ...(confidence === undefined ? {} : { confidence }),
       };
       for (const h of this.handlers.transcript) h(event);
     },

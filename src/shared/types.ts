@@ -38,6 +38,7 @@ export interface SttModelDescriptor {
   streaming: boolean;
   supportsInterim: boolean;
   supportsEndpointing: boolean;
+  supportsConfidence: boolean;
   /**
    * For a batch model, the audio window it buffers before each request, in
    * milliseconds. Absent for a streaming model, which has no window.
@@ -202,7 +203,7 @@ export type TranscriptEntry = { seq: number } & (
       model: string;
       providerId: string;
       at: string;
-      status: 'complete' | 'cancelled' | 'nonconforming';
+      status: 'complete' | 'cancelled' | 'nonconforming' | 'stale';
     }
 );
 
@@ -252,6 +253,7 @@ export interface TranscriptEvent {
   isFinal: boolean;
   timestamp: number;
   providerId: string;
+  confidence?: number;
 }
 
 /**

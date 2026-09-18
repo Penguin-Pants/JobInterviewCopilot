@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-  MAX_CARDS,
   MAX_LINES_PER_CARD,
   reduceCards,
   shouldShowIdle,
@@ -39,31 +38,18 @@ function run(events: CardEvent[], from: SuggestionCard[] = []): SuggestionCard[]
   return events.reduce<SuggestionCard[]>(reduceCards, from);
 }
 
-/** FR-091, ASM-010, TC-111: the active state holds the 3 most recent cards. */
-describe('TC-111 the card stack holds three', () => {
-  it('keeps every card up to the cap, newest last', () => {
+/** FR-091, ASM-010, TC-111: the active state holds only the newest card. */
+describe('TC-111 the overlay holds one card', () => {
+  it('replaces the current card outright', () => {
     const cards = run([begin('1'), begin('2'), begin('3')]);
-    expect(cards.map((c) => c.cardId)).toEqual(['card-1', 'card-2', 'card-3']);
-  });
-
-  it('a fourth evicts the oldest, and only the oldest', () => {
-    const cards = run([begin('1'), begin('2'), begin('3'), begin('4')]);
-    expect(cards).toHaveLength(MAX_CARDS);
-    expect(cards.map((c) => c.cardId)).toEqual(['card-2', 'card-3', 'card-4']);
-  });
-
-  it('stays at the cap however many arrive', () => {
-    const many = Array.from({ length: 40 }, (_, i) => begin(String(i)));
-    const cards = run(many);
-    expect(cards).toHaveLength(MAX_CARDS);
-    expect(cards.map((c) => c.cardId)).toEqual(['card-37', 'card-38', 'card-39']);
+    expect(cards.map((c) => c.cardId)).toEqual(['card-3']);
   });
 
   it('a begin for a card already held is ignored rather than duplicated', () => {
     // A replay (ADR-015) can re-send a begin the renderer already has. Adding
     // it again would show one generation twice and evict a card still current.
     const cards = run([begin('1'), begin('2'), begin('1')]);
-    expect(cards.map((c) => c.cardId)).toEqual(['card-1', 'card-2']);
+    expect(cards.map((c) => c.cardId)).toEqual(['card-1']);
   });
 });
 
@@ -102,13 +88,19 @@ describe('lines on a card', () => {
 
 /** FR-076: three endings, none of them an error state. */
 describe('a generation ending', () => {
-  it('records each outcome on its own card without changing what it shows', () => {
-    for (const status of ['complete', 'cancelled', 'nonconforming'] as const) {
+  it('records visible terminal outcomes without changing what it shows', () => {
+    for (const status of ['complete', 'nonconforming'] as const) {
       const cards = run([begin('1'), line('1', 0, 'salvaged'), end('1', status)]);
       expect(cards[0]?.status).toBe(status);
       // FR-004: the overlay still shows what was salvaged, whatever the ending.
       expect(cards[0]?.lines.map((l) => l.text)).toEqual(['salvaged']);
     }
+  });
+
+  it('TC-191 removes a cancelled card and shows idle immediately', () => {
+    const cards = run([begin('1'), line('1', 0, 'partial'), end('1', 'cancelled')]);
+    expect(cards).toEqual([]);
+    expect(shouldShowIdle(cards, false)).toBe(true);
   });
 
   it('a stale end for a generation no longer held is ignored', () => {

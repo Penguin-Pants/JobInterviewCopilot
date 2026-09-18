@@ -43,6 +43,7 @@ export interface GenerationRequest {
   /** Up to 3, from `RagEngine.query` (FR-072). */
   chunks: RetrievedChunk[];
   choice: ProviderChoice;
+  promptOverride?: GenerationMessages;
 }
 
 /** The one adapter interface serving both providers (FR-070, ADR-009). */
@@ -67,6 +68,7 @@ export interface GenerationMessages {
  * `TC-092` hold for both without being asserted twice.
  */
 export function buildMessages(req: GenerationRequest): GenerationMessages {
+  if (req.promptOverride) return req.promptOverride;
   return {
     system: SYSTEM_PROMPT,
     user: buildUserMessage({

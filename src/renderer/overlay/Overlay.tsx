@@ -13,7 +13,8 @@ import {
 import { createRoot } from 'react-dom/client';
 import { defaultSettings } from '../../shared/defaults.js';
 import type { Settings } from '../../shared/types.js';
-import { MAX_CARDS, reduceCards, shouldShowIdle } from './cards.js';
+import { reduceCards, shouldShowIdle } from './cards.js';
+import { HoldBuffer } from './holdBuffer.js';
 import { lastSeen } from './earlyPushes.js';
 import { resolveOverlayTheme } from './theme.js';
 import { ConsentReminder } from './components/ConsentReminder.js';
@@ -84,6 +85,8 @@ function Overlay(): JSX.Element {
     () => lastSeen('overlay:theme') ?? defaultSettings().theme,
   );
   const [cards, dispatch] = useReducer(reduceCards, []);
+  const holdBuffer = useMemo(() => new HoldBuffer(dispatch, { minHoldMs: 1500 }), [dispatch]);
+  useEffect(() => () => holdBuffer.dispose(), [holdBuffer]);
   /**
    * Bumped at every session boundary, to re-report readiness (FR-006, FR-008).
    *
@@ -154,15 +157,22 @@ function Overlay(): JSX.Element {
       window.copilot.on('overlay:mode', (p) => {
         setInteractive(p.interactive);
         setPaused(p.paused);
+        if (p.paused) holdBuffer.onPause();
       }),
       window.copilot.on('state:session', (p) => {
         setSessionActive(p.active);
         setSessionId(p.sessionId);
         setPaused(p.paused);
       }),
-      window.copilot.on('suggestion:begin', (payload) => dispatch({ kind: 'begin', payload })),
-      window.copilot.on('suggestion:line', (payload) => dispatch({ kind: 'line', payload })),
-      window.copilot.on('suggestion:end', (payload) => dispatch({ kind: 'end', payload })),
+      window.copilot.on('suggestion:begin', (payload) =>
+        holdBuffer.onEvent({ kind: 'begin', payload }),
+      ),
+      window.copilot.on('suggestion:line', (payload) =>
+        holdBuffer.onEvent({ kind: 'line', payload }),
+      ),
+      window.copilot.on('suggestion:end', (payload) =>
+        holdBuffer.onEvent({ kind: 'end', payload }),
+      ),
     ];
 
     // A push that landed between the `useState` initializers above and this
@@ -194,7 +204,7 @@ function Overlay(): JSX.Element {
     if (earlyNotice) setCaptureNotice(earlyNotice.message);
 
     return () => off.forEach((unsubscribe) => unsubscribe());
-  }, []);
+  }, [holdBuffer]);
 
   /**
    * A session boundary clears the stack and brings the reminder back (FR-006).
@@ -224,7 +234,7 @@ function Overlay(): JSX.Element {
   useEffect(() => {
     if (sessionId !== null && sessionId !== lastSessionId.current) {
       setDismissed(false);
-      dispatch({ kind: 'reset' });
+      holdBuffer.onEvent({ kind: 'reset' });
       // And readiness is owed again. `OverlayGate.reset()` closes the gate at
       // this same boundary, so until this is answered the next interview's
       // suggestions buffer rather than arriving over a reminder that has not
@@ -232,7 +242,7 @@ function Overlay(): JSX.Element {
       setReadyEpoch((epoch) => epoch + 1);
     }
     lastSessionId.current = sessionId;
-  }, [sessionId]);
+  }, [sessionId, holdBuffer]);
 
   /**
    * Report readiness once the consent card is on screen (FR-008, ADR-016).
@@ -295,7 +305,7 @@ function Overlay(): JSX.Element {
   }, []);
 
   const idle = shouldShowIdle(cards, paused);
-  const visible = cards.slice(-MAX_CARDS);
+  const visible = cards;
   const reminderUp = consent !== null && !dismissed;
 
   /**
@@ -494,13 +504,8 @@ function Overlay(): JSX.Element {
               pause and every session boundary, because those unmount the stack.
             */}
             <AnimatePresence>
-              {visible.map((card, position) => (
-                <SuggestionCardView
-                  key={card.cardId}
-                  card={card}
-                  depth={visible.length - 1 - position}
-                  slide={slide}
-                />
+              {visible.map((card) => (
+                <SuggestionCardView key={card.cardId} card={card} slide={slide} />
               ))}
             </AnimatePresence>
           </div>

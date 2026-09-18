@@ -176,9 +176,12 @@ describe('TC-050 normalized events', () => {
       name: 'deepgram',
       make: createDeepgramProvider,
       modelId: 'nova-3',
-      interim: { channel: { alternatives: [{ transcript: 'tell me' }] }, is_final: false },
+      interim: {
+        channel: { alternatives: [{ transcript: 'tell me', confidence: 0.7 }] },
+        is_final: false,
+      },
       final: {
-        channel: { alternatives: [{ transcript: 'tell me about yourself' }] },
+        channel: { alternatives: [{ transcript: 'tell me about yourself', confidence: 0.91 }] },
         is_final: true,
       },
       text: 'tell me about yourself',
@@ -227,13 +230,14 @@ describe('TC-050 normalized events', () => {
       expect(seen[1]!.isFinal).toBe(true);
       expect(seen[1]!.text).toBe(c.text);
       for (const event of seen) {
-        expect(Object.keys(event).sort()).toEqual(
-          ['isFinal', 'providerId', 'source', 'text', 'timestamp'].sort(),
-        );
+        const keys = ['isFinal', 'providerId', 'source', 'text', 'timestamp'];
+        if (c.name === 'deepgram') keys.push('confidence');
+        expect(Object.keys(event).sort()).toEqual(keys.sort());
         expect(event.providerId).toBe(c.name);
         expect(event.source).toBe('interviewer');
         expect(typeof event.timestamp).toBe('number');
       }
+      expect(seen[1]?.confidence).toBe(c.name === 'deepgram' ? 0.91 : undefined);
       await session.close();
     });
   }

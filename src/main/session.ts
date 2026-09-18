@@ -325,7 +325,7 @@ export class SessionManager {
     bullets: string[];
     model: string;
     providerId: string;
-    status: 'complete' | 'cancelled' | 'nonconforming';
+    status: 'complete' | 'cancelled' | 'nonconforming' | 'stale';
   }): Promise<number> {
     return this.append({ kind: 'suggestion', ...entry, at: this.now().toISOString() });
   }

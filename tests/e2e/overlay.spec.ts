@@ -427,23 +427,16 @@ test('TC-110 the idle card shows before the first suggestion and whenever paused
 });
 
 /* ------------------------------------------------------------------ *
- * TC-111  the three-card cap
+ * TC-111  single-card replacement
  * ------------------------------------------------------------------ */
 
-test('TC-111 a fourth suggestion leaves exactly three cards, the oldest gone', async () => {
+test('TC-111 a new suggestion replaces the card already shown', async () => {
   await setSession(true);
-  for (const id of ['1', '2', '3']) await generate(id, `Question ${id}`, [`Cue ${id}`]);
-  await expect(overlay.locator('[data-testid="suggestion-card"]')).toHaveCount(3);
-
+  await generate('1', 'Question 1', ['Cue 1']);
   await generate('4', 'Question 4', ['Cue 4']);
-  // FR-091, ASM-010. AnimatePresence keeps the leaving card mounted while it
-  // fades, so the count is polled rather than read once: asserting immediately
-  // would be asserting on the exit animation rather than on the cap.
-  await expect(overlay.locator('[data-testid="suggestion-card"]')).toHaveCount(3);
+  await expect(overlay.locator('[data-testid="suggestion-card"]')).toHaveCount(1);
   await expect(overlay.locator('[data-card-id="card-1"]')).toHaveCount(0);
-  for (const id of ['2', '3', '4']) {
-    await expect(overlay.locator(`[data-card-id="card-${id}"]`)).toHaveCount(1);
-  }
+  await expect(overlay.locator('[data-card-id="card-4"]')).toHaveCount(1);
 });
 
 /* ------------------------------------------------------------------ *

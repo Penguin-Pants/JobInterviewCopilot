@@ -19,8 +19,6 @@ import { BulletReveal } from './BulletReveal.js';
  */
 export interface SuggestionCardViewProps {
   card: SuggestionCard;
-  /** Depth in the stack, 0 being the newest. Older cards recede. */
-  depth: number;
   /** False under `prefers-reduced-motion` (NFR-010). */
   slide: boolean;
 }
@@ -42,22 +40,17 @@ export const CARD_EXIT_DURATION_SECONDS = 0.25;
  * Making it the target also means a card recedes smoothly as it is pushed down
  * the stack, rather than jumping a step each time a new one arrives.
  */
-export function depthOpacity(depth: number): number {
-  return depth === 0 ? 1 : Math.max(0.55, 1 - depth * 0.22);
-}
-
-export function SuggestionCardView({ card, depth, slide }: SuggestionCardViewProps): JSX.Element {
+export function SuggestionCardView({ card, slide }: SuggestionCardViewProps): JSX.Element {
   return (
     <motion.article
       data-testid="suggestion-card"
       data-card-id={card.cardId}
       data-status={card.status}
-      data-depth={depth}
       className="overlay-surface rounded-xl px-3 py-2 shadow-lg"
       initial={slide ? { opacity: 0, y: 10 } : { opacity: 0 }}
       // Opacity only, never a scale: a scale would move text the user may be
       // halfway through reading.
-      animate={slide ? { opacity: depthOpacity(depth), y: 0 } : { opacity: depthOpacity(depth) }}
+      animate={slide ? { opacity: 1, y: 0 } : { opacity: 1 }}
       exit={{ opacity: 0 }}
       transition={{ duration: CARD_EXIT_DURATION_SECONDS, ease: 'easeOut' }}
       // Position only. A full layout projection measures every card on every

@@ -10,9 +10,13 @@
  * (`CMP-05` must not), so firing means handing a `TurnFired` to its owner.
  */
 import type { TranscriptEvent } from '../../shared/types.js';
+import { classifyHeuristically, type ActionabilityVerdict } from './actionability.js';
 
 /** The five states of `docs/02-architecture.md` section 5.3. */
-export type TriggerState = 'IDLE' | 'LISTENING' | 'AWAITING_TURN_END' | 'GENERATING' | 'PAUSED';
+export type TriggerState =
+  'IDLE' | 'LISTENING' | 'AWAITING_TURN_END' | 'CLASSIFYING' | 'GENERATING' | 'PAUSED';
+
+export const CONFIDENCE_THRESHOLD = 0.55;
 
 /** The trigger subset of `Settings`, plus the capability read off the STT model. */
 export interface TriggerConfig {
@@ -28,6 +32,7 @@ export interface TriggerConfig {
    * ignored here and the local timer is the only turn-end source.
    */
   supportsEndpointing: boolean;
+  supportsConfidence?: boolean;
   /**
    * How long the transcript source can be silent while the speaker is still
    * talking, from the model's registry entry. Zero for a streaming model, which
@@ -66,6 +71,7 @@ export interface TurnFired {
   candidateContext: string;
   /** Aborted when a newer turn end arrives, or on pause or stop (FR-054, FR-075). */
   signal: AbortSignal;
+  firedAt: number;
 }
 
 /** How the owner wires itself to the machine (FR-050 to FR-055). */
@@ -76,6 +82,7 @@ export interface TriggerOptions {
    * `noteGenerationSettled` when the stream ends, however it ends.
    */
   onFire: (turn: TurnFired) => void;
+  classify?: (text: string, signal: AbortSignal) => Promise<ActionabilityVerdict>;
   onStateChange?: (state: TriggerState, previous: TriggerState) => void;
   /** Entering `PAUSED` pushes the overlay idle state (FR-053). */
   onOverlayIdle?: () => void;
@@ -155,6 +162,8 @@ export class TriggerMachine {
 
   private readonly timers: TriggerTimers;
   private readonly fire: (turn: TurnFired) => void;
+  private readonly classify: (text: string, signal: AbortSignal) => Promise<ActionabilityVerdict>;
+  private readonly hasClassifier: boolean;
   private readonly onStateChange?: (state: TriggerState, previous: TriggerState) => void;
   private readonly onOverlayIdle?: () => void;
   private readonly newGenerationId: () => string;
@@ -162,6 +171,7 @@ export class TriggerMachine {
   private gapHandle: unknown = null;
   /** The interviewer text accumulated for the turn being assembled. */
   private turnText = '';
+  private lastFinalConfidence: number | undefined;
 
   /**
    * A native endpoint that arrived before the text it ends (FR-050).
@@ -180,11 +190,17 @@ export class TriggerMachine {
   private candidateText = '';
   private candidateGapHandle: unknown = null;
 
-  private inFlight: { generationId: string; controller: AbortController } | null = null;
+  private inFlight: {
+    generationId: string;
+    controller: AbortController;
+    kind: 'classification' | 'generation';
+  } | null = null;
 
   constructor(options: TriggerOptions) {
     this.config = options.config;
     this.fire = options.onFire;
+    this.classify = options.classify ?? (() => Promise.resolve('actionable'));
+    this.hasClassifier = options.classify !== undefined;
     this.onStateChange = options.onStateChange;
     this.onOverlayIdle = options.onOverlayIdle;
     this.newGenerationId = options.newGenerationId ?? defaultGenerationId;
@@ -262,6 +278,7 @@ export class TriggerMachine {
 
     if (event.isFinal) {
       this.turnText = appendSegment(this.turnText, event.text);
+      this.lastFinalConfidence = event.confidence;
     }
 
     // An interim before the first final arms nothing: FR-050 says a turn end is
@@ -334,6 +351,7 @@ export class TriggerMachine {
 
   private resetTurns(): void {
     this.turnText = '';
+    this.lastFinalConfidence = undefined;
     this.candidateText = '';
     this.candidateTurns = [];
     this.endpointPending = false;
@@ -414,7 +432,7 @@ export class TriggerMachine {
    * drop the state back to `LISTENING` under a live generation (FR-054).
    */
   noteGenerationSettled(generationId: string): void {
-    if (this.inFlight?.generationId !== generationId) return;
+    if (this.inFlight?.generationId !== generationId || this.inFlight.kind !== 'generation') return;
     this.inFlight = null;
     if (this.state !== 'GENERATING') return;
 
@@ -474,7 +492,9 @@ export class TriggerMachine {
     if (this.state === 'IDLE' || this.state === 'PAUSED') return;
 
     const question = this.turnText.trim();
+    const confidence = this.lastFinalConfidence;
     this.turnText = '';
+    this.lastFinalConfidence = undefined;
     this.endpointPending = false;
 
     if (!passesTurnGuard(question, this.config)) {
@@ -493,17 +513,55 @@ export class TriggerMachine {
     // starts, so the two never overlap on the overlay (FR-054, ASM-004, TC-086).
     this.abortInFlight();
 
+    const firedAt = Date.now();
+    if (
+      this.config.supportsConfidence &&
+      confidence !== undefined &&
+      confidence < CONFIDENCE_THRESHOLD
+    ) {
+      this.transition('LISTENING');
+      return;
+    }
+
     const controller = new AbortController();
     const generationId = this.newGenerationId();
-    this.inFlight = { generationId, controller };
-    this.transition('GENERATING');
-
-    this.fire({
+    const marker: NonNullable<TriggerMachine['inFlight']> = {
       generationId,
-      question,
-      candidateContext: this.candidateContext,
-      signal: controller.signal,
-    });
+      controller,
+      kind: 'classification',
+    };
+    this.inFlight = marker;
+    this.transition('CLASSIFYING');
+
+    const settle = (result: ActionabilityVerdict): void => {
+      if (this.inFlight !== marker) return;
+      if (result === 'non-actionable') {
+        this.inFlight = null;
+        this.transition(this.turnPending ? 'AWAITING_TURN_END' : 'LISTENING');
+        return;
+      }
+      marker.kind = 'generation';
+      this.transition('GENERATING');
+      this.fire({
+        generationId,
+        question,
+        candidateContext: this.candidateContext,
+        signal: controller.signal,
+        firedAt,
+      });
+    };
+    const heuristic = classifyHeuristically(question);
+    if (heuristic !== null) {
+      settle(heuristic);
+      return;
+    }
+    if (!this.hasClassifier) {
+      settle('actionable');
+      return;
+    }
+    void this.classify(question, controller.signal)
+      .catch((): ActionabilityVerdict => 'actionable')
+      .then(settle);
   }
 
   private abortInFlight(): void {

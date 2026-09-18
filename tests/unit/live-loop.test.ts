@@ -83,6 +83,7 @@ function turn(over: Partial<TurnFired> = {}): TurnFired {
     question: 'Tell me about a time you shipped something hard',
     candidateContext: '',
     signal: new AbortController().signal,
+    firedAt: Date.now(),
     ...over,
   };
 }
