@@ -52,7 +52,7 @@ not a flake. It is fixed or deleted, never retried.
 | TC-002 | U | IPC payload validation | A payload failing its `zod` schema is rejected, logged and not forwarded to the handler |
 | TC-003 | U | Contract type test | `expectTypeOf` proves the preload bridge and the main handlers share one type per channel |
 | TC-004 | U | Content protection never disabled | A source scan finds zero occurrences of `setContentProtection(false)` under `src/` |
-| TC-005 | E | Overlay window flags | Overlay reports `transparent`, frameless, `alwaysOnTop`, `skipTaskbar`, not resizable, and content protection enabled before first show |
+| TC-005 | E | Overlay window flags | Overlay reports `transparent`, frameless, `alwaysOnTop`, `skipTaskbar`, resizable with the documented minimum size, and content protection enabled before first show |
 | TC-006 | E | Consent reminder precedes the first suggestion | The consent element is in the DOM before the first `suggestion:line` renders, in every session |
 | TC-007 | E | Renderer isolation | Every renderer reports `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`, and `window.require` is undefined |
 | TC-008 | E | Navigation and CSP lockdown | `will-navigate` to an external URL is blocked, `window.open` is denied, CSP has no `unsafe-eval` |
@@ -70,7 +70,7 @@ not a flake. It is fixed or deleted, never retried.
 | TC-025 | U | Primary and backup differ | Setting backup equal to primary is rejected at the config layer, not only in the UI |
 | TC-030 | U | Defaults | Fresh settings match every default in `02-architecture.md` section 2.1 exactly |
 | TC-031 | I | Corrupt settings | A malformed file is replaced with defaults and renamed to `settings.corrupt-<epochMillis>.json`. The original content survives. The generated name contains no colon and creates successfully on Windows, where an ISO 8601 name would throw |
-| TC-032 | U | Migration chain | A stubbed version 0 file runs the chain and lands on `schemaVersion: 1` |
+| TC-032 | U | Migration chain | A stubbed version 0 file runs the chain and lands on the current `schemaVersion`; a version 1 file gains a null overlay size and keeps its position |
 | TC-033 | U | Clamping | `overlayOpacity` 5.0 clamps to 1.00, `overlayFontSizePx` 4 clamps to 16, `turnEndGapMs` 99 clamps to 500 |
 | TC-034 | I | Hotkey conflict | A rebind that `globalShortcut.register` rejects returns an error and the previous accelerator is still registered |
 | TC-035 | E | Hotkey rebind live | After a rebind the new accelerator works and the old one does nothing, with no restart |

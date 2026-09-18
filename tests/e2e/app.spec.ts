@@ -8,6 +8,7 @@ import {
   type ElectronApplication,
   type Page,
 } from '@playwright/test';
+import { SETTINGS_LIMITS } from '../../src/shared/defaults.js';
 
 /**
  * Milestone 0 end-to-end coverage: TC-005, TC-007, TC-008, TC-009, TC-148.
@@ -42,10 +43,16 @@ test.afterEach(async () => {
 /** TC-005: the overlay's flags and its content protection. */
 test('TC-005 overlay is frameless, on top, off the taskbar and content protected', async () => {
   const flags = await app.evaluate(({ BrowserWindow }) => {
-    const overlay = BrowserWindow.getAllWindows().find((w) => !w.isResizable());
+    // Found by `alwaysOnTop`, which the Dashboard and the hidden audio worker
+    // are not. It used to be found by `!isResizable()`, and `FR-081` was
+    // amended to make the overlay resizable (TASK-052), so that predicate then
+    // matched no window at all and this test failed on its null guard rather
+    // than on the flag it is about.
+    const overlay = BrowserWindow.getAllWindows().find((w) => w.isAlwaysOnTop());
     if (!overlay) return null;
     return {
       resizable: overlay.isResizable(),
+      minimumSize: overlay.getMinimumSize(),
       alwaysOnTop: overlay.isAlwaysOnTop(),
       visible: overlay.isVisible(),
       title: overlay.getTitle(),
@@ -53,7 +60,13 @@ test('TC-005 overlay is frameless, on top, off the taskbar and content protected
   });
 
   expect(flags).not.toBeNull();
-  expect(flags!.resizable).toBe(false);
+  // Resizable, with a floor. An overlay the user can drag to nothing is as
+  // unreadable as the fixed 420 by 260 box this replaced (FR-081).
+  expect(flags!.resizable).toBe(true);
+  expect(flags!.minimumSize).toEqual([
+    SETTINGS_LIMITS.overlayWidthPx.min,
+    SETTINGS_LIMITS.overlayHeightPx.min,
+  ]);
   expect(flags!.alwaysOnTop).toBe(true);
 });
 

@@ -33,7 +33,7 @@ const validationResult = z.object({
 });
 
 export const settingsSchema = z.object({
-  schemaVersion: z.literal(1),
+  schemaVersion: z.literal(2),
   activeProfileId: z.string(),
   providers: z.object({
     stt: z.object({ primary: providerChoice, backup: providerChoice.nullable() }),
@@ -65,6 +65,9 @@ export const settingsSchema = z.object({
   overlayWindow: z.object({
     x: z.number().nullable(),
     y: z.number().nullable(),
+    // Null means "the shipped default size". See `Settings.overlayWindow`.
+    width: z.number().nullable(),
+    height: z.number().nullable(),
     displayId: z.string().nullable(),
   }),
   firstRun: z.object({ modelDownloaded: z.boolean() }),
@@ -405,6 +408,66 @@ export const invokeChannels = {
         .min(SETTINGS_LIMITS.overlayFontSizePx.min)
         .max(SETTINGS_LIMITS.overlayFontSizePx.max),
     }),
+    response: ok,
+  },
+  /**
+   * The in-overlay resize grip (`FR-081`, TASK-052).
+   *
+   * The overlay is frameless, and a frameless window has no border for the
+   * operating system to resize by. Electron also warns that a `transparent`
+   * window may stop working when it is made resizable, and the flat-opacity
+   * translucency mode builds exactly such a window. So the window carries
+   * `resizable: true` for the acrylic case, and the renderer carries a grip
+   * that drives this channel for every case. One of the two always works, and
+   * the grip behaves the same in both, which is what keeps the two modes from
+   * being two different products.
+   *
+   * It exists rather than `config:set` for the same reason `CH-126` does: one
+   * channel that can change two numbers cannot be turned into a settings write
+   * (FR-086). The range is the schema's, so an out-of-range value is refused at
+   * the boundary rather than clamped further in.
+   */
+  'overlay:setSize': {
+    id: 'CH-127',
+    payload: z.object({
+      width: z
+        .number()
+        .int()
+        .min(SETTINGS_LIMITS.overlayWidthPx.min)
+        .max(SETTINGS_LIMITS.overlayWidthPx.max),
+      height: z
+        .number()
+        .int()
+        .min(SETTINGS_LIMITS.overlayHeightPx.min)
+        .max(SETTINGS_LIMITS.overlayHeightPx.max),
+    }),
+    response: ok,
+  },
+  /**
+   * Where the pointer is while the consent reminder is up (`FR-006`, `FR-083`,
+   * TASK-052).
+   *
+   * The reminder has to be clickable, and a `BrowserWindow` is a rectangle: the
+   * only way to make its dismiss button receive a click is to stop the whole
+   * window ignoring mouse events, which then intercepts clicks meant for the
+   * application behind every other part of the overlay. `FR-006` says the
+   * reminder must not block interaction with other applications, so the window
+   * follows the pointer instead: clickable over the card, click-through
+   * everywhere else.
+   *
+   * This is what `setIgnoreMouseEvents`'s `forward: true` exists for. A window
+   * that ignores mouse events still delivers **move** events to its renderer,
+   * so the renderer can say which side of the card the pointer is on even while
+   * the window is passing clicks through.
+   *
+   * It fails safe. The main process starts each reminder assuming the pointer
+   * is over the card, so a renderer that never reports, or reports late, leaves
+   * the window clickable: the worst case is the behavior before this channel
+   * existed, never a reminder that cannot be dismissed.
+   */
+  'overlay:setConsentHitTest': {
+    id: 'CH-128',
+    payload: z.object({ over: z.boolean() }),
     response: ok,
   },
 } as const;

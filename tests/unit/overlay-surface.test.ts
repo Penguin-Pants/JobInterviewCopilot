@@ -90,7 +90,9 @@ describe('TC-096 no overlay error channel', () => {
         // FR-093's in-overlay text size control. One channel that changes one
         // number, rather than `config:set`, which would hand a compromised
         // overlay renderer the settings, the hotkeys and the credentials.
+        'overlay:setConsentHitTest',
         'overlay:setFontSize',
+        'overlay:setSize',
       ].sort(),
     );
   });

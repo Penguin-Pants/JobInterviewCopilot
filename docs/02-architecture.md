@@ -95,7 +95,7 @@ logs/
 
 ```ts
 interface Settings {
-  schemaVersion: 1;
+  schemaVersion: 2;
   activeProfileId: string;
   providers: {
     stt: {
@@ -134,6 +134,8 @@ interface Settings {
   overlayWindow: {
     x: number | null;
     y: number | null;
+    width: number | null;                  // 320 .. 1600, null = default 420
+    height: number | null;                 // 180 .. 1200, null = default 260
     displayId: string | null;
   };
   firstRun: { modelDownloaded: boolean };
@@ -723,6 +725,8 @@ payload is rejected and logged, never passed through.
 | CH-124 | `model:ensure` | none | `ModelDownloadState` |
 | CH-125 | `doc:pickFiles` | `{ profileId }` | `DocumentRecord[]` |
 | CH-126 | `overlay:setFontSize` | `{ px }` | `{ ok: true }` |
+| CH-127 | `overlay:setSize` | `{ width, height }` | `{ ok: true }` |
+| CH-128 | `overlay:setConsentHitTest` | `{ over }` | `{ ok: true }` |
 
 **Changes made in Milestone 2 (ADR-030, DoD 9).** `CH-121` and `CH-122` landed
 in Milestone 0 and are recorded here for the first time. The rest are new:
@@ -822,6 +826,27 @@ directions, so a channel cannot be added in code and left undocumented again.
   overlay renderer cannot write settings, rebind hotkeys or replace
   credentials (`FR-086`). One channel that changes one number, range-checked by
   its own schema, keeps that boundary intact.
+
+**Changes made in TASK-052.**
+
+- `CH-127` `overlay:setSize` is new, and `schemaVersion` moves to `2` to carry
+  the overlay's stored size. `FR-081` was amended: the overlay is resizable now,
+  because the fixed 420 by 260 window could not show three cards (`FR-091`) of
+  five lines (`FR-004`) at the text sizes `FR-093` allows, and clipped the
+  difference away. The window carries `resizable: true`, which is enough for
+  the acrylic mode's native edges; the renderer carries a grip driving this
+  channel, which is what makes resizing work on the `transparent` window the
+  flat-opacity mode builds and behave identically in both. It exists rather
+  than `config:set` for the same reason `CH-126` does.
+- `CH-128` `overlay:setConsentHitTest` is new, and it writes nothing. The
+  consent reminder has to be clickable (`FR-006`) and a `BrowserWindow` is a
+  rectangle, so making its dismiss button reachable makes the whole overlay
+  reachable and intercepts clicks meant for the application behind it. The
+  window follows the pointer instead: clickable over the card, click-through
+  everywhere else. `setIgnoreMouseEvents`'s `forward: true` is what makes this
+  possible, because an ignoring window still delivers move events to its
+  renderer. It fails safe: each reminder starts clickable, so a renderer that
+  never reports leaves the button working rather than dead.
 
 ```ts
 /** CH-124 and CH-214 both carry this (ADR-011, ADR-026, ADR-030). */

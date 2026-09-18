@@ -224,12 +224,11 @@ test('TC-006 the consent reminder renders before the first suggestion, every ses
   // Still there: the reminder is not dismissed by a suggestion arriving.
   await expect(reminder).toBeVisible();
 
-  // The reminder is *displayed*, not merely present. `OVERLAY_SIZE` is 420 by
-  // 260 and cannot be resized, and scaling this card with the suggestion text
-  // size once pushed it 2386 px above the viewport: a reminder nobody can read
-  // does not satisfy `FR-006`. The shell keeps it out of the region that clips,
-  // and the newest cue sits against the bottom of the window whatever is above
-  // it, because the stack clips from the top.
+  // The reminder is *displayed*, not merely present. The overlay opens at 420
+  // by 260, and scaling this card with the suggestion text size once pushed it
+  // 2386 px above the viewport: a reminder nobody can read does not satisfy
+  // `FR-006`. The shell keeps it out of the region that scrolls, and the newest
+  // cue sits against the bottom of the window whatever is above it.
   //
   // Both are polled, because the claim is about the **settled** layout. A card
   // enters under a transform, so a single read lands mid-animation: measured on
@@ -256,6 +255,92 @@ test('TC-006 the consent reminder renders before the first suggestion, every ses
   // FR-006: dismissible.
   await overlay.click('[data-testid="consent-dismiss"]');
   await expect(reminder).toHaveCount(0);
+
+  // And dismissible by a **person**, which is a stronger claim than the click
+  // above makes (FR-083, TASK-052).
+  //
+  // The overlay is click-through, so Windows passes a real click straight
+  // through the window to whatever is behind it. Playwright's click does not go
+  // that way: it is delivered through the DevTools Protocol into the renderer's
+  // input pipeline, which never consults the operating system's hit test. So
+  // this assertion, and every other click in this suite, passed for a release
+  // in which the "Got it" button received no click at all and the reminder sat
+  // over the user's meeting for the whole session.
+  //
+  // What can be observed from here is the window state the hit test reads.
+  // `BrowserWindow` has no getter for it, so the setter is recorded instead,
+  // and the sequence is driven rather than sampled: a session boundary brings
+  // the reminder back, which must make the window clickable, and dismissing it
+  // must hand click-through back.
+  const calls = await app.evaluate(({ BrowserWindow }) => {
+    const seen: boolean[] = [];
+    // The overlay is the only always-on-top window: the Dashboard is an
+    // ordinary window and the audio worker never shows at all.
+    const [target] = BrowserWindow.getAllWindows().filter((w) => w.isAlwaysOnTop());
+    if (!target) return null;
+    const original = target.setIgnoreMouseEvents.bind(target);
+    (globalThis as unknown as { __icpIgnoreCalls: boolean[] }).__icpIgnoreCalls = seen;
+    target.setIgnoreMouseEvents = ((ignore: boolean, options?: unknown) => {
+      seen.push(ignore);
+      return original(ignore, options as never);
+    }) as typeof target.setIgnoreMouseEvents;
+    return true;
+  });
+  expect(calls, 'the overlay window was not found in the main process').toBe(true);
+
+  await setSession(false);
+  await setSession(true, 'session-e2e-clickthrough');
+  await expect(reminder).toBeVisible();
+
+  // Clickable while the reminder is up, whatever the user's interaction mode.
+  await expect
+    .poll(async () =>
+      app.evaluate(() =>
+        (globalThis as unknown as { __icpIgnoreCalls: boolean[] }).__icpIgnoreCalls.at(-1),
+      ),
+    )
+    .toBe(false);
+
+  // And click-through everywhere the reminder is not (FR-006, FR-083, CH-128).
+  //
+  // The window is a rectangle, so accepting the click on the dismiss button
+  // accepts every click on the overlay unless the hit test narrows it. Without
+  // this, a reminder on a 1600 by 1200 overlay would swallow the user's clicks
+  // on the meeting behind it until they dismissed it.
+  const card = await overlay.locator('[data-testid="consent-reminder"]').boundingBox();
+  expect(card, 'the reminder has no box to test against').not.toBeNull();
+
+  // Below the card, which is the suggestion area rather than the reminder.
+  await overlay.mouse.move(card!.x + card!.width / 2, card!.y + card!.height + 24);
+  await expect
+    .poll(async () =>
+      app.evaluate(() =>
+        (globalThis as unknown as { __icpIgnoreCalls: boolean[] }).__icpIgnoreCalls.at(-1),
+      ),
+    )
+    .toBe(true);
+
+  // And back over the card, so the button is reachable again.
+  await overlay.mouse.move(card!.x + card!.width / 2, card!.y + card!.height / 2);
+  await expect
+    .poll(async () =>
+      app.evaluate(() =>
+        (globalThis as unknown as { __icpIgnoreCalls: boolean[] }).__icpIgnoreCalls.at(-1),
+      ),
+    )
+    .toBe(false);
+
+  await overlay.click('[data-testid="consent-dismiss"]');
+
+  // And click-through again the moment it is dismissed, because the user never
+  // asked for an interactive overlay.
+  await expect
+    .poll(async () =>
+      app.evaluate(() =>
+        (globalThis as unknown as { __icpIgnoreCalls: boolean[] }).__icpIgnoreCalls.at(-1),
+      ),
+    )
+    .toBe(true);
 
   // And back for the next session, because FR-006 says every session. A user
   // who dismissed it last interview has not consented to this one.
@@ -606,6 +691,99 @@ test('TC-116 theme mode, opacity and translucency apply with no app restart', as
   // launched.
   expect(doomed.isClosed()).toBe(true);
   await expect(dashboard.locator('[data-testid="dashboard-header"]')).toBeVisible();
+});
+
+/* ------------------------------------------------------------------ *
+ * FR-081  the overlay resizes, and its text is reachable
+ * ------------------------------------------------------------------ */
+
+test('FR-081 the overlay resizes from its grip, persists the size and scrolls', async () => {
+  const bounds = async (): Promise<{ width: number; height: number }> =>
+    app.evaluate(({ BrowserWindow }) => {
+      const [overlayWindow] = BrowserWindow.getAllWindows().filter((w) => w.isAlwaysOnTop());
+      const box = overlayWindow?.getBounds();
+      return { width: box?.width ?? 0, height: box?.height ?? 0 };
+    });
+
+  // It opens at the shipped default, and the window is resizable now. `FR-081`
+  // used to require the opposite, and a fixed 420 by 260 box could not show
+  // three cards of five bullets at any text size `FR-093` allows.
+  expect(await bounds()).toEqual({ width: 420, height: 260 });
+
+  // The grip belongs to interactive mode, like the text-size control. In
+  // click-through mode the window passes every click to the application behind
+  // it, so a grip drawn there would be a control that cannot be used.
+  await pushToOverlay(app, 'overlay:mode', { interactive: false, paused: false });
+  await expect(overlay.locator('[data-testid="overlay-resize-grip"]')).toHaveCount(0);
+
+  await pushToOverlay(app, 'overlay:mode', { interactive: true, paused: false });
+  const grip = overlay.locator('[data-testid="overlay-resize-grip"]');
+  await expect(grip).toBeVisible();
+
+  // Dragged, not called: this goes through the pointer handlers, `CH-127`'s
+  // schema and the main process's `setBounds`, which is the whole path.
+  const box = await grip.boundingBox();
+  expect(box, 'the grip has no box to drag').not.toBeNull();
+  await overlay.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+  await overlay.mouse.down();
+  await overlay.mouse.move(box!.x + 260, box!.y + 200, { steps: 8 });
+  await overlay.mouse.up();
+
+  await expect.poll(async () => (await bounds()).width).toBeGreaterThan(600);
+  await expect.poll(async () => (await bounds()).height).toBeGreaterThan(400);
+
+  // The top-left corner is held, so the overlay grows from where the user put
+  // it rather than drifting across the screen as it grows.
+  const size = await bounds();
+
+  // And the size survives a restart, like the position does (FR-082).
+  await app.close();
+  ({ app, dashboard } = await launchApp(userDataDir));
+  overlay = await overlayPage(app);
+  expect(await bounds()).toEqual(size);
+});
+
+test('FR-081 text that does not fit is scrollable rather than clipped', async () => {
+  // Five long bullets on three cards at the largest text size, in the smallest
+  // window the user can make. Something has to overflow, and what overflows has
+  // to remain reachable: the overlay used to clip it away, and the text-size
+  // control then hid more text the larger it was set (FR-004, FR-091, FR-093).
+  await pushToOverlay(app, 'overlay:theme', {
+    mode: 'dark',
+    accent: '#6366F1',
+    overlayTranslucency: 'opacity',
+    overlayOpacity: 0.85,
+    overlayFontSizePx: SETTINGS_LIMITS.overlayFontSizePx.max,
+  });
+  await setSession(true);
+
+  for (const id of ['1', '2', '3']) {
+    await generate(
+      id,
+      `Question ${id}`,
+      Array.from({ length: 5 }, (_, i) => `Bullet ${i} with enough words in it to wrap twice over`),
+    );
+  }
+  await expect(overlay.locator('[data-testid="suggestion-card"]')).toHaveCount(3);
+
+  const region = overlay.locator('[data-testid="card-region"]');
+  const scroll = await region.evaluate((el) => ({
+    scrollHeight: el.scrollHeight,
+    clientHeight: el.clientHeight,
+    overflowY: getComputedStyle(el).overflowY,
+  }));
+
+  expect(scroll.overflowY, 'the card region clips instead of scrolling').toBe('auto');
+  expect(scroll.scrollHeight).toBeGreaterThan(scroll.clientHeight);
+
+  // The oldest card is above the fold and can be scrolled back to. `justify-end`
+  // on a scroll container puts overflow off the top where it cannot be reached,
+  // which is the clipping this replaced.
+  const scrolledTo = await region.evaluate((el) => {
+    el.scrollTop = 0;
+    return el.scrollTop;
+  });
+  expect(scrolledTo).toBe(0);
 });
 
 /* ------------------------------------------------------------------ *

@@ -12,12 +12,19 @@ import type { InvokeChannel, PushChannel, PushPayload } from '../shared/ipc.js';
  * Both directions are allowlisted. An unrestricted invoke forwarder would give
  * a compromised overlay renderer the whole main-process surface, including
  * writing settings, rebinding hotkeys and replacing credentials. The overlay
- * needs four channels, so it gets four (FR-086).
+ * needs six channels, so it gets six (FR-086).
  *
  * `overlay:setFontSize` is the fourth, added with the in-overlay text size
- * control (FR-093). It exists rather than `config:set` for the reason above:
- * one channel that can change one number cannot be turned into a settings
- * write, and its range is enforced by the contract's own schema (CH-126).
+ * control (FR-093), and `overlay:setSize` is the fifth, added with the resize
+ * grip (FR-081). Both exist rather than `config:set` for the reason above: a
+ * channel that can change one or two numbers cannot be turned into a settings
+ * write, and each one's range is enforced by the contract's own schema
+ * (CH-126, CH-127).
+ *
+ * `overlay:setConsentHitTest` is the sixth, and it writes nothing at all: it
+ * reports which side of the consent card the pointer is on, so the window can
+ * be clickable over the reminder and click-through everywhere else (CH-128,
+ * FR-006, FR-083).
  *
  * The push allowlist deliberately carries no error channel. The overlay has two
  * states, idle and suggestions, and no error state (FR-076, TC-096).
@@ -37,6 +44,8 @@ const ALLOWED_INVOKE: readonly InvokeChannel[] = [
   'overlay:savePosition',
   'consent:dismiss',
   'overlay:setFontSize',
+  'overlay:setSize',
+  'overlay:setConsentHitTest',
 ];
 
 const ALLOWED_PUSH: readonly PushChannel[] = [

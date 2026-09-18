@@ -181,20 +181,24 @@ describe('TC-008 content security policy', () => {
  * directions are now allowlisted, and the overlay's list is deliberately tiny.
  */
 describe('FR-086 preload invoke allowlists', () => {
-  it('the overlay may invoke only the four channels its UI needs', () => {
+  it('the overlay may invoke only the six channels its UI needs', () => {
     const source = readFileSync('src/preload/overlay.ts', 'utf8');
     const block = /ALLOWED_INVOKE[^=]*=\s*\[([^\]]*)\]/s.exec(source)?.[1] ?? '';
     const channels = [...block.matchAll(/'([^']+)'/g)].map((m) => m[1]).sort();
 
-    // The fourth is `overlay:setFontSize` (CH-126, TASK-043). `FR-093` wants
-    // the size adjustable from the overlay, and the only alternative was
-    // `config:set`, which is the whole settings object and so the whole of what
-    // this allowlist exists to keep away from this window.
+    // The fourth is `overlay:setFontSize` (CH-126, TASK-043) and the fifth is
+    // `overlay:setSize` (CH-127, TASK-052). `FR-093` wants the text size
+    // adjustable from the overlay and `FR-081` wants the window resizable from
+    // it; the only alternative in both cases was `config:set`, which is the
+    // whole settings object and so the whole of what this allowlist exists to
+    // keep away from this window.
     expect(channels).toEqual([
       'consent:dismiss',
       'overlay:ready',
       'overlay:savePosition',
+      'overlay:setConsentHitTest',
       'overlay:setFontSize',
+      'overlay:setSize',
     ]);
     for (const forbidden of ['secrets:set', 'config:set', 'hotkey:rebind', 'session:start']) {
       expect(block, `overlay must not reach ${forbidden}`).not.toContain(forbidden);
@@ -582,6 +586,14 @@ describe('FR-086 the preload allowlists account for every invoke channel', () =>
     // one field would be two ways to write it and two things to keep in step
     // (FR-093, TASK-043).
     'overlay:setFontSize',
+    // Resizing is done by dragging the overlay's own grip. The Dashboard's
+    // equivalent is Reset Overlay, which restores the default size along with
+    // the default position, so there is nothing for it to write here (FR-009,
+    // FR-081, TASK-052).
+    'overlay:setSize',
+    // The pointer is over the overlay or it is not. The Dashboard has no
+    // opinion about that and no window of its own to hit-test (CH-128).
+    'overlay:setConsentHitTest',
   ];
 
   it('the Dashboard may invoke every channel not explicitly reserved to another window', () => {
