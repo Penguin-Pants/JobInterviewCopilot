@@ -1,6 +1,8 @@
 import {
   useCallback,
+  useEffect,
   useRef,
+  useState,
   type JSX,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
@@ -51,6 +53,25 @@ export function ResizeGrip({ onResize }: ResizeGripProps): JSX.Element {
    * overlay for each frame of a drag.
    */
   const origin = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
+
+  /**
+   * The window's current size, for the separator's ARIA value (NFR-010).
+   *
+   * A focusable `role="separator"` is a widget with a value, and this one
+   * carries two: `window.innerWidth`/`Height` are the source of truth, so
+   * both are read from there rather than accumulated from resize deltas,
+   * same reason `onPointerMove` and `onKeyDown` do. The `resize` listener
+   * catches every cause, not only this grip's own drag and key presses: a
+   * size the main process clamped, or one restored from a persisted setting
+   * on load, moves the window without either handler ever running.
+   */
+  const [size, setSize] = useState({ width: window.innerWidth, height: window.innerHeight });
+  useEffect(() => {
+    const handleWindowResize = (): void =>
+      setSize({ width: window.innerWidth, height: window.innerHeight });
+    window.addEventListener('resize', handleWindowResize);
+    return () => window.removeEventListener('resize', handleWindowResize);
+  }, []);
 
   const onPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     // Pointer capture is what keeps the drag alive once the pointer leaves the
@@ -142,6 +163,14 @@ export function ResizeGrip({ onResize }: ResizeGripProps): JSX.Element {
       role="separator"
       aria-orientation="vertical"
       aria-label="Resize the overlay. Arrow keys resize; drag for free resizing."
+      // Two dimensions, and a single `aria-valuenow` names only one. Width is
+      // that one, since it is the axis `aria-orientation` already names as
+      // primary; `aria-valuetext` carries the whole state, height included,
+      // for anything that reads it instead of the bare number.
+      aria-valuemin={LIMITS.overlayWidthPx.min}
+      aria-valuemax={LIMITS.overlayWidthPx.max}
+      aria-valuenow={size.width}
+      aria-valuetext={`${size.width} by ${size.height} pixels`}
       title="Drag to resize"
       tabIndex={0}
       onPointerDown={onPointerDown}

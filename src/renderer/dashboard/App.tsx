@@ -22,7 +22,13 @@
  * natural Tab order, and Up/Down/Home/End move and activate among the rest,
  * the way a native OS tab strip does.
  */
-import { useEffect, useState, type JSX, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  type JSX,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from 'react';
 import { contrastRatio, parseHex } from '../../shared/color.js';
 import { call } from './call.js';
 import { formatElapsed, formatUsd } from './format.js';
@@ -61,16 +67,26 @@ const REFUSALS: Record<string, string> = {
 };
 
 /**
- * White, or the Dashboard's own dark text colour, whichever reads better on
- * the chosen accent. The accent is user-editable (Overlay and appearance),
- * so button text cannot assume white will always hold against it.
+ * White or black, whichever reads better on the chosen accent. The accent is
+ * user-editable (Overlay and appearance), so button text cannot assume white
+ * will always hold against it.
+ *
+ * Pure black and pure white, not this file's own `--text` (`#16161a`).
+ * Picking the higher-contrast of two *fixed* candidates only guarantees the
+ * 4.5:1 target `App.tsx` owes the accent's text if the candidates sit at the
+ * extremes: at the one background luminance where black and white give equal
+ * contrast, that shared value works out to ~4.58:1, comfortably clearing the
+ * target either way. `#16161a` is not that extreme, and a mid-grey accent
+ * (around `#777777`) picked it while both candidates sat under 4.5:1: white
+ * scored ~4.48:1, `#16161a` scored ~4.03:1, and "the better of two failing
+ * options" was returned as if it had passed.
  */
 function accentForeground(accentHex: string): string {
   const accent = parseHex(accentHex);
   if (!accent) return '#ffffff';
   const white = { r: 255, g: 255, b: 255 };
-  const dark = { r: 22, g: 22, b: 26 }; // #16161a, this file's own --text.
-  return contrastRatio(accent, white) >= contrastRatio(accent, dark) ? '#ffffff' : '#16161a';
+  const black = { r: 0, g: 0, b: 0 };
+  return contrastRatio(accent, white) >= contrastRatio(accent, black) ? '#ffffff' : '#000000';
 }
 
 /**
@@ -173,6 +189,15 @@ export function Dashboard(): JSX.Element {
   const [starting, setStarting] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [activeTab, setActiveTab] = useState<TabId>('profiles');
+  const content = useRef<HTMLDivElement | null>(null);
+
+  // All six panels share this one scrolling element, so its scroll position
+  // survives a tab switch on its own. Left alone, scrolling deep into a long
+  // panel and then opening a shorter one opened it part-way down, or even
+  // past its own content, with nothing of that tab on screen at all.
+  useEffect(() => {
+    content.current?.scrollTo({ top: 0 });
+  }, [activeTab]);
 
   // FR-080: the Dashboard follows the theme mode setting. `system` leaves the
   // attribute off so the stylesheet falls through to `prefers-color-scheme`.
@@ -335,7 +360,7 @@ export function Dashboard(): JSX.Element {
       <div className="dashboard-body">
         <TabNav activeTab={activeTab} onSelect={setActiveTab} />
 
-        <div className="dashboard-content">
+        <div className="dashboard-content" ref={content}>
           <div
             id="panel-profiles"
             role="tabpanel"
