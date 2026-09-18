@@ -685,9 +685,17 @@ export class LiveSessionLoop {
     };
     let attempt = 0;
     let stale = false;
-    let began = false;
     let firstLineChecked = false;
     let staleEndSent = false;
+    /**
+     * Whether a card for this generation is on the overlay right now.
+     *
+     * Not "has a begin ever been sent": an attempt that fails before producing
+     * a bullet resolves `'cancelled'`, and `reduceCards` removes a cancelled
+     * card outright (`ADR-047`), so the retry has to send its own `begin` or
+     * its lines arrive for a card that no longer exists.
+     */
+    let cardUp = false;
 
     try {
       await this.options.health.runFor('llm', async (target) => {
@@ -706,23 +714,30 @@ export class LiveSessionLoop {
           turn.signal,
           {
             onBegin: (payload) => {
-              // Checkpoint 1 is about this generation's **first** begin, and
-              // this callback can run more than once: `runFor` re-enters the
-              // closure on each retry and on a failover (`health.ts`
-              // `runPrimaryWithLadder`, `runOnBackup`, `runDegraded`), and
-              // `runGeneration` calls `onBegin` at the top of every attempt.
-              // Re-running the clock here stranded a card: a retry starting
-              // past the threshold marked the whole generation stale, which
-              // suppressed the real `onEnd` while the cancellation that clears
-              // the card lives in `onLine` alone, so attempt 1's card stayed on
-              // screen for good. A retry of an already-begun generation is
-              // checkpoint 2's to catch, at its first line.
-              if (began) return;
+              // This callback runs once per **attempt**, not once per
+              // generation: `runFor` re-enters the closure on each retry and on
+              // a failover (`health.ts` `runPrimaryWithLadder`, `runOnBackup`,
+              // `runDegraded`), and `runGeneration` calls `onBegin` at the top
+              // of every one. What it does here turns on whether a card is
+              // still on the overlay.
+              //
+              // Card still up: the retry's begin is a duplicate, so it is
+              // dropped and checkpoint 1 is not re-run. Re-running the clock
+              // stranded a card once -- a retry past the threshold marked the
+              // whole generation stale, which suppressed the real `onEnd` while
+              // the cancellation that clears a card lives in `onLine` alone.
+              // An already-begun generation is checkpoint 2's to catch.
+              //
+              // Card gone, because an empty failed attempt resolved
+              // `'cancelled'` and `reduceCards` removed it: this begin is the
+              // one that puts the retry's answer back on screen, so it is a
+              // first begin in every sense and checkpoint 1 applies to it.
+              if (cardUp) return;
               if (Date.now() - turn.firedAt > STALE_DISCARD_MS) {
                 stale = true;
                 return;
               }
-              began = true;
+              cardUp = true;
               this.options.onSuggestion({ channel: 'suggestion:begin', payload });
             },
             onLine: (payload) => {
@@ -731,7 +746,8 @@ export class LiveSessionLoop {
                 firstLineChecked = true;
                 if (Date.now() - turn.firedAt > STALE_DISCARD_MS) {
                   stale = true;
-                  if (began) {
+                  if (cardUp) {
+                    cardUp = false;
                     staleEndSent = true;
                     this.options.onSuggestion({
                       channel: 'suggestion:end',
@@ -745,6 +761,10 @@ export class LiveSessionLoop {
             },
             onEnd: (payload) => {
               if (stale || staleEndSent) return;
+              // `reduceCards` removes a cancelled card, so this end is what
+              // leaves the overlay empty and what a retry's own begin has to
+              // fill again.
+              if (payload.status === 'cancelled') cardUp = false;
               this.options.onSuggestion({ channel: 'suggestion:end', payload });
             },
           },

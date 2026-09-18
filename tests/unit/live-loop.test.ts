@@ -687,6 +687,60 @@ describe('answering a turn', () => {
     now.mockRestore();
   });
 
+  /**
+   * The other half of the same rule: a retry whose predecessor left no card.
+   *
+   * `runGeneration` resolves an attempt that failed before producing a bullet
+   * as `'cancelled'`, and `reduceCards` removes a cancelled card outright
+   * (`ADR-047`). Dropping the retry's `begin` as a duplicate would therefore
+   * aim its lines at a card that no longer exists and the answer would never
+   * reach the overlay, so the begin has to go out again.
+   */
+  it('re-sends begin when the failed attempt already removed the card', async () => {
+    const failure = new Error('the provider hung up') as ProviderError;
+    failure.class = 'server';
+    failure.providerId = 'anthropic';
+    failure.retryable = true;
+
+    let call = 0;
+    const { loop, pushes } = makeLoop({
+      runFor: async (_capability, fn) => {
+        try {
+          return await fn('primary');
+        } catch {
+          return await fn('primary');
+        }
+      },
+      generate: (_provider, _request, _signal, events) => {
+        call += 1;
+        events.onBegin({ generationId: 'g1', cardId: 'card-g1', question: 'q' });
+        if (call === 1) {
+          // No line: `resolveStatus` calls an empty failed attempt 'cancelled',
+          // and that end is what takes the card off the overlay.
+          events.onEnd({ generationId: 'g1', status: 'cancelled' });
+          return Promise.reject(failure);
+        }
+        events.onLine({ generationId: 'g1', cardId: 'card-g1', line: 'one', index: 0 });
+        events.onEnd({ generationId: 'g1', status: 'complete' });
+        return Promise.resolve(outcome());
+      },
+    });
+    await loop.start(PROFILE_ID);
+
+    loop.onFire(turn());
+    await loop.whenSettled();
+
+    expect(pushes).toEqual([
+      'suggestion:begin',
+      'suggestion:end',
+      'suggestion:begin',
+      'suggestion:line',
+      'suggestion:end',
+    ]);
+
+    await loop.stop();
+  });
+
   it('does nothing for a turn that was already aborted before it was answered', async () => {
     const controller = new AbortController();
     controller.abort();
