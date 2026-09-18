@@ -123,3 +123,93 @@ describe('TC-133 app-side overhead on the turn-end to first-line path', () => {
     await stopSession(h);
   });
 });
+
+/**
+ * TASK-060, TC-169. The LLM-confirm path's own budget.
+ *
+ * `TC-133` above measures a turn the actionability heuristic resolves on its
+ * own, with no classification call in the path at all. This measures the other
+ * path: a turn neither lexicon resolves, which costs a real network round trip
+ * before the generation can even start. `NFR-018` budgets the app-side part of
+ * that at 400 ms on top, again with every provider replaced by a scripted fake
+ * at a fixed delay, so what is measured is the app's own work rather than the
+ * model's.
+ */
+const CLASSIFIER_BUDGET_MS = 400;
+
+/** The delay a classification round trip would cost, held constant. */
+const CLASSIFY_MS = 20;
+
+/** Neither lexicon resolves this, so the classifier is what answers it. */
+const UNRESOLVED = 'I was reading your resume on the train last night';
+
+describe('TC-169 the actionability classifier latency budget', () => {
+  it(`adds under ${CLASSIFIER_BUDGET_MS} ms at p95 over the scripted delays`, async () => {
+    // Every turn makes two LLM requests: the classification, then the
+    // suggestion. Odd requests are classifications, even ones generations.
+    let h: ReturnType<typeof harness>;
+    const isClassification = (): boolean => h.llmTransport.requests.length % 2 === 1;
+
+    h = harness(userData, {
+      wireClassifier: true,
+      llmChunks: anthropicScript(['first cue\n', 'second cue\n']),
+      retrieve: async () => {
+        await sleep(RETRIEVE_MS);
+        return [retrieved()];
+      },
+      beforeChunk: (index) => {
+        if (index !== 0) return undefined;
+        return isClassification() ? sleep(CLASSIFY_MS) : sleep(FIRST_FRAME_MS);
+      },
+    });
+    h.gate.noteReady();
+
+    await startSession(h);
+    const stream = h.stt.opened.find((s) => s.source === 'interviewer');
+    expect(stream).toBeDefined();
+
+    const overheads: number[] = [];
+
+    for (let turn = 0; turn < TURNS; turn += 1) {
+      const before = h.sentAt.length;
+      speak(h, `${UNRESOLVED}, turn ${String(turn)}`);
+
+      const turnEnd = Date.now();
+      stream!.emitEndpoint();
+
+      // Two awaits, not one: `whenSettled` returns once the classification has
+      // settled, and the generation it allows only starts after that.
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        await h.live.whenSettled();
+        if (h.sent.slice(before).some((m) => m.channel === 'suggestion:end')) break;
+      }
+
+      const firstLineAt = h.sentAt
+        .slice(before)
+        .find((_, i) => h.sent[before + i]?.channel === 'suggestion:line');
+      expect(firstLineAt).toBeDefined();
+
+      overheads.push(firstLineAt! - turnEnd - SCRIPTED_MS - CLASSIFY_MS);
+    }
+
+    // The classifier really was in the path: two requests per turn, and the
+    // first of each pair carries the classification prompt rather than the
+    // interview-cue one.
+    expect(h.llmTransport.requests).toHaveLength(TURNS * 2);
+    const first = h.llmTransport.requests[0]?.body as { system: string };
+    expect(first.system).toContain('ACTIONABLE or NON_ACTIONABLE');
+
+    const sorted = [...overheads].sort((a, b) => a - b);
+    const p95 = percentile(sorted, 95);
+
+    console.info(
+      `TC-169 classifier-path overhead over ${TURNS} turns: ` +
+        `p95 ${p95} ms, budget ${CLASSIFIER_BUDGET_MS} ms`,
+    );
+
+    expect(p95).toBeLessThan(CLASSIFIER_BUDGET_MS);
+    expect(h.sent.filter((m) => m.channel === 'suggestion:begin')).toHaveLength(TURNS);
+
+    await stopSession(h);
+  });
+});

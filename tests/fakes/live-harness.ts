@@ -211,6 +211,16 @@ export interface HarnessOptions {
    * that leaves the session with no usable model (`TC-132`).
    */
   keyFor?: (providerId: string) => string | undefined;
+  /**
+   * Wire the trigger's `classify` to `live.classify`, the way `bootstrap` does
+   * (TASK-060).
+   *
+   * Off by default, because it changes what a turn neither lexicon resolves
+   * costs: with no classifier wired the trigger fires such a turn straight
+   * away, and every test written before this milestone assumes that. A case
+   * about the classifier turns it on.
+   */
+  wireClassifier?: boolean;
 }
 
 export function harness(userData: string, options: HarnessOptions = {}) {
@@ -263,6 +273,9 @@ export function harness(userData: string, options: HarnessOptions = {}) {
   const trigger = new TriggerMachine({
     config: { ...settings.trigger, supportsEndpointing: true, batchIntervalMs: 0 },
     onFire: (turn) => live.onFire(turn),
+    ...(options.wireClassifier === true
+      ? { classify: (text: string, signal: AbortSignal) => live.classify(text, signal) }
+      : {}),
   });
 
   const sent: GatedMessage[] = [];
@@ -285,11 +298,31 @@ export function harness(userData: string, options: HarnessOptions = {}) {
 
   const retrievals: { profileId: string; question: string; k: number }[] = [];
 
+  /**
+   * Every `noteGeneration` the loop makes, in order, alongside the real meter.
+   *
+   * The meter itself sums tokens and cannot say *when* a report landed, and
+   * `TC-188`'s claim is about ordering: the classification's accounting has to
+   * be in before `stop()` returns.
+   */
+  const costCalls: {
+    generationId: string;
+    usage: { inputTokens: number; outputTokens: number };
+  }[] = [];
+
+  // Declared before the loop so the trigger's `classify` closure above, which
+  // runs only once a turn has fired, can reach it.
   const live: LiveSessionLoop = new LiveSessionLoop({
     audio,
     trigger,
     sessions,
-    cost,
+    cost: {
+      noteAudio: (source, choice, seconds) => cost.noteAudio(source, choice, seconds),
+      noteGeneration: (generationId, choice, usage) => {
+        costCalls.push({ generationId, usage });
+        cost.noteGeneration(generationId, choice, usage);
+      },
+    },
     health,
     settings: () => settings,
     retrieve: (profileId, question, k) => {
@@ -317,6 +350,7 @@ export function harness(userData: string, options: HarnessOptions = {}) {
   return {
     audio,
     cost,
+    costCalls,
     errors,
     gate,
     health,

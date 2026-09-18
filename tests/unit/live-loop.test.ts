@@ -10,10 +10,11 @@
  * collaborator failing, and arranging a real `SessionManager` or a real socket
  * to fail on demand would make the arrangement the subject of the test.
  */
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { defaultSettings } from '../../src/shared/defaults.js';
 import type {
   AudioChunk,
+  HealthState,
   ProviderChoice,
   ProviderError,
   Settings,
@@ -21,13 +22,20 @@ import type {
   TranscriptSource,
 } from '../../src/shared/types.js';
 import type { SttSession } from '../../src/main/ai/stt.js';
-import type { TurnFired } from '../../src/main/ai/trigger.js';
+import { TriggerMachine, type TurnFired } from '../../src/main/ai/trigger.js';
 import {
+  CLASSIFICATION_TIMEOUT_MS,
   LiveSessionLoop,
   STALE_DISCARD_MS,
   type LiveSessionLoopOptions,
 } from '../../src/main/live.js';
-import type { GenerationOutcome, LlmProvider } from '../../src/main/ai/llm.js';
+import type {
+  GenerationOutcome,
+  LlmChunk,
+  LlmProvider,
+  TokenUsage,
+} from '../../src/main/ai/llm.js';
+import type { GatedMessage } from '../../src/main/overlay-gate.js';
 
 const PROFILE_ID = 'p1';
 
@@ -102,6 +110,8 @@ interface StubOptions {
   generate?: LiveSessionLoopOptions['generate'];
   resolveLlmProvider?: (choice: ProviderChoice) => LlmProvider;
   runFor?: LiveSessionLoopOptions['health']['runFor'];
+  /** The LLM primary's credential state, which is what gates the classifier. */
+  llmHealth?: HealthState;
   appendTurn?: (source: TranscriptSource, text: string) => Promise<number>;
   appendSuggestion?: (entry: { status: string }) => Promise<number>;
   /** Makes the one call that sits outside the loop's own try blocks throw. */
@@ -113,8 +123,11 @@ function makeLoop(stub: StubOptions = {}) {
   const infos: string[] = [];
   const opened: StubSttSession[] = [];
   const settled: string[] = [];
-  const noted: { generationId: string; choice: ProviderChoice }[] = [];
+  const noted: { generationId: string; choice: ProviderChoice; usage: TokenUsage }[] = [];
   const pushes: string[] = [];
+  /** The same pushes, whole, for the cases that assert a payload (TASK-062). */
+  const messages: GatedMessage[] = [];
+  const appended: { status: string }[] = [];
   const endpoints: number[] = [];
   const settings: Settings = { ...defaultSettings(), ...stub.settings };
 
@@ -135,23 +148,34 @@ function makeLoop(stub: StubOptions = {}) {
     },
     sessions: {
       appendTurn: stub.appendTurn ?? ((): Promise<number> => Promise.resolve(0)),
-      appendSuggestion: stub.appendSuggestion ?? (() => Promise.resolve(1)),
+      appendSuggestion:
+        stub.appendSuggestion ??
+        ((entry) => {
+          appended.push(entry);
+          return Promise.resolve(1);
+        }),
     },
     cost: {
       noteAudio: () => {},
-      noteGeneration: (generationId, choice) => noted.push({ generationId, choice }),
+      noteGeneration: (generationId, choice, usage) => noted.push({ generationId, choice, usage }),
     },
     health: {
       // The health policy itself is TASK-014's. The default here is the
       // identity, so a test asserts what the loop does rather than what the
       // ladder does; a case that is about the ladder supplies its own.
       runFor: stub.runFor ?? ((_capability, fn) => fn('primary')),
+      // `for` is required rather than optional: an omitted one used to disable
+      // the classifier silently instead of failing.
+      for: () => ({ current: stub.llmHealth ?? { kind: 'using-primary' } }),
     },
     settings: () => settings,
     retrieve: stub.retrieve ?? (() => Promise.resolve([])),
     keyFor: stub.keyFor ?? (() => 'k'),
     onTranscript: () => {},
-    onSuggestion: (push) => pushes.push(push.channel),
+    onSuggestion: (push) => {
+      pushes.push(push.channel);
+      messages.push(push);
+    },
     onSttChoice: () => {},
     onError: (message, detail) => errors.push({ message, detail }),
     onInfo: (message) => infos.push(message),
@@ -166,7 +190,19 @@ function makeLoop(stub: StubOptions = {}) {
     resolveLlmProvider: stub.resolveLlmProvider ?? (() => ({}) as LlmProvider),
   });
 
-  return { loop, errors, infos, opened, settled, noted, endpoints, settings, pushes };
+  return {
+    loop,
+    errors,
+    infos,
+    opened,
+    settled,
+    noted,
+    endpoints,
+    settings,
+    pushes,
+    messages,
+    appended,
+  };
 }
 
 describe('start and stop', () => {
@@ -787,5 +823,511 @@ describe('answering a turn', () => {
     loop.onFire(turn({ generationId: 'g2' }));
     await loop.whenSettled();
     await loop.stop();
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * TASK-062. The two staleness checkpoints.
+ * ------------------------------------------------------------------ */
+
+/** The line and end payloads of a generation, for the checkpoint cases. */
+function streamOneCard(events: {
+  onBegin: (p: { generationId: string; cardId: string; question: string }) => void;
+  onLine: (p: { generationId: string; cardId: string; line: string; index: number }) => void;
+  onEnd: (p: { generationId: string; status: 'complete' | 'cancelled' }) => void;
+  betweenBeginAndFirstLine?: () => void;
+}): void {
+  events.onBegin({ generationId: 'g1', cardId: 'card-g1', question: 'q' });
+  events.betweenBeginAndFirstLine?.();
+  events.onLine({ generationId: 'g1', cardId: 'card-g1', line: 'one', index: 0 });
+  events.onLine({ generationId: 'g1', cardId: 'card-g1', line: 'two', index: 1 });
+  events.onEnd({ generationId: 'g1', status: 'complete' });
+}
+
+/**
+ * TC-172. Checkpoint 1: the turn is already obsolete before the card exists.
+ *
+ * `runGeneration` calls `onBegin` synchronously, before it iterates the
+ * provider, so this checkpoint is evaluated at roughly `firedAt` plus
+ * retrieval. Over the threshold there, the overlay is told nothing at all --
+ * no `begin`, no `line`, no `end` -- while the generation itself still runs to
+ * completion behind it (`FR-103`, `FR-114`).
+ */
+describe('TC-172 staleness discard timing, checkpoint 1', () => {
+  const firedAt = 1_000_000;
+
+  it('pushes nothing at all for a turn already past the threshold', async () => {
+    const clock = firedAt + STALE_DISCARD_MS + 1;
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+
+    const { loop, pushes, appended, noted } = makeLoop({
+      generate: (_provider, _request, _signal, events) => {
+        streamOneCard(events);
+        return Promise.resolve(outcome());
+      },
+    });
+    await loop.start(PROFILE_ID);
+
+    loop.onFire(turn({ firedAt }));
+    await loop.whenSettled();
+
+    expect(pushes).toEqual([]);
+    // The transcript records it as `'stale'`, which is not a wire value and is
+    // distinct from `'cancelled'`.
+    expect(appended.map((e) => e.status)).toEqual(['stale']);
+    // The call was made and billed either way: only the overlay push is
+    // suppressed, never the underlying request (`FR-103`).
+    expect(noted.map((n) => n.generationId)).toEqual(['g1#1']);
+
+    await loop.stop();
+    now.mockRestore();
+  });
+
+  it('leaves a turn one millisecond under the threshold untouched', async () => {
+    const clock = firedAt + STALE_DISCARD_MS - 1;
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+
+    const { loop, pushes, appended } = makeLoop({
+      generate: (_provider, _request, _signal, events) => {
+        streamOneCard(events);
+        return Promise.resolve(outcome());
+      },
+    });
+    await loop.start(PROFILE_ID);
+
+    loop.onFire(turn({ firedAt }));
+    await loop.whenSettled();
+
+    expect(pushes).toEqual([
+      'suggestion:begin',
+      'suggestion:line',
+      'suggestion:line',
+      'suggestion:end',
+    ]);
+    expect(appended.map((e) => e.status)).toEqual(['complete']);
+
+    await loop.stop();
+    now.mockRestore();
+  });
+});
+
+/**
+ * TC-189. Checkpoint 2: the model's first token was the slow part.
+ *
+ * Checkpoint 1 cannot catch this, because it runs before any of the response
+ * has arrived. A provider whose first token takes 25 seconds passes checkpoint
+ * 1 immediately and would stream its obsolete answer in full. The card is
+ * already on screen by then, so the discard has to clear it: exactly one
+ * `suggestion:end` at wire status `'cancelled'`, which is the path a superseded
+ * generation's cancellation already uses, while the transcript still records
+ * `'stale'`. The transcript and the overlay are allowed to disagree here.
+ */
+describe('TC-189 staleness discard timing, checkpoint 2', () => {
+  const firedAt = 1_000_000;
+
+  it('sends begin, no line, and one cancelled end when the first token is late', async () => {
+    let clock = firedAt;
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+
+    const { loop, pushes, messages, appended } = makeLoop({
+      generate: (_provider, _request, _signal, events) => {
+        streamOneCard({
+          ...events,
+          // The whole point of the second checkpoint: `begin` went out inside
+          // the budget and the first delta did not.
+          betweenBeginAndFirstLine: () => {
+            clock = firedAt + STALE_DISCARD_MS + 1;
+          },
+        });
+        return Promise.resolve(outcome());
+      },
+    });
+    await loop.start(PROFILE_ID);
+
+    loop.onFire(turn({ firedAt }));
+    await loop.whenSettled();
+
+    expect(pushes).toEqual(['suggestion:begin', 'suggestion:end']);
+    const end = messages.at(-1);
+    expect(end?.channel).toBe('suggestion:end');
+    expect(end?.payload).toEqual({ generationId: 'g1', status: 'cancelled' });
+    // `'stale'` in the transcript, `'cancelled'` on the wire.
+    expect(appended.map((e) => e.status)).toEqual(['stale']);
+
+    await loop.stop();
+    now.mockRestore();
+  });
+
+  it('leaves a generation whose first token arrives in time untouched', async () => {
+    let clock = firedAt;
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+
+    const { loop, pushes, appended } = makeLoop({
+      generate: (_provider, _request, _signal, events) => {
+        streamOneCard({
+          ...events,
+          betweenBeginAndFirstLine: () => {
+            clock = firedAt + STALE_DISCARD_MS - 1;
+          },
+        });
+        return Promise.resolve(outcome());
+      },
+    });
+    await loop.start(PROFILE_ID);
+
+    loop.onFire(turn({ firedAt }));
+    await loop.whenSettled();
+
+    expect(pushes).toEqual([
+      'suggestion:begin',
+      'suggestion:line',
+      'suggestion:line',
+      'suggestion:end',
+    ]);
+    expect(appended.map((e) => e.status)).toEqual(['complete']);
+
+    await loop.stop();
+    now.mockRestore();
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * TASK-060. The `classify` closure `live.ts` hands the trigger.
+ * ------------------------------------------------------------------ */
+
+interface FakeLlm {
+  provider: LlmProvider;
+  requests: { generationId: string; system: string | undefined; maxTokens: number | undefined }[];
+  signals: AbortSignal[];
+}
+
+/**
+ * A language model that answers the classification prompt.
+ *
+ * `delayMs` is scripted through `setTimeout`, so every case below drives it on
+ * fake timers rather than waiting out a real 800 ms budget.
+ */
+function fakeLlm(script: { reply?: string; usage?: TokenUsage; delayMs?: number } = {}): FakeLlm {
+  const requests: FakeLlm['requests'] = [];
+  const signals: AbortSignal[] = [];
+  const provider: LlmProvider = {
+    id: 'anthropic',
+    generate: (req, signal): AsyncIterable<LlmChunk> => {
+      requests.push({
+        generationId: req.generationId,
+        system: req.promptOverride?.system,
+        maxTokens: req.promptOverride?.maxTokens,
+      });
+      signals.push(signal);
+      return (async function* () {
+        if (script.delayMs !== undefined) {
+          await new Promise((resolve) => setTimeout(resolve, script.delayMs));
+        }
+        if (signal.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+        yield { delta: script.reply ?? 'ACTIONABLE' };
+        yield { usage: script.usage ?? { inputTokens: 120, outputTokens: 2 } };
+      })();
+    },
+    validateKey: () => Promise.resolve({ ok: true }),
+  };
+  return { provider, requests, signals };
+}
+
+/**
+ * TC-180. A classification call is real, billable spend (`FR-103`).
+ *
+ * It is keyed under `classify:<classificationId>` rather than under the turn's
+ * own generation id, so it can never replace a suggestion's usage, and it is
+ * reported from a `finally` so that an aborted or failed call is still counted
+ * -- at zero, when no usage record ever arrived.
+ */
+describe('TC-180 classification call cost accounting', () => {
+  it('reports a successful call under classify:<classificationId>', async () => {
+    const llm = fakeLlm({ usage: { inputTokens: 120, outputTokens: 2 } });
+    const { loop, noted, settings } = makeLoop({ resolveLlmProvider: () => llm.provider });
+    await loop.start(PROFILE_ID);
+
+    const verdict = await loop.classify('anything at all', new AbortController().signal);
+    expect(verdict).toBe('actionable');
+
+    expect(noted).toHaveLength(1);
+    expect(noted[0]?.generationId).toMatch(/^classify:/);
+    expect(noted[0]?.usage).toEqual({ inputTokens: 120, outputTokens: 2 });
+    // Billed against the primary's own choice, which is what a price row is
+    // keyed by.
+    expect(noted[0]?.choice).toEqual(settings.providers.llm.primary);
+
+    // The key carries the classification's own id, which is also the id the
+    // request went out under, so the two can be matched up in a session record.
+    expect(noted[0]?.generationId).toBe(`classify:${llm.requests[0]?.generationId ?? ''}`);
+
+    await loop.stop();
+  });
+
+  it('still reports, at zero, when a newer turn aborts the call mid-flight', async () => {
+    vi.useFakeTimers();
+    try {
+      // The response is still on its way when the turn that asked for it is
+      // superseded, so no usage record ever arrives.
+      const llm = fakeLlm({ delayMs: 200 });
+      const { loop, noted } = makeLoop({ resolveLlmProvider: () => llm.provider });
+      await loop.start(PROFILE_ID);
+
+      const controller = new AbortController();
+      const pending = loop.classify('anything at all', controller.signal);
+      controller.abort();
+      await vi.advanceTimersByTimeAsync(200);
+
+      // A failure of any kind fails open (`TASK-060`), and the call is still
+      // counted rather than silently dropped from the session estimate.
+      await expect(pending).resolves.toBe('actionable');
+      expect(llm.signals[0]?.aborted).toBe(true);
+      expect(noted).toHaveLength(1);
+      expect(noted[0]?.generationId).toMatch(/^classify:/);
+      expect(noted[0]?.usage).toEqual({ inputTokens: 0, outputTokens: 0 });
+
+      await loop.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('still reports when the provider fails outright', async () => {
+    const provider: LlmProvider = {
+      id: 'anthropic',
+      generate: (): AsyncIterable<LlmChunk> =>
+        // eslint-disable-next-line require-yield
+        (async function* () {
+          throw new Error('the provider hung up');
+        })(),
+      validateKey: () => Promise.resolve({ ok: true }),
+    };
+    const { loop, noted } = makeLoop({ resolveLlmProvider: () => provider });
+    await loop.start(PROFILE_ID);
+
+    await expect(loop.classify('anything at all', new AbortController().signal)).resolves.toBe(
+      'actionable',
+    );
+    expect(noted).toHaveLength(1);
+    expect(noted[0]?.usage).toEqual({ inputTokens: 0, outputTokens: 0 });
+
+    await loop.stop();
+  });
+
+  it('gives each call its own id, so two classifications never collide', async () => {
+    const llm = fakeLlm();
+    const { loop, noted } = makeLoop({ resolveLlmProvider: () => llm.provider });
+    await loop.start(PROFILE_ID);
+
+    await loop.classify('one', new AbortController().signal);
+    await loop.classify('two', new AbortController().signal);
+
+    expect(new Set(noted.map((n) => n.generationId)).size).toBe(2);
+    await loop.stop();
+  });
+});
+
+/**
+ * TC-184. The health read is a plain property read, and the budget is local.
+ *
+ * `CredentialHealth` cannot answer "is `DEGRADED`'s backoff due yet", so the
+ * gate is the positive one: only `'using-primary'` attempts a call. Every other
+ * kind fails open immediately, with no network call and, crucially, without
+ * routing anything through `runFor` -- a classification is not a probe and must
+ * never drive credential health either way.
+ */
+describe('TC-184 classify health-check and timeout policy', () => {
+  const skipped: HealthState[] = [
+    { kind: 'retrying', attempt: 1 },
+    { kind: 'using-backup' },
+    { kind: 'degraded', reason: 'the provider hung up' },
+    { kind: 'config-required', credentialId: 'anthropic', reason: 'the key was rejected' },
+  ];
+
+  for (const state of skipped) {
+    it(`makes zero calls and resolves actionable at '${state.kind}'`, async () => {
+      const llm = fakeLlm();
+      let ladderCalls = 0;
+      const { loop, noted } = makeLoop({
+        llmHealth: state,
+        resolveLlmProvider: () => llm.provider,
+        runFor: (capability, fn) => {
+          if (capability === 'llm') ladderCalls += 1;
+          return fn('primary');
+        },
+      });
+      await loop.start(PROFILE_ID);
+
+      const verdict = await loop.classify('anything at all', new AbortController().signal);
+
+      expect(verdict).toBe('actionable');
+      expect(llm.requests).toEqual([]);
+      expect(ladderCalls).toBe(0);
+      // Nothing was spent, so nothing is reported either.
+      expect(noted).toEqual([]);
+
+      await loop.stop();
+    });
+  }
+
+  it("attempts exactly one call at 'using-primary', against the primary's own choice", async () => {
+    const llm = fakeLlm();
+    let ladderCalls = 0;
+    const { loop, settings } = makeLoop({
+      resolveLlmProvider: (choice) => {
+        expect(choice).toEqual(settings.providers.llm.primary);
+        return llm.provider;
+      },
+      runFor: (capability, fn) => {
+        if (capability === 'llm') ladderCalls += 1;
+        return fn('primary');
+      },
+    });
+    await loop.start(PROFILE_ID);
+
+    await loop.classify('anything at all', new AbortController().signal);
+
+    expect(llm.requests).toHaveLength(1);
+    expect(llm.requests[0]?.maxTokens).toBe(5);
+    // The classification prompt, not the interview-cue system prompt.
+    expect(llm.requests[0]?.system).toContain('ACTIONABLE or NON_ACTIONABLE');
+    // Never routed through the retry/failover machinery (`CMP-12`).
+    expect(ladderCalls).toBe(0);
+
+    await loop.stop();
+  });
+
+  it('resolves actionable when the call runs past the 800 ms budget', async () => {
+    vi.useFakeTimers();
+    try {
+      const llm = fakeLlm({ delayMs: CLASSIFICATION_TIMEOUT_MS + 1, reply: 'NON_ACTIONABLE' });
+      let ladderCalls = 0;
+      const { loop, noted } = makeLoop({
+        resolveLlmProvider: () => llm.provider,
+        runFor: (capability, fn) => {
+          if (capability === 'llm') ladderCalls += 1;
+          return fn('primary');
+        },
+      });
+      await loop.start(PROFILE_ID);
+
+      const pending = loop.classify('anything at all', new AbortController().signal);
+      await vi.advanceTimersByTimeAsync(CLASSIFICATION_TIMEOUT_MS);
+
+      // The verdict the provider would eventually have given is irrelevant: the
+      // budget is up, so the turn fails open rather than waiting.
+      await expect(pending).resolves.toBe('actionable');
+      // The timeout aborts the request rather than leaving it running.
+      expect(llm.signals[0]?.aborted).toBe(true);
+      // Still accounted, at whatever arrived, and still not a probe.
+      expect(noted).toHaveLength(1);
+      expect(noted[0]?.usage).toEqual({ inputTokens: 0, outputTokens: 0 });
+      expect(ladderCalls).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(10);
+      await loop.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('resolves under the budget when the provider answers in time', async () => {
+    vi.useFakeTimers();
+    try {
+      const llm = fakeLlm({ delayMs: CLASSIFICATION_TIMEOUT_MS - 1, reply: 'NON_ACTIONABLE' });
+      const { loop } = makeLoop({ resolveLlmProvider: () => llm.provider });
+      await loop.start(PROFILE_ID);
+
+      const pending = loop.classify('anything at all', new AbortController().signal);
+      await vi.advanceTimersByTimeAsync(CLASSIFICATION_TIMEOUT_MS);
+
+      await expect(pending).resolves.toBe('non-actionable');
+      await loop.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+/**
+ * TC-179. `firedAt` measures true turn-end-to-now.
+ *
+ * It is stamped the moment `FR-051`'s guard passes, before the confidence gate
+ * and before the classifier, so a classifier that itself takes nearly the whole
+ * budget leaves a fast generation over the threshold. Stamped after the
+ * classifier instead -- the regression a second round of spec review found --
+ * the same generation would look almost instantaneous and survive.
+ */
+describe('TC-179 firedAt includes the confidence gate and classifier cost', () => {
+  /** Neither lexicon resolves this, so the injected classifier is asked. */
+  const UNRESOLVED = 'I was reading your resume on the train last night';
+  const GAP = defaultSettings().trigger.turnEndGapMs;
+  const GENERATION_MS = 200;
+
+  async function run(classifierMs: number) {
+    const { loop, pushes, appended } = makeLoop({
+      generate: async (_provider, _request, _signal, events) => {
+        await new Promise((resolve) => setTimeout(resolve, GENERATION_MS));
+        streamOneCard(events);
+        return outcome();
+      },
+    });
+
+    const machine = new TriggerMachine({
+      config: {
+        ...defaultSettings().trigger,
+        supportsEndpointing: true,
+        supportsConfidence: false,
+        batchIntervalMs: 0,
+      },
+      onFire: (fired) => loop.onFire(fired),
+      newGenerationId: () => 'g1',
+      classify: () =>
+        new Promise((resolve) => setTimeout(() => resolve('actionable'), classifierMs)),
+    });
+
+    await loop.start(PROFILE_ID);
+    machine.start();
+    machine.handleTranscript({
+      source: 'interviewer',
+      text: UNRESOLVED,
+      isFinal: true,
+      timestamp: 0,
+      providerId: 'deepgram',
+    });
+
+    await vi.advanceTimersByTimeAsync(GAP + classifierMs + GENERATION_MS);
+    await loop.whenSettled();
+    await loop.stop();
+    machine.dispose();
+    return { pushes, appended };
+  }
+
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it('discards a fast generation the classifier already spent the budget on', async () => {
+    // Under the threshold on its own. Only together with the generation's own
+    // time does the total cross it, which is what `firedAt` has to measure.
+    const classifierMs = STALE_DISCARD_MS - 100;
+    expect(classifierMs).toBeLessThan(STALE_DISCARD_MS);
+    expect(classifierMs + GENERATION_MS).toBeGreaterThan(STALE_DISCARD_MS);
+
+    const { pushes, appended } = await run(classifierMs);
+
+    expect(pushes).toEqual([]);
+    expect(appended.map((e) => e.status)).toEqual(['stale']);
+  });
+
+  it('leaves the same generation alone behind a quick classifier', async () => {
+    const { pushes, appended } = await run(50);
+
+    expect(pushes).toEqual([
+      'suggestion:begin',
+      'suggestion:line',
+      'suggestion:line',
+      'suggestion:end',
+    ]);
+    expect(appended.map((e) => e.status)).toEqual(['complete']);
   });
 });
