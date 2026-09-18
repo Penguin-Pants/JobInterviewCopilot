@@ -302,17 +302,24 @@ test('TC-123 sessions group by profile, open for viewing and delete', async () =
 
 test('TC-124 every interactive element is reachable by Tab and operable by Enter or Space', async () => {
   /**
-   * Marks only controls Tab could plausibly reach right now: enabled and not
-   * hidden. `offsetParent === null` is what a `hidden` ancestor (a tab panel
-   * that is not the active one) produces, so this also catches an element
-   * whose own attributes look fine but whose panel is closed.
+   * Marks only controls sequential Tab could plausibly reach right now:
+   * enabled, not hidden, and not deliberately taken out of the tab order.
+   * `offsetParent === null` is what a `hidden` ancestor (a tab panel that is
+   * not the active one) produces, so this also catches an element whose own
+   * attributes look fine but whose panel is closed. `tabIndex === -1` is what
+   * the sidebar's five inactive tab buttons carry on purpose (a roving
+   * tabindex): they are reached by Up/Down, not by Tab, which is asserted
+   * separately below, so excluding them here is not a lowered bar, it is the
+   * bar this pattern is supposed to have.
    */
   async function markReachableControls(): Promise<string[]> {
     return dashboard.evaluate(() => {
       const selector =
         'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])';
       return [...document.querySelectorAll(selector)]
-        .filter((el) => (el as HTMLElement).offsetParent !== null)
+        .filter(
+          (el) => (el as HTMLElement).offsetParent !== null && (el as HTMLElement).tabIndex !== -1,
+        )
         .map((el, index) => {
           const mark = `kbd-${index}`;
           el.setAttribute('data-kbd', mark);
