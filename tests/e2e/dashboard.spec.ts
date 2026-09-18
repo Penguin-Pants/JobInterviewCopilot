@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect, test, type ElectronApplication, type Page } from '@playwright/test';
-import { launchApp, pushToDashboard } from './launch.js';
+import { launchApp, openDashboardTab, pushToDashboard } from './launch.js';
 import { STT_REGISTRY } from '../../src/shared/registry/stt.js';
 
 /**
@@ -43,24 +43,50 @@ async function createProfile(name: string): Promise<void> {
   await expect(dashboard.locator('[data-testid="profile-list"]')).toContainText(name);
 }
 
+async function openTab(id: string): Promise<void> {
+  await openDashboardTab(dashboard, id);
+}
+
 /* ------------------------------------------------------------------ *
- * TC-120  every section FR-087 names is on screen
+ * TC-120  every section FR-087 names is on screen, one tab at a time
  * ------------------------------------------------------------------ */
 
-test('TC-120 all six sections render, with the privacy and consent statements', async () => {
-  for (const section of [
-    'section-provider-setup',
-    'section-company-profiles',
-    'section-session-history',
-    'section-hotkeys',
-    'section-cost-and-usage',
-    'section-consent-reminder',
-  ]) {
-    await expect(dashboard.locator(`[data-testid="${section}"]`), section).toBeVisible();
+test('TC-120 all six sections render behind their own tab, with the privacy and consent statements', async () => {
+  const TAB_SECTIONS: [string, string[]][] = [
+    ['profiles', ['section-company-profiles']],
+    ['history', ['section-session-history']],
+    ['providers', ['section-provider-setup']],
+    ['usage', ['section-cost-and-usage']],
+    ['overlay', ['section-overlay']],
+    // Hotkeys and Consent Reminder share the Preferences tab.
+    ['preferences', ['section-hotkeys', 'section-consent-reminder']],
+  ];
+
+  for (const [tab, sectionIds] of TAB_SECTIONS) {
+    await openTab(tab);
+    for (const sectionId of sectionIds) {
+      await expect(
+        dashboard.locator(`[data-testid="${sectionId}"]`),
+        `${tab}/${sectionId}`,
+      ).toBeVisible();
+    }
+    // Every other tab's section is hidden while this one is open, not merely
+    // unchecked: a tab that failed to hide its neighbours would still pass a
+    // test that only asserted visibility of the one it opened.
+    for (const [otherTab, otherSectionIds] of TAB_SECTIONS) {
+      if (otherTab === tab) continue;
+      for (const otherSectionId of otherSectionIds) {
+        await expect(
+          dashboard.locator(`[data-testid="${otherSectionId}"]`),
+          `${otherSectionId} while on ${tab}`,
+        ).toBeHidden();
+      }
+    }
   }
 
-  // FR-110: Session History states plainly what a transcript is and how long it
-  // is kept. Asserted on the words, not on the element merely existing.
+  // FR-110: Session History states plainly what a transcript is and how long
+  // it is kept. Asserted on the words, not on the element merely existing.
+  await openTab('history');
   const privacy = dashboard.locator(
     '[data-testid="section-session-history"] [data-testid="transcript-privacy-note"]',
   );
@@ -68,12 +94,14 @@ test('TC-120 all six sections render, with the privacy and consent statements', 
   await expect(privacy).toContainText('until you delete them');
 
   // FR-032 and FR-110: the shipped default consent text says the same thing.
+  await openTab('preferences');
   await expect(dashboard.locator('[data-testid="consent-text"]')).toHaveValue(
     /unencrypted local file/,
   );
 
   // FR-088: the session controls are explicit, and a session never starts on
-  // its own, so Stop is unavailable until one is running.
+  // its own, so Stop is unavailable until one is running. These sit in the
+  // header, reachable no matter which tab is open.
   await expect(dashboard.locator('[data-testid="start-session"]')).toBeEnabled();
   await expect(dashboard.locator('[data-testid="stop-session"]')).toBeDisabled();
 
@@ -88,6 +116,8 @@ test('TC-120 all six sections render, with the privacy and consent statements', 
  * ------------------------------------------------------------------ */
 
 test('TC-121 a backup from the primary provider is blocked and the shared key is named', async () => {
+  await openTab('providers');
+
   // FR-025. The backup starts as None, so it is selected first and then set to
   // the provider the primary already uses.
   const primary = await dashboard.locator('[data-testid="stt-primary-provider"]').inputValue();
@@ -118,6 +148,8 @@ test('TC-121 a backup from the primary provider is blocked and the shared key is
  * ------------------------------------------------------------------ */
 
 test('TC-154 each model shows streaming and price, and a non-streaming choice warns first', async () => {
+  await openTab('providers');
+
   const batchProvider = STT_REGISTRY.find((p) => p.models.some((m) => !m.streaming));
   expect(batchProvider, 'no non-streaming model in the registry').toBeTruthy();
   const batchModel = batchProvider!.models.find((m) => !m.streaming)!;
@@ -151,8 +183,10 @@ test('TC-154 each model shows streaming and price, and a non-streaming choice wa
   await expect(dashboard.locator('[data-testid="providers-saved"]')).toBeVisible();
 
   // And it survives the round trip, because the stored choice is read back.
+  // The reload resets to the default tab, so Provider Setup is opened again.
   await dashboard.reload();
   await dashboard.waitForSelector('[data-testid="dashboard-header"]');
+  await openTab('providers');
   await expect(dashboard.locator('[data-testid="stt-primary-model"]')).toHaveValue(batchModel.id);
   await expect(dashboard.locator('[data-testid="non-streaming-consequence"]')).toBeVisible();
 });
@@ -162,6 +196,7 @@ test('TC-154 each model shows streaming and price, and a non-streaming choice wa
  * ------------------------------------------------------------------ */
 
 test('TC-122 deleting a profile confirms with the document and session counts', async () => {
+  // Company Profiles is the tab the Dashboard opens to; no navigation needed.
   await createProfile('Acme Corp');
 
   const row = dashboard.locator('[data-testid="profile-list"] > li', { hasText: 'Acme Corp' });
@@ -241,6 +276,7 @@ test('TC-123 sessions group by profile, open for viewing and delete', async () =
 
   await dashboard.reload();
   await dashboard.waitForSelector('[data-testid="dashboard-header"]');
+  await openTab('history');
 
   // Grouped by profile: the row sits inside its profile's group, not in a flat
   // list that happens to mention the name.
@@ -265,28 +301,64 @@ test('TC-123 sessions group by profile, open for viewing and delete', async () =
  * ------------------------------------------------------------------ */
 
 test('TC-124 every interactive element is reachable by Tab and operable by Enter or Space', async () => {
-  const marks = await dashboard.evaluate(() => {
-    const selector =
-      'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])';
-    return [...document.querySelectorAll(selector)].map((el, index) => {
-      const mark = `kbd-${index}`;
-      el.setAttribute('data-kbd', mark);
-      return mark;
+  /**
+   * Marks only controls Tab could plausibly reach right now: enabled and not
+   * hidden. `offsetParent === null` is what a `hidden` ancestor (a tab panel
+   * that is not the active one) produces, so this also catches an element
+   * whose own attributes look fine but whose panel is closed.
+   */
+  async function markReachableControls(): Promise<string[]> {
+    return dashboard.evaluate(() => {
+      const selector =
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])';
+      return [...document.querySelectorAll(selector)]
+        .filter((el) => (el as HTMLElement).offsetParent !== null)
+        .map((el, index) => {
+          const mark = `kbd-${index}`;
+          el.setAttribute('data-kbd', mark);
+          return mark;
+        });
     });
-  });
-  expect(marks.length).toBeGreaterThan(10);
-
-  await dashboard.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
-  const reached = new Set<string>();
-  for (let i = 0; i < marks.length + 5; i += 1) {
-    await dashboard.keyboard.press('Tab');
-    const mark = await dashboard.evaluate(() => document.activeElement?.getAttribute('data-kbd'));
-    if (mark) reached.add(mark);
-    if (reached.size === marks.length) break;
   }
 
-  const missed = marks.filter((mark) => !reached.has(mark));
-  expect(missed, `Tab never reached: ${missed.join(', ')}`).toEqual([]);
+  async function assertTabReachesEveryMark(marks: string[]): Promise<void> {
+    await dashboard.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    const reached = new Set<string>();
+    for (let i = 0; i < marks.length + 5; i += 1) {
+      await dashboard.keyboard.press('Tab');
+      const mark = await dashboard.evaluate(() => document.activeElement?.getAttribute('data-kbd'));
+      if (mark) reached.add(mark);
+      if (reached.size === marks.length) break;
+    }
+    const missed = marks.filter((mark) => !reached.has(mark));
+    expect(missed, `Tab never reached: ${missed.join(', ')}`).toEqual([]);
+  }
+
+  // Each tab in turn: with one panel visible at a time, Tab's whole path is
+  // checked once per tab (header and sidebar included, since neither is ever
+  // hidden) rather than once for what used to be the whole page.
+  for (const tab of ['profiles', 'history', 'providers', 'usage', 'overlay', 'preferences']) {
+    await openTab(tab);
+    const marks = await markReachableControls();
+    expect(marks.length, `${tab}: no reachable controls were marked`).toBeGreaterThan(0);
+    await assertTabReachesEveryMark(marks);
+  }
+
+  // The sidebar itself follows the ARIA tabs pattern: only the active tab is a
+  // Tab stop, and Up/Down move between tabs and activate immediately.
+  await openTab('profiles');
+  await dashboard.locator('[data-testid="tab-profiles"]').focus();
+  await dashboard.keyboard.press('ArrowDown');
+  await expect(dashboard.locator('[data-testid="tab-history"]')).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
+  await expect(dashboard.locator('[data-testid="section-session-history"]')).toBeVisible();
+  await dashboard.keyboard.press('ArrowUp');
+  await expect(dashboard.locator('[data-testid="tab-profiles"]')).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
 
   // Operable by Enter. The empty name is refused, which is a visible result of
   // the press rather than a silent no-op.
@@ -306,6 +378,8 @@ test('TC-124 every interactive element is reachable by Tab and operable by Enter
  * ------------------------------------------------------------------ */
 
 test('TC-125 the timer and the spend estimate render every usage tick, and invent none', async () => {
+  // The live timer and spend live in the header now, not behind a tab, so
+  // they read from whichever tab happens to be open (here, the default).
   const timer = dashboard.locator('[data-testid="live-timer"]');
   const spend = dashboard.locator('[data-testid="live-spend"]');
   await expect(timer).toHaveText('0:00:00');
@@ -352,6 +426,8 @@ test('TC-125 the timer and the spend estimate render every usage tick, and inven
   await expect(timer).toHaveText('0:00:06');
   await expect(spend).toHaveText('$0.31');
 
+  // The rest of the live detail stays on the Cost and Usage tab.
+  await openTab('usage');
   await expect(dashboard.locator('[data-testid="price-table-version"]')).toHaveText('2026-01-01');
   await expect(dashboard.locator('[data-testid="estimate-incomplete"]')).toHaveCount(0);
 
@@ -369,6 +445,10 @@ test('TC-125 the timer and the spend estimate render every usage tick, and inven
  * ------------------------------------------------------------------ */
 
 test('TC-132 a session-level fault is shown, and only while its session is live', async () => {
+  // The fault notice is Provider Setup's, since every fault this channel
+  // carries is about a provider that could not be used.
+  await openTab('providers');
+
   const notice = dashboard.locator('[data-testid="session-notice"]');
   await expect(notice).toHaveCount(0);
 
@@ -412,6 +492,7 @@ test('TC-132 a session-level fault is shown, and only while its session is live'
  * ------------------------------------------------------------------ */
 
 test('TC-158 create, switch and delete, with exactly one profile active', async () => {
+  // Company Profiles is the tab the Dashboard opens to; no navigation needed.
   const original = await firstProfileId();
   await createProfile('Second Co');
 
@@ -472,6 +553,8 @@ test('TC-158 create, switch and delete, with exactly one profile active', async 
  * test cannot reach.
  */
 test('FR-029 theme and overlay settings are written and survive a reload', async () => {
+  await openTab('overlay');
+
   await dashboard.selectOption('[data-testid="theme-mode"]', 'dark');
   // FR-080: the Dashboard itself follows the theme mode setting.
   await expect(dashboard.locator('html')).toHaveAttribute('data-theme', 'dark');
@@ -498,6 +581,7 @@ test('FR-029 theme and overlay settings are written and survive a reload', async
 
   await dashboard.reload();
   await dashboard.waitForSelector('[data-testid="dashboard-header"]');
+  await openTab('overlay');
   await expect(dashboard.locator('[data-testid="theme-mode"]')).toHaveValue('dark');
   await expect(dashboard.locator('[data-testid="overlay-font-size-value"]')).toHaveText(
     after ?? '',
@@ -517,6 +601,8 @@ test('FR-029 theme and overlay settings are written and survive a reload', async
  * and the provider lock (ADR-013).
  */
 test('FR-088 Stop is available as soon as a session is live, and bindings lock', async () => {
+  await openTab('providers');
+
   await expect(dashboard.locator('[data-testid="stop-session"]')).toBeDisabled();
   await expect(dashboard.locator('[data-testid="save-providers"]')).toBeEnabled();
 

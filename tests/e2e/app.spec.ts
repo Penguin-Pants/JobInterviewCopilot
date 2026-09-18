@@ -9,6 +9,7 @@ import {
   type Page,
 } from '@playwright/test';
 import { SETTINGS_LIMITS } from '../../src/shared/defaults.js';
+import { openDashboardTab } from './launch.js';
 
 /**
  * Milestone 0 end-to-end coverage: TC-005, TC-007, TC-008, TC-009, TC-148.
@@ -174,6 +175,7 @@ test('TC-148 Reset Overlay returns the overlay to the primary display', async ()
     overlay?.setPosition(-30000, -30000);
   });
 
+  await openDashboardTab(dashboard, 'overlay');
   await dashboard.click('[data-testid="reset-overlay"]');
   await dashboard.waitForSelector('[data-testid="reset-overlay-done"]');
 

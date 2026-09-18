@@ -1,5 +1,11 @@
 import { expect, test, type ElectronApplication, type Page } from '@playwright/test';
-import { launchApp, overlayPage, pushToDashboard, pushToOverlay } from './launch.js';
+import {
+  launchApp,
+  openDashboardTab,
+  overlayPage,
+  pushToDashboard,
+  pushToOverlay,
+} from './launch.js';
 import { SETTINGS_LIMITS } from '../../src/shared/defaults.js';
 import { FONT_STEP_PX } from '../../src/renderer/overlay/components/FontSizeControl.js';
 
@@ -526,6 +532,7 @@ test('TC-113 the text size defaults to 22 px, moves from both controls and persi
   // move from there rather than from what the overlay had just written. The gap
   // is real and is carried as follow-up work; this case is about `FR-093`'s two
   // controls, not about the gap, so it does not walk into it.
+  await openDashboardTab(dashboard, 'overlay');
   await dashboard.locator('[data-testid="overlay-font-size"]').focus();
   for (let i = 0; i < 2; i += 1) await dashboard.keyboard.press('ArrowRight');
   await expect(dashboard.locator('[data-testid="overlay-font-size-value"]')).toHaveText('24');
@@ -633,6 +640,7 @@ test('TC-115 reduced motion drops the slide and keeps the fade', async () => {
  * click-through state and its card stack is `TC-142`'s.
  */
 test('TC-116 theme mode, opacity and translucency apply with no app restart', async () => {
+  await openDashboardTab(dashboard, 'overlay');
   await dashboard.selectOption('[data-testid="theme-mode"]', 'dark');
   await expect(overlay.locator('[data-testid="overlay"]')).toHaveAttribute('data-theme', 'dark');
 
@@ -903,6 +911,7 @@ test('TC-138 a replayed generation renders in full, after the reminder', async (
  * lifecycle half of `TC-142` stays with `TASK-005`.
  */
 test('TC-142 the acrylic option is disabled on a Windows 10 build, with the reason', async () => {
+  await openDashboardTab(dashboard, 'overlay');
   const acrylicOption = (page: Page) =>
     page.locator('[data-testid="overlay-translucency"] option[value="acrylic"]');
   const translucencyNote = (page: Page) => page.locator('[data-testid="translucency-note"]');
@@ -926,6 +935,7 @@ test('TC-142 the acrylic option is disabled on a Windows 10 build, with the reas
   // happened to work once is not mistaken for one that works on every load.
   await dashboard.reload();
   await dashboard.waitForSelector('[data-testid="dashboard-header"]');
+  await openDashboardTab(dashboard, 'overlay');
   await expect(acrylicOption(dashboard)).toBeEnabled();
 
   // Then the Windows 10 branch, which the runner cannot be.
@@ -963,5 +973,6 @@ test('NFR-012 the capture warning reaches the overlay, beside the reminder', asy
   // The Dashboard keeps it too: FR-089 reads the build number there, and the
   // overlay card is dismissible, so the Dashboard is where it can still be read.
   await pushToDashboard(app, 'notice:captureFidelity', { windowsBuild: 18363, message });
+  await openDashboardTab(dashboard, 'overlay');
   await expect(dashboard.locator('[data-testid="capture-fidelity-notice"]')).toBeVisible();
 });
