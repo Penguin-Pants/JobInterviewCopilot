@@ -429,6 +429,22 @@ async function bootstrap(): Promise<void> {
     // The loop is released first, for the same reason the stop handler releases
     // it first: it is what can still append. `dispose` rather than `stop`,
     // because `will-quit` cannot hold the app open to await a teardown.
+    /**
+     * A coalesced geometry or text-size write is committed, not dropped
+     * (FR-081, FR-093, CH-126, CH-127).
+     *
+     * Both writers are leading-edge with a trailing commit, so the value from
+     * the middle of a drag lands at once and the settled one lands when the
+     * window closes 200 ms later. A quit inside that window left the settled
+     * value unwritten and the app reopened at a size the user passed through on
+     * the way to the one they chose. Measured on the Windows runner: an overlay
+     * dragged to 673 by 453 reopened at 483 by 308, the second frame of the
+     * drag. Flushed first, because `router.dispose` below takes the channels
+     * away and `config.set` is synchronous, so this costs one file write.
+     */
+    overlaySizeWrites.flush();
+    overlayFontSizeWrites.flush();
+
     live.dispose();
     sessions.noteUsage(cost.stop());
     void sessions.stop();
@@ -953,8 +969,13 @@ const overlayFontSizeWrites = throttleWrites<number>((px) => {
  * handler below. Dragging a grip has to track the pointer, and a resize that
  * moved in 200 ms steps would not. Only the persistence is coalesced.
  */
-const overlaySizeWrites = throttleWrites<{ width: number; height: number }>(() => {
-  if (overlayWindow && !overlayWindow.isDestroyed()) saveOverlayBounds(overlayWindow, config);
+const overlaySizeWrites = throttleWrites<{ width: number; height: number }>(({ width, height }) => {
+  // The requested size, not `getBounds()`. The trailing commit can run from the
+  // quit path, by which point the window may already be gone, and a commit that
+  // read the window would then write nothing and lose the drag. The value is
+  // already clamped by `CH-127`'s schema, and the position is written by the
+  // `moved` and `resized` handlers rather than from here.
+  config.set({ overlayWindow: { ...config.get().overlayWindow, width, height } });
 }, OVERLAY_SIZE_WRITE_INTERVAL_MS);
 
 /** `CH-201`, from the Session Manager rather than from a second copy of the state. */

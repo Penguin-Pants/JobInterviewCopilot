@@ -297,6 +297,46 @@ function Overlay(): JSX.Element {
   const idle = shouldShowIdle(cards, paused);
   const visible = cards.slice(-MAX_CARDS);
 
+  /**
+   * Keep the newest cue against the bottom of the scroll region (FR-090).
+   *
+   * `mt-auto` on the stack does this while the content fits. Once it overflows
+   * the margin collapses and the scroller sits at the top, which puts the
+   * newest card below the fold: measured on the Windows runner, its bottom edge
+   * was 261.9 in a 260 px window, so the one thing that must never be off
+   * screen was the one thing that was.
+   *
+   * A `ResizeObserver` rather than an effect on `cards`, because the height
+   * this depends on settles after the state does. A card enters under a
+   * transform and its bullets are revealed one at a time, so the region is
+   * still growing several frames after the render that added it, and an effect
+   * keyed on the card list would pin to a height that was about to change. The
+   * observer fires on each of those growth steps instead.
+   *
+   * `scrollHeight` rather than a smooth scroll: this is a teleprompter, and an
+   * animated scroll under arriving text would be motion `NFR-007` and `FR-092`
+   * exist to keep out of this window.
+   */
+  const cardRegion = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const region = cardRegion.current;
+    if (!region || typeof ResizeObserver === 'undefined') return;
+    const pin = (): void => {
+      region.scrollTop = region.scrollHeight;
+    };
+    const observer = new ResizeObserver(pin);
+    observer.observe(region);
+    // The content, not only the box: the region's own size does not change when
+    // a bullet is added, and that is the growth this is here for.
+    for (const child of region.children) observer.observe(child);
+    pin();
+    return () => observer.disconnect();
+    // Re-observed when the region's children are replaced. The card stack is
+    // one long-lived wrapper, so its growth is caught without this, but going
+    // idle swaps the child outright and a fourth card replaces the newest one
+    // while the count stays at `MAX_CARDS`.
+  }, [idle, visible.length, visible.at(-1)?.cardId]);
+
   return (
     <div
       data-testid="overlay"
@@ -334,7 +374,10 @@ function Overlay(): JSX.Element {
         clipping this change exists to end. A top margin of `auto` pins the
         newest card to the bottom while leaving the older ones reachable.
       */}
-      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overflow-x-hidden">
+      <div
+        ref={cardRegion}
+        className="flex min-h-0 flex-1 flex-col overflow-y-auto overflow-x-hidden"
+      >
         {idle ? (
           <IdleCard paused={paused} sessionActive={sessionActive} />
         ) : (
