@@ -129,7 +129,7 @@ const transcriptEntry = z.intersection(
       model: z.string(),
       providerId: z.string(),
       at: z.string(),
-      status: z.enum(['complete', 'cancelled', 'nonconforming']),
+      status: z.enum(['complete', 'cancelled', 'nonconforming', 'stale']),
     }),
   ]),
 );

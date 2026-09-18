@@ -328,6 +328,7 @@ async function bootstrap(): Promise<void> {
     // then the overlay gate. Routed through a closure because the loop is
     // constructed after the machine it drives.
     onFire: (turn) => live.onFire(turn),
+    classify: (text, signal) => live.classify(text, signal),
     // Entering PAUSED shows the idle card (FR-053). Resuming is pushed by the
     // hotkey handler, so each direction sends exactly one CH-212.
     onOverlayIdle: () => pushOverlayMode(),
@@ -1008,6 +1009,7 @@ function triggerConfigFrom(settings: Settings, serving?: ProviderChoice | null):
   return {
     ...settings.trigger,
     supportsEndpointing: model?.supportsEndpointing ?? false,
+    supportsConfidence: model?.supportsConfidence ?? false,
     // Zero for every streaming model, so the gap is exactly the user's value.
     // A batch model declares its window and the trigger adds it, because the
     // absence of events between two batches is not silence (FR-050).

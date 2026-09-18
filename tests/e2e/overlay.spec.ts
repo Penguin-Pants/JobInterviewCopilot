@@ -255,7 +255,7 @@ test('TC-006 the consent reminder renders before the first suggestion, every ses
     .toBe(true);
 
   await expect
-    .poll(async () => (await boxOf('[data-testid="suggestion-card"][data-depth="0"]')).bottom)
+    .poll(async () => (await boxOf('[data-testid="suggestion-card"]')).bottom)
     .toBeLessThanOrEqual(viewport);
 
   // FR-006: dismissible.
@@ -427,23 +427,16 @@ test('TC-110 the idle card shows before the first suggestion and whenever paused
 });
 
 /* ------------------------------------------------------------------ *
- * TC-111  the three-card cap
+ * TC-111  single-card replacement
  * ------------------------------------------------------------------ */
 
-test('TC-111 a fourth suggestion leaves exactly three cards, the oldest gone', async () => {
+test('TC-111 a new suggestion replaces the card already shown', async () => {
   await setSession(true);
-  for (const id of ['1', '2', '3']) await generate(id, `Question ${id}`, [`Cue ${id}`]);
-  await expect(overlay.locator('[data-testid="suggestion-card"]')).toHaveCount(3);
-
+  await generate('1', 'Question 1', ['Cue 1']);
   await generate('4', 'Question 4', ['Cue 4']);
-  // FR-091, ASM-010. AnimatePresence keeps the leaving card mounted while it
-  // fades, so the count is polled rather than read once: asserting immediately
-  // would be asserting on the exit animation rather than on the cap.
-  await expect(overlay.locator('[data-testid="suggestion-card"]')).toHaveCount(3);
+  await expect(overlay.locator('[data-testid="suggestion-card"]')).toHaveCount(1);
   await expect(overlay.locator('[data-card-id="card-1"]')).toHaveCount(0);
-  for (const id of ['2', '3', '4']) {
-    await expect(overlay.locator(`[data-card-id="card-${id}"]`)).toHaveCount(1);
-  }
+  await expect(overlay.locator('[data-card-id="card-4"]')).toHaveCount(1);
 });
 
 /* ------------------------------------------------------------------ *
@@ -854,10 +847,13 @@ test('FR-083 only the controls take clicks, not the strip that holds them', asyn
 });
 
 test('FR-081 text that does not fit is scrollable rather than clipped', async () => {
-  // Five long bullets on three cards at the largest text size, in the smallest
-  // window the user can make. Something has to overflow, and what overflows has
-  // to remain reachable: the overlay used to clip it away, and the text-size
-  // control then hid more text the larger it was set (FR-004, FR-091, FR-093).
+  // One card of five long bullets at the largest text size, in the overlay's
+  // 420 by 260 default. `FR-091` holds the overlay to a single card, so the
+  // overflow this is about now comes from one card's own text rather than from
+  // a stack: five bullets that each wrap several times over at 32 px exceed the
+  // card region on their own. What overflows has to remain reachable: the
+  // overlay used to clip it away, and the text-size control then hid more text
+  // the larger it was set (FR-004, FR-091, FR-093).
   await pushToOverlay(app, 'overlay:theme', {
     mode: 'dark',
     accent: '#6366F1',
@@ -867,28 +863,30 @@ test('FR-081 text that does not fit is scrollable rather than clipped', async ()
   });
   await setSession(true);
 
-  for (const id of ['1', '2', '3']) {
-    await generate(
-      id,
-      `Question ${id}`,
-      Array.from({ length: 5 }, (_, i) => `Bullet ${i} with enough words in it to wrap twice over`),
-    );
-  }
-  await expect(overlay.locator('[data-testid="suggestion-card"]')).toHaveCount(3);
+  await generate(
+    '1',
+    'Question 1',
+    Array.from(
+      { length: 5 },
+      (_, i) =>
+        `Bullet ${i} with a great many more words in it than one line can hold, so that it wraps several times over at the largest text size the control offers`,
+    ),
+  );
+  await expect(overlay.locator('[data-testid="suggestion-card"]')).toHaveCount(1);
 
   const region = overlay.locator('[data-testid="card-region"]');
-  const scroll = await region.evaluate((el) => ({
-    scrollHeight: el.scrollHeight,
-    clientHeight: el.clientHeight,
-    overflowY: getComputedStyle(el).overflowY,
-  }));
+  // Polled, not read once: the bullets reveal one at a time (FR-092), so the
+  // region's content is still growing for a beat after the last push lands.
+  await expect
+    .poll(async () => region.evaluate((el) => el.scrollHeight > el.clientHeight))
+    .toBe(true);
 
-  expect(scroll.overflowY, 'the card region clips instead of scrolling').toBe('auto');
-  expect(scroll.scrollHeight).toBeGreaterThan(scroll.clientHeight);
+  const overflowY = await region.evaluate((el) => getComputedStyle(el).overflowY);
+  expect(overflowY, 'the card region clips instead of scrolling').toBe('auto');
 
-  // The oldest card is above the fold and can be scrolled back to. `justify-end`
-  // on a scroll container puts overflow off the top where it cannot be reached,
-  // which is the clipping this replaced.
+  // The first bullets are above the fold and can be scrolled back to.
+  // `justify-end` on a scroll container puts overflow off the top where it
+  // cannot be reached, which is the clipping this replaced.
   const scrolledTo = await region.evaluate((el) => {
     el.scrollTop = 0;
     return el.scrollTop;

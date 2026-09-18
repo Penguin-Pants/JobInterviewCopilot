@@ -63,6 +63,7 @@ describe('FR-038 non-streaming consequence', () => {
     streaming: true,
     supportsInterim: true,
     supportsEndpointing: true,
+    supportsConfidence: false,
     audio: { encoding: 'linear16', sampleRate: 16000, channels: 1 },
     pricePerAudioMinuteUsd: 0.005,
   };

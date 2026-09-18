@@ -4,12 +4,12 @@ import type { SuggestionCard } from '../cards.js';
 import { BulletReveal } from './BulletReveal.js';
 
 /**
- * One suggestion card in the stack (FR-004, FR-076, FR-091, FR-092, FR-094).
+ * The overlay's one suggestion card (FR-004, FR-076, FR-091, FR-092, FR-094).
  *
  * The card is the unit `AnimatePresence` adds and removes, so its enter and
- * exit transitions live here and the stack above only decides which cards
- * exist. The oldest card's exit is the fade `FR-091` requires when a fourth
- * arrives.
+ * exit transitions live here and `cards.ts` above only decides which card
+ * exists. The exit is the fade a card leaving gets -- a cancellation
+ * (`FR-054`), a session boundary, or a replacement arriving (`ADR-047`).
  *
  * A card has three possible endings and renders none of them as a failure. A
  * `cancelled` or `nonconforming` generation shows exactly what it produced,
@@ -19,52 +19,39 @@ import { BulletReveal } from './BulletReveal.js';
  */
 export interface SuggestionCardViewProps {
   card: SuggestionCard;
-  /** Depth in the stack, 0 being the newest. Older cards recede. */
-  depth: number;
   /** False under `prefers-reduced-motion` (NFR-010). */
   slide: boolean;
 }
 
-/** The exit `FR-091` names: the oldest card fades out as a fourth enters. */
+/** How long a card takes to fade out on its way off the overlay. */
 export const CARD_EXIT_DURATION_SECONDS = 0.25;
 
 /**
- * How opaque a card at `depth` is rendered (FR-091).
+ * Opacity is the **animated** target, never an inline style (NFR-010).
  *
- * Older cards recede rather than disappear, so a glance lands on the newest
- * cue. This is part of the **animated** target rather than a static style:
  * framer-motion writes the animated value to `element.style`, so an inline
  * `style={{ opacity }}` and an `animate={{ opacity }}` are two writers of one
- * property and the card ends up at whichever wrote last. Measured on the built
- * renderer, that produced a stack where the second card was fully opaque and
- * the third was dimmed, which is neither of the two designs.
- *
- * Making it the target also means a card recedes smoothly as it is pushed down
- * the stack, rather than jumping a step each time a new one arrives.
+ * property and the card ends up at whichever wrote last. That is what the
+ * removed depth dimming got wrong, and the reason a card's settled opacity is
+ * stated here once rather than in two places.
  */
-export function depthOpacity(depth: number): number {
-  return depth === 0 ? 1 : Math.max(0.55, 1 - depth * 0.22);
-}
-
-export function SuggestionCardView({ card, depth, slide }: SuggestionCardViewProps): JSX.Element {
+export function SuggestionCardView({ card, slide }: SuggestionCardViewProps): JSX.Element {
   return (
     <motion.article
       data-testid="suggestion-card"
       data-card-id={card.cardId}
       data-status={card.status}
-      data-depth={depth}
       className="overlay-surface rounded-xl px-3 py-2 shadow-lg"
       initial={slide ? { opacity: 0, y: 10 } : { opacity: 0 }}
       // Opacity only, never a scale: a scale would move text the user may be
       // halfway through reading.
-      animate={slide ? { opacity: depthOpacity(depth), y: 0 } : { opacity: depthOpacity(depth) }}
+      animate={slide ? { opacity: 1, y: 0 } : { opacity: 1 }}
       exit={{ opacity: 0 }}
       transition={{ duration: CARD_EXIT_DURATION_SECONDS, ease: 'easeOut' }}
-      // Position only. A full layout projection measures every card on every
-      // commit, and a card re-renders on each arriving bullet, so three cards
-      // would re-measure per bullet for a reflow that is mostly vertical
-      // anyway: the stack is anchored to the bottom, so an eviction moves
-      // nothing and only a new card shifts the others (NFR-007).
+      // Position only. A full layout projection re-measures the card on every
+      // commit, and a card re-renders on each arriving bullet, for a reflow
+      // that is vertical anyway: the card is anchored to the bottom of the
+      // region, so a bullet arriving moves the card, not its box (NFR-007).
       layout={slide ? 'position' : false}
     >
       <p

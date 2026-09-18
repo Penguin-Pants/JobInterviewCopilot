@@ -1,21 +1,22 @@
 import type { PushPayload } from '../../shared/ipc.js';
 
 /**
- * The overlay's card stack, as a pure reducer (FR-004, FR-008, FR-091, FR-102,
- * TASK-043).
+ * The overlay's card, as a pure reducer (FR-004, FR-008, FR-091, FR-102,
+ * TASK-043, TASK-063).
  *
- * No React and no DOM import, so the cap, the ordering and the replay rules are
- * driven directly in the unit suite rather than through a window. The component
- * tree holds the result of this function and nothing else about the stack.
+ * At most one card exists at a time and a new `begin` replaces it outright
+ * (`ADR-047`); the array survives as the shape `AnimatePresence` and
+ * `shouldShowIdle` already read, not as a stack. No React and no DOM import,
+ * so replacement and the replay rules are driven directly in the unit suite
+ * rather than through a window. The component tree holds the result of this
+ * function and nothing else about which card exists.
  *
- * There is no error state and no way to reach one. `suggestion:end` carries
- * `complete`, `cancelled` or `nonconforming`, and all three are outcomes of a
- * card that is already on screen: none of them adds anything to it, and a card
- * that never ends simply stays as it is (FR-076, FR-102).
+ * `suggestion:end` carries `complete`, `cancelled` or `nonconforming`, and
+ * none of them is an error state. `complete` and `nonconforming` show exactly
+ * what the generation produced and stay until something replaces them;
+ * `cancelled` removes the card, because `FR-054` says an interrupted question's
+ * partial output must leave the overlay rather than linger (FR-076, FR-102).
  */
-
-/** How many cards the active state holds (FR-091, ASM-010). */
-export const MAX_CARDS = 3;
 
 /**
  * How many lines a card can render (FR-004).
@@ -53,7 +54,7 @@ export type CardEvent =
   | { kind: 'reset' };
 
 /**
- * Apply one event to the stack, returning a new array (FR-091).
+ * Apply one event, returning a new array (FR-091).
  *
  * Returns the **same** array reference when nothing changed, so a push that
  * belongs to no card cannot cause a re-render and therefore cannot restart an
@@ -71,13 +72,7 @@ export function reduceCards(cards: SuggestionCard[], event: CardEvent): Suggesti
       // holds if the main process replays for another reason. Re-adding it
       // would show one generation twice and evict a card that is still current.
       if (cards.some((card) => card.cardId === cardId)) return cards;
-      const next = [
-        ...cards,
-        { cardId, generationId, question, lines: [], status: 'streaming' as const },
-      ];
-      // Oldest first, so the one that leaves is the one at the front. The slice
-      // is what `AnimatePresence` sees a card disappear from (FR-091, TC-111).
-      return next.length > MAX_CARDS ? next.slice(next.length - MAX_CARDS) : next;
+      return [{ cardId, generationId, question, lines: [], status: 'streaming' as const }];
     }
 
     case 'line': {
@@ -103,6 +98,7 @@ export function reduceCards(cards: SuggestionCard[], event: CardEvent): Suggesti
       const { generationId, status } = event.payload;
       const target = cards.findIndex((card) => card.generationId === generationId);
       if (target === -1) return cards;
+      if (status === 'cancelled') return cards.filter((_, index) => index !== target);
       const card = cards[target];
       if (!card || card.status === status) return cards;
       const next = [...cards];

@@ -32,6 +32,7 @@ import type {
 import { findSttModel } from '../shared/registry/stt.js';
 import type { AudioSupervisor } from './audio.js';
 import type { ProviderHealthRegistry } from './ai/health.js';
+import { classifyWithLlm, type ActionabilityVerdict } from './ai/actionability.js';
 import {
   requireLlmProvider,
   runGeneration,
@@ -47,6 +48,8 @@ import type { SessionManager } from './session.js';
 
 /** How many knowledge-base chunks one suggestion is built from (`FR-072`). */
 export const RETRIEVAL_K = 3;
+export const STALE_DISCARD_MS = 20_000;
+export const CLASSIFICATION_TIMEOUT_MS = 800;
 
 /** Both streams, in the order they are opened and closed (`FR-040`, `FR-047`). */
 const SOURCES: readonly TranscriptSource[] = ['interviewer', 'candidate'];
@@ -103,7 +106,7 @@ export interface LiveSessionLoopOptions {
   >;
   sessions: Pick<SessionManager, 'appendTurn' | 'appendSuggestion'>;
   cost: Pick<CostMeter, 'noteAudio' | 'noteGeneration'>;
-  health: Pick<ProviderHealthRegistry, 'runFor'>;
+  health: Pick<ProviderHealthRegistry, 'runFor'> & Partial<Pick<ProviderHealthRegistry, 'for'>>;
   /** The current settings, read at each start rather than captured once. */
   settings: () => Settings;
   /** `RagEngine.query`, narrowed to what the loop needs (`CMP-06`). */
@@ -151,6 +154,8 @@ export class LiveSessionLoop {
    * that ordering a mechanism rather than a hope about timing.
    */
   private generation: Promise<void> | null = null;
+  private classification: Promise<void> | null = null;
+  private classificationCounter = 0;
 
   /**
    * The start in flight, so `stop` cannot interleave with it (ADR-036).
@@ -208,7 +213,7 @@ export class LiveSessionLoop {
    */
   async whenSettled(): Promise<void> {
     try {
-      await this.generation;
+      await Promise.all([this.generation, this.classification]);
     } catch {
       // Reported where it happened. Waiting for a turn must not fail a caller.
     }
@@ -284,7 +289,7 @@ export class LiveSessionLoop {
     this.profileId = null;
 
     this.options.trigger.stop();
-    await this.settleGeneration();
+    await Promise.all([this.settleGeneration(), this.settleClassification()]);
     await this.reopening;
     await this.closeStreams();
 
@@ -569,6 +574,68 @@ export class LiveSessionLoop {
     });
   };
 
+  readonly classify = (text: string, signal: AbortSignal): Promise<ActionabilityVerdict> => {
+    const operation = this.runClassification(text, signal);
+    const tracked = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    const previous = this.classification;
+    const aggregate = Promise.all([previous, tracked]).then(() => undefined);
+    this.classification = aggregate;
+    void aggregate.finally(() => {
+      if (this.classification === aggregate) this.classification = null;
+    });
+    return operation;
+  };
+
+  private async runClassification(
+    text: string,
+    parentSignal: AbortSignal,
+  ): Promise<ActionabilityVerdict> {
+    const settings = this.options.settings();
+    const primary = this.resolveLlm(settings.providers.llm.primary, 'primary');
+    if (!primary || this.options.health.for?.('llm').current.kind !== 'using-primary') {
+      return 'actionable';
+    }
+
+    this.classificationCounter += 1;
+    const classificationId = `classification-${String(Date.now())}-${String(this.classificationCounter)}`;
+    let usage = { inputTokens: 0, outputTokens: 0 };
+    const controller = new AbortController();
+    const abort = (): void => controller.abort();
+    parentSignal.addEventListener('abort', abort, { once: true });
+    let rejectTimeout: ((reason: Error) => void) | null = null;
+    const timedOut = new Promise<never>((_, reject) => {
+      rejectTimeout = reject;
+    });
+    const timeout = setTimeout(() => {
+      abort();
+      rejectTimeout?.(new Error('classification timed out'));
+    }, CLASSIFICATION_TIMEOUT_MS);
+    try {
+      return await Promise.race([
+        classifyWithLlm(
+          text,
+          classificationId,
+          primary.choice,
+          primary.provider,
+          controller.signal,
+          (reported) => {
+            usage = reported;
+          },
+        ),
+        timedOut,
+      ]);
+    } catch {
+      return 'actionable';
+    } finally {
+      clearTimeout(timeout);
+      parentSignal.removeEventListener('abort', abort);
+      this.options.cost.noteGeneration(`classify:${classificationId}`, primary.choice, usage);
+    }
+  }
+
   private async runTurn(turn: TurnFired, previous: Promise<void> | null): Promise<void> {
     // The trigger aborted the predecessor before firing this turn. Awaiting it
     // here is what puts the cancelled generation's entry, carrying the bullets
@@ -617,6 +684,18 @@ export class LiveSessionLoop {
       choice: primary.choice,
     };
     let attempt = 0;
+    let stale = false;
+    let firstLineChecked = false;
+    let staleEndSent = false;
+    /**
+     * Whether a card for this generation is on the overlay right now.
+     *
+     * Not "has a begin ever been sent": an attempt that fails before producing
+     * a bullet resolves `'cancelled'`, and `reduceCards` removes a cancelled
+     * card outright (`ADR-047`), so the retry has to send its own `begin` or
+     * its lines arrive for a card that no longer exists.
+     */
+    let cardUp = false;
 
     try {
       await this.options.health.runFor('llm', async (target) => {
@@ -635,12 +714,57 @@ export class LiveSessionLoop {
           turn.signal,
           {
             onBegin: (payload) => {
+              // This callback runs once per **attempt**, not once per
+              // generation: `runFor` re-enters the closure on each retry and on
+              // a failover (`health.ts` `runPrimaryWithLadder`, `runOnBackup`,
+              // `runDegraded`), and `runGeneration` calls `onBegin` at the top
+              // of every one. What it does here turns on whether a card is
+              // still on the overlay.
+              //
+              // Card still up: the retry's begin is a duplicate, so it is
+              // dropped and checkpoint 1 is not re-run. Re-running the clock
+              // stranded a card once -- a retry past the threshold marked the
+              // whole generation stale, which suppressed the real `onEnd` while
+              // the cancellation that clears a card lives in `onLine` alone.
+              // An already-begun generation is checkpoint 2's to catch.
+              //
+              // Card gone, because an empty failed attempt resolved
+              // `'cancelled'` and `reduceCards` removed it: this begin is the
+              // one that puts the retry's answer back on screen, so it is a
+              // first begin in every sense and checkpoint 1 applies to it.
+              if (cardUp) return;
+              if (Date.now() - turn.firedAt > STALE_DISCARD_MS) {
+                stale = true;
+                return;
+              }
+              cardUp = true;
               this.options.onSuggestion({ channel: 'suggestion:begin', payload });
             },
             onLine: (payload) => {
+              if (stale) return;
+              if (!firstLineChecked) {
+                firstLineChecked = true;
+                if (Date.now() - turn.firedAt > STALE_DISCARD_MS) {
+                  stale = true;
+                  if (cardUp) {
+                    cardUp = false;
+                    staleEndSent = true;
+                    this.options.onSuggestion({
+                      channel: 'suggestion:end',
+                      payload: { generationId: turn.generationId, status: 'cancelled' },
+                    });
+                  }
+                  return;
+                }
+              }
               this.options.onSuggestion({ channel: 'suggestion:line', payload });
             },
             onEnd: (payload) => {
+              if (stale || staleEndSent) return;
+              // `reduceCards` removes a cancelled card, so this end is what
+              // leaves the overlay empty and what a retry's own begin has to
+              // fill again.
+              if (payload.status === 'cancelled') cardUp = false;
               this.options.onSuggestion({ channel: 'suggestion:end', payload });
             },
           },
@@ -681,7 +805,7 @@ export class LiveSessionLoop {
         bullets: outcome.bullets,
         model: settled.choice.modelId,
         providerId: settled.choice.providerId,
-        status: outcome.status,
+        status: stale ? 'stale' : outcome.status,
       });
     } catch (err) {
       this.options.onError('a suggestion could not be appended to the transcript', err);
@@ -753,6 +877,16 @@ export class LiveSessionLoop {
       await generation;
     } catch (err) {
       this.options.onError('the in-flight generation failed while stopping', err);
+    }
+  }
+
+  private async settleClassification(): Promise<void> {
+    const classification = this.classification;
+    if (!classification) return;
+    try {
+      await classification;
+    } catch (err) {
+      this.options.onError('the in-flight classification failed while stopping', err);
     }
   }
 

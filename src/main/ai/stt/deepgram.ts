@@ -48,7 +48,7 @@ interface DeepgramFrame {
   type?: string;
   speech_final?: boolean;
   is_final?: boolean;
-  channel?: { alternatives?: { transcript?: string }[] };
+  channel?: { alternatives?: { transcript?: string; confidence?: number }[] };
 }
 
 export function deepgramAdapterSpec(
@@ -65,7 +65,12 @@ export function deepgramAdapterSpec(
       const text = frame.channel?.alternatives?.[0]?.transcript ?? '';
       // Deepgram sends empty interim results constantly. Emitting them would
       // blank the overlay between words.
-      if (text !== '') emit.transcript(text, frame.is_final === true);
+      if (text !== '')
+        emit.transcript(
+          text,
+          frame.is_final === true,
+          frame.channel?.alternatives?.[0]?.confidence,
+        );
       // speech_final is the native turn end, fired at the `endpointing` gap.
       if (frame.speech_final === true) emit.endpoint();
     },

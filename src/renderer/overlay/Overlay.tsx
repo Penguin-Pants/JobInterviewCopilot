@@ -13,7 +13,8 @@ import {
 import { createRoot } from 'react-dom/client';
 import { defaultSettings } from '../../shared/defaults.js';
 import type { Settings } from '../../shared/types.js';
-import { MAX_CARDS, reduceCards, shouldShowIdle } from './cards.js';
+import { reduceCards, shouldShowIdle } from './cards.js';
+import { HoldBuffer } from './holdBuffer.js';
 import { lastSeen } from './earlyPushes.js';
 import { resolveOverlayTheme } from './theme.js';
 import { ConsentReminder } from './components/ConsentReminder.js';
@@ -29,17 +30,18 @@ import './styles.css';
  * Traces FR-006, FR-007, FR-008, FR-076, FR-085, FR-089, FR-090, FR-091,
  * FR-092, FR-093, FR-094, FR-102, NFR-007, NFR-010, NFR-012.
  *
- * Two states and no third. Idle is the standing-by card; active is a stack of
- * at most three suggestion cards. **There is no error state in this component
+ * Two states and no third. Idle is the standing-by card; active is one
+ * suggestion card (`ADR-047`). **There is no error state in this component
  * tree, by design** (`FR-076`): the overlay's preload allowlist carries no
  * channel that could deliver one, `suggestion:end`'s three outcomes are all
  * things a card that already exists can be, and an extended silence is simply
  * the idle card (`FR-102`).
  *
  * Every piece of derived state is computed by a pure module: `cards.ts` owns
- * the stack and `theme.ts` owns the colours and the contrast floor, so the cap,
- * the ordering and `FR-093`'s 4.5 to 1 are driven in the unit suite rather than
- * only through a window.
+ * which card exists, `holdBuffer.ts` owns when a replacement is allowed to
+ * reach it, and `theme.ts` owns the colours and the contrast floor, so
+ * replacement, the hold and `FR-093`'s 4.5 to 1 are driven in the unit suite
+ * rather than only through a window.
  */
 
 /** What the renderer knows about the host machine until `CH-216` says otherwise. */
@@ -84,6 +86,8 @@ function Overlay(): JSX.Element {
     () => lastSeen('overlay:theme') ?? defaultSettings().theme,
   );
   const [cards, dispatch] = useReducer(reduceCards, []);
+  const holdBuffer = useMemo(() => new HoldBuffer(dispatch, { minHoldMs: 1500 }), [dispatch]);
+  useEffect(() => () => holdBuffer.dispose(), [holdBuffer]);
   /**
    * Bumped at every session boundary, to re-report readiness (FR-006, FR-008).
    *
@@ -154,15 +158,22 @@ function Overlay(): JSX.Element {
       window.copilot.on('overlay:mode', (p) => {
         setInteractive(p.interactive);
         setPaused(p.paused);
+        if (p.paused) holdBuffer.onPause();
       }),
       window.copilot.on('state:session', (p) => {
         setSessionActive(p.active);
         setSessionId(p.sessionId);
         setPaused(p.paused);
       }),
-      window.copilot.on('suggestion:begin', (payload) => dispatch({ kind: 'begin', payload })),
-      window.copilot.on('suggestion:line', (payload) => dispatch({ kind: 'line', payload })),
-      window.copilot.on('suggestion:end', (payload) => dispatch({ kind: 'end', payload })),
+      window.copilot.on('suggestion:begin', (payload) =>
+        holdBuffer.onEvent({ kind: 'begin', payload }),
+      ),
+      window.copilot.on('suggestion:line', (payload) =>
+        holdBuffer.onEvent({ kind: 'line', payload }),
+      ),
+      window.copilot.on('suggestion:end', (payload) =>
+        holdBuffer.onEvent({ kind: 'end', payload }),
+      ),
     ];
 
     // A push that landed between the `useState` initializers above and this
@@ -177,6 +188,11 @@ function Overlay(): JSX.Element {
     if (earlyMode) {
       setInteractive(earlyMode.interactive);
       setPaused(earlyMode.paused);
+      // `onPause()` too, exactly as the live handler above does. An overlay
+      // rebuilt while the trigger is already paused reseeds from here and never
+      // sees that `CH-212`, so without this the buffer would still believe a
+      // card is shown and could hold the first suggestion after the resume.
+      if (earlyMode.paused) holdBuffer.onPause();
     }
     const earlySession = lastSeen('state:session');
     if (earlySession) {
@@ -184,7 +200,7 @@ function Overlay(): JSX.Element {
       setSessionId(earlySession.sessionId);
       // `paused` too, as the initialiser above does. `CH-201` carries it, and
       // re-seeding one of its two fields would leave the overlay showing a live
-      // card stack over a paused trigger if this push were ever to arrive
+      // card over a paused trigger if this push were ever to arrive
       // without a `CH-212` beside it (FR-053).
       setPaused(earlySession.paused);
     }
@@ -194,10 +210,10 @@ function Overlay(): JSX.Element {
     if (earlyNotice) setCaptureNotice(earlyNotice.message);
 
     return () => off.forEach((unsubscribe) => unsubscribe());
-  }, []);
+  }, [holdBuffer]);
 
   /**
-   * A session boundary clears the stack and brings the reminder back (FR-006).
+   * A session boundary clears the card and brings the reminder back (FR-006).
    *
    * `FR-006` says "before the first suggestion of **every** live session", so a
    * reminder dismissed during the last interview must not still be dismissed
@@ -224,7 +240,7 @@ function Overlay(): JSX.Element {
   useEffect(() => {
     if (sessionId !== null && sessionId !== lastSessionId.current) {
       setDismissed(false);
-      dispatch({ kind: 'reset' });
+      holdBuffer.onEvent({ kind: 'reset' });
       // And readiness is owed again. `OverlayGate.reset()` closes the gate at
       // this same boundary, so until this is answered the next interview's
       // suggestions buffer rather than arriving over a reminder that has not
@@ -232,7 +248,7 @@ function Overlay(): JSX.Element {
       setReadyEpoch((epoch) => epoch + 1);
     }
     lastSessionId.current = sessionId;
-  }, [sessionId]);
+  }, [sessionId, holdBuffer]);
 
   /**
    * Report readiness once the consent card is on screen (FR-008, ADR-016).
@@ -295,7 +311,6 @@ function Overlay(): JSX.Element {
   }, []);
 
   const idle = shouldShowIdle(cards, paused);
-  const visible = cards.slice(-MAX_CARDS);
   const reminderUp = consent !== null && !dismissed;
 
   /**
@@ -419,11 +434,11 @@ function Overlay(): JSX.Element {
     for (const child of region.children) observer.observe(child);
     pin();
     return () => observer.disconnect();
-    // Re-observed when the region's children are replaced. The card stack is
-    // one long-lived wrapper, so its growth is caught without this, but going
-    // idle swaps the child outright and a fourth card replaces the newest one
-    // while the count stays at `MAX_CARDS`.
-  }, [idle, visible.length, visible.at(-1)?.cardId]);
+    // Re-observed when the region's children are replaced. The card wrapper is
+    // long-lived, so its growth is caught without this, but going idle swaps
+    // the child outright and a new suggestion replaces the card in place
+    // (`FR-091`) while the count stays at one.
+  }, [idle, cards.length, cards.at(-1)?.cardId]);
 
   return (
     <div
@@ -460,7 +475,7 @@ function Overlay(): JSX.Element {
         the way that matters: with `justify-end` the overflow goes off the top
         of the scroll container and cannot be scrolled back to, which is the
         clipping this change exists to end. A top margin of `auto` pins the
-        newest card to the bottom while leaving the older ones reachable.
+        newest cue to the bottom while leaving the earlier ones reachable.
       */}
       <div
         ref={cardRegion}
@@ -476,9 +491,10 @@ function Overlay(): JSX.Element {
         ) : (
           <div data-testid="card-stack" className="mt-auto flex flex-col gap-1">
             {/*
-              FR-091: a fourth card entering fades the oldest out. The cap lives
-              in `cards.ts`; AnimatePresence is what makes the eviction visible
-              rather than instantaneous (ASM-010).
+              FR-091: one card at a time, and a new suggestion replaces it.
+              `cards.ts` decides which card exists; AnimatePresence is what
+              makes a card leaving -- a cancellation (`FR-054`) or a session
+              boundary -- a fade rather than a disappearance (`ADR-047`).
 
               No `initial={false}`. It was here to stop a rebuilt overlay
               animating a replayed card in, and it cost `FR-092` instead: this
@@ -490,17 +506,13 @@ function Overlay(): JSX.Element {
               every `BulletReveal` mounted inside it. Measured on the built
               renderer: the first card of every active period, and all of its
               bullets, appeared at full opacity with no fade and no slide, while
-              cards two and three animated correctly. It recurred after every
-              pause and every session boundary, because those unmount the stack.
+              the cards that replaced it animated correctly. It recurred after
+              every pause and every session boundary, because those unmount the
+              wrapper.
             */}
             <AnimatePresence>
-              {visible.map((card, position) => (
-                <SuggestionCardView
-                  key={card.cardId}
-                  card={card}
-                  depth={visible.length - 1 - position}
-                  slide={slide}
-                />
+              {cards.map((card) => (
+                <SuggestionCardView key={card.cardId} card={card} slide={slide} />
               ))}
             </AnimatePresence>
           </div>

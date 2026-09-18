@@ -80,6 +80,15 @@ describe('the v1 registry contents match the architecture', () => {
     }
   });
 
+  it('TC-185 declares confidence support for every model', () => {
+    for (const provider of STT_REGISTRY) {
+      for (const model of provider.models) {
+        expect(typeof model.supportsConfidence).toBe('boolean');
+        expect(model.supportsConfidence).toBe(provider.id === 'deepgram');
+      }
+    }
+  });
+
   it('points each provider at its own credential', () => {
     const byId = Object.fromEntries(STT_REGISTRY.map((p) => [p.id, p.credentialId]));
     expect(byId).toEqual({ deepgram: 'deepgram', openai: 'openai', elevenlabs: 'elevenlabs' });
