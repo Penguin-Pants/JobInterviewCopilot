@@ -428,6 +428,8 @@ Four further rules settled while implementing `TASK-040`:
 
 ### 2.6 Runtime events (not persisted)
 
+`src/shared/types.ts`, alongside the persisted types in 2.1–2.5.
+
 ```ts
 interface TranscriptEvent {
   source: 'interviewer' | 'candidate';
@@ -603,11 +605,27 @@ interface GenerationRequest {
   candidateContext: string;
   chunks: RetrievedChunk[];   // up to 3
   choice: ProviderChoice;     // provider + model from the LLM registry
+  /** New (FR-111, TASK-060). When present, buildMessages (prompt.ts) uses
+   *  this system prompt and these parameters INSTEAD OF the fixed
+   *  SYSTEM_PROMPT/GENERATION_PARAMS section 6 specifies, and ignores
+   *  `question`, `candidateContext` and `chunks` entirely — the override
+   *  carries the complete user message itself. Used only by the
+   *  actionability classifier (3.6a); a real suggestion generation never
+   *  sets this, and section 6's prompt is exactly as unchanged as it looks. */
+  promptOverride?: {
+    system: string;
+    user: string;
+    maxTokens: number;
+    temperature: number;
+  };
 }
 ```
 
 The adapter yields raw deltas. Line buffering is done above the adapter in
-`CMP-07`, so both providers get identical overlay behavior (`FR-074`).
+`CMP-07`, so both providers get identical overlay behavior (`FR-074`). This
+branch on `promptOverride` lives inside the one shared `buildMessages`
+(`prompt.ts`), not duplicated inside either adapter — the same reason line
+buffering itself lives above the adapters rather than inside each one.
 
 **A stream that ends before its terminal marker is a failure, not a completion.**
 A proxy or a dropped connection can close a 200 response cleanly without
@@ -757,6 +775,12 @@ CONFIG_REQUIRED  -- non-retryable failure (auth, client). Terminal for that
 
 ### 3.6 Confidence gate and actionability classifier (`CMP-05`, `FR-111`, `FR-113`, `ADR-045`, `ADR-046`)
 
+`ActionabilityVerdict` and `classifyHeuristically` are declared in
+`src/main/ai/actionability.ts` (11); `classifyWithLlm` is declared there too
+but is imported only by `live.ts`, never by `trigger.ts` (3.6's own point).
+`TriggerOptions.classify` is declared in `src/main/ai/trigger.ts` alongside
+the interface it extends.
+
 **Order matters: confidence, then actionability.** The confidence gate is one
 free, local comparison; the actionability classifier can cost a network round
 trip. Checking confidence first means a turn garbled enough to fail it is
@@ -860,31 +884,21 @@ before the guard chain restarts for the new text.
 ### 3.6a Actionability classification prompt (`FR-111`, `CMP-15`)
 
 Fixed, not user-editable, the same discipline section 6 holds the suggestion
-prompt to. `GenerationRequest` (3.2) gains one optional field so the
-classification call can use `LlmProvider.generate` — "the existing interface,"
-per `TASK-060` — without going through the fixed interview-cue system prompt
-and `GENERATION_PARAMS` that `buildMessages`/`prompt.ts` otherwise always
-apply:
+prompt to. Uses `GenerationRequest.promptOverride` (3.2) so the classification
+call can go through `LlmProvider.generate` — "the existing interface," per
+`TASK-060` — without the fixed interview-cue system prompt and
+`GENERATION_PARAMS` that `buildMessages`/`prompt.ts` otherwise always apply.
 
-```ts
-interface GenerationRequest {
-  generationId: string;
-  question: string;
-  candidateContext: string;
-  chunks: RetrievedChunk[];
-  choice: ProviderChoice;
-  /** When present, buildMessages uses this system prompt and these
-   *  parameters instead of prompt.ts's fixed SYSTEM_PROMPT and
-   *  GENERATION_PARAMS. Used only by the actionability classifier
-   *  (FR-111); a real suggestion generation never sets this. */
-  promptOverride?: {
-    system: string;
-    user: string;
-    maxTokens: number;
-    temperature: number;
-  };
-}
-```
+**The request's other fields, for a classification call specifically.**
+`promptOverride.user` already carries the complete, literal user message, so
+`question`, `candidateContext` and `chunks` are inert — ignored by
+`buildMessages` whenever `promptOverride` is set (3.2) — but the interface
+still requires them, and this is what `classifyWithLlm` puts there: `question`
+is the turn text (redundant with `promptOverride.user`, but harmless);
+`candidateContext` is `''`; `chunks` is `[]`. `generationId` is **not**
+synthesized separately — it is the same `classificationId` described below,
+so one identifier serves both the request shape's required field and the
+Cost Meter key, rather than inventing two.
 
 System prompt, verbatim:
 
@@ -904,22 +918,44 @@ Respond with the one word and nothing else.
 User message template: `TURN:\n${text.trim()}`. Parameters: `maxTokens: 5`
 (one word, with margin for tokenization), `temperature: 0`.
 
-`classifyWithLlm(text, llm, signal)` builds this request, calls
-`llm.generate(req, signal)`, and reads the first delta: checked in this
-order because the string `"NON_ACTIONABLE"` contains `"ACTIONABLE"` as a
-substring, a case-insensitive match on `NON_ACTIONABLE` is checked **first**
-and resolves `'non-actionable'`; only if that does not match, a
-case-insensitive match on `ACTIONABLE` resolves `'actionable'`. Anything
-else — including no response, a stream that ends without a recognizable
-token, or the same non-aborted-stream-ends-early failure 3.2 already defines
-as a `ProviderError` — resolves to `'actionable'` (`ADR-045`).
+`classifyWithLlm(text, llm, signal)` builds this request and calls
+`llm.generate(req, signal)`. It drains the whole iterable before deciding
+anything — concatenating every `{ delta }` item into one string and keeping
+the terminal `{ usage }` item — not just the first delta: `maxTokens: 5` caps
+the response to about one word, so draining to completion is near-instant,
+and only a fully-drained response can be checked against **both** verdict
+words reliably. The accumulated string is checked in this order — because
+the string `"NON_ACTIONABLE"` contains `"ACTIONABLE"` as a substring, a
+case-insensitive match on `NON_ACTIONABLE` is checked **first** and resolves
+`'non-actionable'`; only if that does not match, a case-insensitive match on
+`ACTIONABLE` resolves `'actionable'`. Anything else — including an empty
+response, a stream that ends without a recognizable token, or the same
+non-aborted-stream-ends-early failure 3.2 already defines as a
+`ProviderError` — resolves to `'actionable'` (`ADR-045`).
 
-The call's `TokenUsage` is reported to the Cost Meter (`CMP-09`,
-`cost.noteGeneration`) before `classify` resolves, under a key that cannot
-collide with any real generation's `<generationId>#<attempt>` scheme
-(`ADR-036`) — a classification call has no `generationId` of its own.
+**Cost accounting.** `live.ts`'s `classify` closure generates its own fresh
+`classificationId` each time it is called, independently of the trigger (the
+trigger's own `newGenerationId()` is for `TurnFired.generationId`, a
+different id for a different purpose) — not threaded through
+`TriggerOptions.classify`'s signature at all, which stays exactly
+`(text, signal) => Promise<ActionabilityVerdict>`; the trigger has no need to
+know this id exists. The closure wraps the call in a `try`/`finally`:
+whether it resolves with a verdict or the promise rejects (including on
+`signal` abort, `FR-054`), the `finally` reports whatever `TokenUsage` was
+captured — zero if the call was aborted before any usage arrived, matching
+section 7's general "a generation cancelled before any usage is reported
+accounts zero tokens" rule — to `cost.noteGeneration` under the key
+`` `classify:${classificationId}` ``, which cannot collide with any real
+generation's `<generationId>#<attempt>` scheme (`ADR-036`) because no real
+`generationId` is ever prefixed `classify:`. This same `classificationId` is
+also what the request's own `generationId` field (3.2) is set to, so nothing
+extra needs inventing for that field either.
 
 ### 3.7 Staleness check (`FR-114`, `CMP-15`, `ADR-048`)
+
+`TurnFired` is declared in `src/main/ai/trigger.ts`, the module that
+constructs it. `CONFIDENCE_THRESHOLD` (3.6) lives beside it there;
+`STALE_DISCARD_MS` lives in `src/main/live.ts`, the module that reads it.
 
 ```ts
 interface TurnFired {
@@ -1006,19 +1042,36 @@ status — a generation that finished streaming while queued, waiting out the
 hold, must not surface once the session resumes, the same as one that was
 mid-stream when the pause arrived.
 
-For an ordinary `CardEvent` (`'begin'`, `'line'`, `'end'`): with no card
-shown, or the shown card visible at least `minHoldMs`, it dispatches
-immediately. Otherwise it queues, keyed by `generationId`, replayed once the
-hold elapses — in arrival order **and at the spacing the events originally
-arrived in**, not flushed simultaneously, so a held card's bullets still
-trigger their per-bullet reveal (`FR-092`) one at a time rather than appearing
-all at once. A `suggestion:end` with `status: 'cancelled'` for a
-`generationId` still queued discards that generation's queued entries instead
-of flushing them once the hold elapses — a card superseded before it was ever
-shown must not be shown after the fact. The first card shown with no card
-currently on screen — a session's first suggestion, or the first one after a
-pause — bypasses the hold
-(there is nothing to protect the reading time of).
+For an ordinary `CardEvent` (`'begin'`, `'line'`, `'end'`), the hold gates
+**replacement by a different generation, never an event belonging to the
+generation already on screen.** This distinction is load-bearing, not a
+restatement:
+
+- **An event whose `generationId` matches the currently shown card's**
+  dispatches immediately, regardless of how long that card has been visible.
+  This is what lets a fast-completing card's own later lines keep triggering
+  `FR-092`'s per-bullet reveal as they stream in — they are not held just
+  because the card itself is under `minHoldMs` old — and, more importantly,
+  what lets `FR-054`'s "the cancelled partial output must be removed from the
+  overlay" apply without delay: a `suggestion:end` with `status: 'cancelled'`
+  for the **currently shown** card's own `generationId` clears it immediately,
+  never queued, because the whole point of cancellation is that nothing about
+  the interrupted question should linger on screen a moment longer.
+- **An event for any other `generationId`** — a candidate to replace the
+  shown card — is what the hold actually applies to: with no card shown, or
+  the shown card visible at least `minHoldMs`, it dispatches immediately (it
+  becomes the new shown card). Otherwise it queues, replayed once the hold
+  elapses — in arrival order **and at the spacing the events originally
+  arrived in**, not flushed simultaneously, so a held card's bullets still
+  trigger their own per-bullet reveal once promoted. A `suggestion:end` with
+  `status: 'cancelled'` for a `generationId` **still queued** (never shown)
+  discards that generation's queued entries instead of flushing them once the
+  hold elapses — a card superseded before it was ever shown must not be shown
+  after the fact.
+
+The first card shown with no card currently on screen — a session's first
+suggestion, or the first one after a pause — bypasses the hold (there is
+nothing to protect the reading time of).
 
 ---
 

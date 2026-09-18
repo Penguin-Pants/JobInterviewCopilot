@@ -1873,11 +1873,18 @@ section 8).
   `trigger.ts` calls `this.options.classify(...)` only when
   `classifyHeuristically` returns `null`; it never imports `classifyWithLlm`
   or `LlmProvider` itself.
-- `live.ts`'s `classify` closure reports the call's own `TokenUsage` to the
-  Cost Meter (`cost.noteGeneration`) under a key that cannot collide with any
-  generation's, before resolving the verdict to the trigger — a classification
-  call is real, billable spend and must not be silently dropped from the
-  session estimate (`FR-103`).
+- `live.ts`'s `classify` closure generates its own fresh `classificationId`
+  per call (not threaded through `TriggerOptions.classify`'s signature), sets
+  it as the `GenerationRequest.generationId` for this call, and — wrapped in
+  `try`/`finally` so an aborted or failed call still reports, at zero usage if
+  none arrived — reports `TokenUsage` to the Cost Meter under
+  `` `classify:${classificationId}` `` before the closure settles. A
+  classification call is real, billable spend and must not be silently
+  dropped from the session estimate (`FR-103`).
+- `classifyWithLlm` drains the full response (not just the first delta)
+  before checking it against `NON_ACTIONABLE`/`ACTIONABLE` — `maxTokens: 5`
+  keeps this fast — since only a fully-drained response carries the terminal
+  `TokenUsage` the cost-accounting bullet above depends on.
 - A turn neither rule resolves calls `this.options.classify`, sharing the
   turn's own `AbortController` (the same controller `firedAt` was stamped
   alongside, `TASK-062`).
@@ -1897,16 +1904,18 @@ section 8).
 - The LLM-confirm path adds no more than 400 ms at p95 to the existing latency
   harness (`NFR-018`), measured with scripted fakes at fixed delays. `TC-133`
   is unaffected because its fixtures resolve via the heuristic path only.
-**Verified by** TC-167, TC-168, TC-169
+**Verified by** TC-167, TC-168, TC-169, TC-178
 
 ### TASK-061 STT confidence capability and gate
 **Traces** FR-112, FR-113, ASM-016
-**Depends on** TASK-012, TASK-030
+**Depends on** TASK-012, TASK-013, TASK-030
 **Acceptance criteria**
 - `SttModelDescriptor` carries `supportsConfidence`. Every v1 registry entry
   states it explicitly — `true` for `deepgram`'s models, `false` for
   `openai-realtime`, `elevenlabs` and `whisper-1` — rather than leaving it to a
   default, the same discipline `TC-056` already holds `supportsEndpointing` to.
+  The `whisper-1` row is `TASK-013`'s, not `TASK-012`'s (`TASK-012` explicitly
+  deferred it), which is why this task depends on both.
   This flag inherits the same primary-vs-active-after-failover resolution
   `supportsEndpointing` already has (`ADR-046`); not this task's to fix.
 - `TranscriptEvent` carries an optional `confidence`, populated only when the
@@ -1958,7 +1967,7 @@ section 8).
 - A test drives a scripted delay past the threshold and asserts zero
   `suggestion:begin`/`line`/`end` pushes plus one `'stale'` transcript entry; a
   delay under the threshold asserts the existing behavior is unaffected.
-**Verified by** TC-172, TC-173
+**Verified by** TC-172, TC-173, TC-179
 
 ### TASK-063 Single-card overlay
 **Traces** FR-091 (amended), ASM-010
@@ -2002,16 +2011,26 @@ section 8).
 - A `HoldBuffer` sits between the overlay's IPC subscriptions and dispatch into
   `reduceCards`. `reduceCards` itself, and every existing test describing it,
   is unchanged.
-- With no card shown, or the shown card visible at least `minHoldMs` (1500), an
-  incoming `CardEvent` dispatches immediately.
-- With a card shown less than `minHoldMs`, incoming events for a new
+- **An event whose `generationId` matches the currently shown card's always
+  dispatches immediately**, regardless of that card's age — this is not an
+  edge case, it is the common case (a shown card's own later lines) and must
+  not be confused with the hold, which gates replacement by a *different*
+  generation only. A `suggestion:end` with `status: 'cancelled'` for the
+  **shown** card's own `generationId` also dispatches immediately: `FR-054`
+  gives cancellation no grace period.
+- With no card shown, or the shown card visible at least `minHoldMs` (1500),
+  an incoming event for a **different** `generationId` dispatches immediately
+  (it becomes the new shown card).
+- With a card shown less than `minHoldMs`, incoming events for a **different**
   `generationId` queue and replay once the hold elapses, in arrival order and
   **at the spacing they originally arrived in** — not flushed all at once —
   so a held card's bullets still trigger their per-bullet reveal (`FR-092`)
-  individually. Tests drive this with injected timers, not real waits.
-- A `suggestion:end` with `status: 'cancelled'` for a `generationId` still
-  queued discards that generation's queued entries; nothing from it ever
-  dispatches.
+  individually once promoted. Tests drive this with injected timers, not real
+  waits.
+- A `suggestion:end` with `status: 'cancelled'` for a **queued, never-shown**
+  `generationId` discards that generation's queued entries; nothing from it
+  ever dispatches. (This is distinct from the first bullet above, which
+  covers cancelling the card already on screen.)
 - A `'reset'` event (session boundary) bypasses the buffer entirely — it
   dispatches immediately and clears anything queued, never held, matching how
   `reduceCards` itself treats a session boundary as unconditional.
@@ -2022,4 +2041,4 @@ section 8).
   still mid-stream when the pause arrived.
 - Whenever no card is currently shown — the first suggestion of a session, or
   the first one after a pause — the hold does not apply.
-**Verified by** TC-174, TC-175, TC-176
+**Verified by** TC-174, TC-175, TC-176, TC-177

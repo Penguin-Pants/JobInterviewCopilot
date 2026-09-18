@@ -249,6 +249,19 @@ streaming, the in-flight generation must be cancelled and a new one started for
 the newest question. The cancelled partial output must be removed from the
 overlay. (ASM-004)
 
+> **Amended.** "A generation" in this requirement now also covers an
+> in-flight **classification** (`FR-111`'s `CLASSIFYING` state, `ADR-045`): a
+> new turn end aborts whichever async operation — a previous turn's
+> classification or its generation — is currently in flight, unconditionally,
+> before the new turn's own confidence gate or classifier ever runs
+> (`02-architecture.md` 5.2/5.3). This is not a new rule so much as this
+> requirement's original guarantee extended to a kind of in-flight work that
+> did not exist before this milestone; the abort still happens at the same
+> point in the guard chain it always did (immediately after the guard passes,
+> before anything fires).
+
+**FR-055** The trigger must never fire from the candidate stream.
+
 **FR-055** The trigger must never fire from the candidate stream.
 
 **FR-111** A turn that passes `FR-051`'s guard and `FR-113`'s confidence gate
@@ -517,16 +530,22 @@ control.
 **FR-094** Overlay cards must be built from Magic UI components on Tailwind,
 styled from the theme tokens in `FR-029`.
 
-**FR-115** A new suggestion must not replace a currently visible card until the
-card has been visible for at least a fixed minimum hold duration (not a
-`Settings` field; see `ASM-018`). The hold must be enforced in the overlay
-renderer, in front of the card reducer, not by delaying the IPC push from the
-main process. Held events for one generation must replay, once the hold
-elapses, in arrival order and at their original relative spacing, not
-compressed into a single instant, so the per-bullet reveal (`FR-092`) still
-applies to a card that was held. A `suggestion:end` with `status: 'cancelled'`
-for a generation still waiting out the hold must discard it rather than display
-it once the hold elapses. A pause (`FR-053`) must both clear the renderer's
+**FR-115** A new suggestion (a different `generationId` from the one currently
+shown) must not replace a currently visible card until the card has been
+visible for at least a fixed minimum hold duration (not a `Settings` field;
+see `ASM-018`). This gates replacement only: an event belonging to the
+**currently shown** card's own `generationId` — a further line, or its own
+cancellation — must dispatch immediately regardless of how young that card
+is, never held, so a fast card's own streaming lines are never delayed and a
+cancelled card is removed with no grace period (`FR-054`). The hold must be
+enforced in the overlay renderer, in front of the card reducer, not by
+delaying the IPC push from the main process. Held events for a queued,
+not-yet-shown generation must replay, once the hold elapses, in arrival order
+and at their original relative spacing, not compressed into a single instant,
+so the per-bullet reveal (`FR-092`) still applies once that card is promoted.
+A `suggestion:end` with `status: 'cancelled'` for a generation still waiting
+out the hold (never shown) must discard it rather than display it once the
+hold elapses. A pause (`FR-053`) must both clear the renderer's
 notion of "a card is currently shown" and discard any events currently
 queued, whatever their status — nothing paused should surface once resumed,
 including a generation that had already completed while queued. A session

@@ -1062,10 +1062,6 @@ with Deepgram, OpenAI and ElevenLabs. See `ADR-022`.
 
 ## 4. Assumption register
 
----
-
-## 4. Assumption register
-
 These were chosen without a direct product decision. Each is implemented as
 specified but can be changed cheaply before build starts.
 
@@ -1884,16 +1880,25 @@ card reducer.
 
 **Decision.** The hold lives in the renderer, in front of `reduceCards`, not in
 `CMP-15`. A small buffer keyed by `generationId` receives every
-`suggestion:begin`/`suggestion:line`/`suggestion:end` as it arrives over IPC; if
-a card is currently shown and it became visible less than `MIN_HOLD_MS` ago,
-the buffer holds the incoming events and replays them once the hold elapses, in
-arrival order **and at the spacing they originally arrived in**, not
-compressed into one instant — a card's bullets already stream in one at a time
-with their own reveal animation (`FR-092`), and a held card should still arrive
-that way, not as a single flushed batch. If a `suggestion:end` with
-`status: 'cancelled'` arrives for a `generationId` still sitting in the buffer,
-the buffer discards everything queued for it instead of replaying a card that
-was itself superseded.
+`suggestion:begin`/`suggestion:line`/`suggestion:end` as it arrives over IPC.
+**It gates replacement by a different generation, never an event belonging to
+the generation already on screen.** An event whose `generationId` matches the
+currently shown card's dispatches immediately no matter how young that card
+is — a fast card's own later lines must not be held just because the card
+itself is under `MIN_HOLD_MS` old, and a `suggestion:end` with
+`status: 'cancelled'` for the *shown* card's own generation must clear it
+immediately, never queued, because `FR-054`'s cancellation guarantee has no
+grace period. An event for any *other* `generationId` — a candidate to
+replace the shown card — is what the hold actually applies to: if the shown
+card became visible less than `MIN_HOLD_MS` ago, the buffer holds it and
+replays once the hold elapses, in arrival order **and at the spacing they
+originally arrived in**, not compressed into one instant — a card's bullets
+already stream in one at a time with their own reveal animation (`FR-092`),
+and a held card should still arrive that way once promoted. If a
+`suggestion:end` with `status: 'cancelled'` arrives for a `generationId` still
+queued this way (never shown), the buffer discards everything queued for it
+instead of replaying a card that was itself superseded before it ever
+appeared.
 
 **A pause clears the buffer's notion of "a card is shown."** `CH-212
 overlay:mode` (pausing, `FR-053`) already drives the overlay to its idle state
