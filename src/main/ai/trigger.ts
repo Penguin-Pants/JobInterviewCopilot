@@ -405,6 +405,10 @@ export class TriggerMachine {
     this.clearGap();
     this.abortInFlight();
     this.turnText = '';
+    // The discarded turn's confidence goes with its text. Leaving it behind let
+    // a pre-pause low-confidence final gate the first turn after the resume
+    // whose own finals carry no `confidence` field (FR-113).
+    this.lastFinalConfidence = undefined;
     this.endpointPending = false;
     this.transition('PAUSED');
     this.onOverlayIdle?.();
@@ -420,6 +424,7 @@ export class TriggerMachine {
   resume(): void {
     if (this.state !== 'PAUSED') return;
     this.turnText = '';
+    this.lastFinalConfidence = undefined;
     this.endpointPending = false;
     this.transition('LISTENING');
   }
