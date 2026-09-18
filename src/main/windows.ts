@@ -36,6 +36,21 @@ export const OVERLAY_MIN_SIZE = {
 } as const;
 
 /**
+ * The largest the user may drag the overlay to (FR-081).
+ *
+ * Enforced on the window, not only in the settings store. `CH-127`'s schema
+ * bounds the resize grip, and `clampSettings` bounds what is written to disk,
+ * but the acrylic window's **native** resize edges consult neither: without
+ * this the user could drag past the documented maximum, and the size would then
+ * be clamped only on the next load, so the window on screen and the stored one
+ * would disagree.
+ */
+export const OVERLAY_MAX_SIZE = {
+  width: SETTINGS_LIMITS.overlayWidthPx.max,
+  height: SETTINGS_LIMITS.overlayHeightPx.max,
+} as const;
+
+/**
  * The overlay's size for the current settings (FR-081).
  *
  * Stored nulls mean "the shipped default", so this is the one place that
@@ -193,6 +208,8 @@ export function overlayWindowOptions(
     height: size.height,
     minWidth: OVERLAY_MIN_SIZE.width,
     minHeight: OVERLAY_MIN_SIZE.height,
+    maxWidth: OVERLAY_MAX_SIZE.width,
+    maxHeight: OVERLAY_MAX_SIZE.height,
     show: false,
     frame: false,
     /**

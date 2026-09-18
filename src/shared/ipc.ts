@@ -443,6 +443,33 @@ export const invokeChannels = {
     }),
     response: ok,
   },
+  /**
+   * Where the pointer is while the consent reminder is up (`FR-006`, `FR-083`,
+   * TASK-052).
+   *
+   * The reminder has to be clickable, and a `BrowserWindow` is a rectangle: the
+   * only way to make its dismiss button receive a click is to stop the whole
+   * window ignoring mouse events, which then intercepts clicks meant for the
+   * application behind every other part of the overlay. `FR-006` says the
+   * reminder must not block interaction with other applications, so the window
+   * follows the pointer instead: clickable over the card, click-through
+   * everywhere else.
+   *
+   * This is what `setIgnoreMouseEvents`'s `forward: true` exists for. A window
+   * that ignores mouse events still delivers **move** events to its renderer,
+   * so the renderer can say which side of the card the pointer is on even while
+   * the window is passing clicks through.
+   *
+   * It fails safe. The main process starts each reminder assuming the pointer
+   * is over the card, so a renderer that never reports, or reports late, leaves
+   * the window clickable: the worst case is the behavior before this channel
+   * existed, never a reminder that cannot be dismissed.
+   */
+  'overlay:setConsentHitTest': {
+    id: 'CH-128',
+    payload: z.object({ over: z.boolean() }),
+    response: ok,
+  },
 } as const;
 
 /* ------------------------------------------------------------------ *

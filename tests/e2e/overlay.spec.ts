@@ -301,6 +301,35 @@ test('TC-006 the consent reminder renders before the first suggestion, every ses
     )
     .toBe(false);
 
+  // And click-through everywhere the reminder is not (FR-006, FR-083, CH-128).
+  //
+  // The window is a rectangle, so accepting the click on the dismiss button
+  // accepts every click on the overlay unless the hit test narrows it. Without
+  // this, a reminder on a 1600 by 1200 overlay would swallow the user's clicks
+  // on the meeting behind it until they dismissed it.
+  const card = await overlay.locator('[data-testid="consent-reminder"]').boundingBox();
+  expect(card, 'the reminder has no box to test against').not.toBeNull();
+
+  // Below the card, which is the suggestion area rather than the reminder.
+  await overlay.mouse.move(card!.x + card!.width / 2, card!.y + card!.height + 24);
+  await expect
+    .poll(async () =>
+      app.evaluate(() =>
+        (globalThis as unknown as { __icpIgnoreCalls: boolean[] }).__icpIgnoreCalls.at(-1),
+      ),
+    )
+    .toBe(true);
+
+  // And back over the card, so the button is reachable again.
+  await overlay.mouse.move(card!.x + card!.width / 2, card!.y + card!.height / 2);
+  await expect
+    .poll(async () =>
+      app.evaluate(() =>
+        (globalThis as unknown as { __icpIgnoreCalls: boolean[] }).__icpIgnoreCalls.at(-1),
+      ),
+    )
+    .toBe(false);
+
   await overlay.click('[data-testid="consent-dismiss"]');
 
   // And click-through again the moment it is dismissed, because the user never
@@ -737,7 +766,7 @@ test('FR-081 text that does not fit is scrollable rather than clipped', async ()
   }
   await expect(overlay.locator('[data-testid="suggestion-card"]')).toHaveCount(3);
 
-  const region = overlay.locator('[data-testid="card-stack"]').locator('xpath=..');
+  const region = overlay.locator('[data-testid="card-region"]');
   const scroll = await region.evaluate((el) => ({
     scrollHeight: el.scrollHeight,
     clientHeight: el.clientHeight,

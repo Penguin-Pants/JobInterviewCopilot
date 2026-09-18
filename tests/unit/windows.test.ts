@@ -75,6 +75,11 @@ describe('TC-005 overlay window flags', () => {
     expect(opts.resizable).toBe(true);
     expect(opts.minWidth).toBe(SETTINGS_LIMITS.overlayWidthPx.min);
     expect(opts.minHeight).toBe(SETTINGS_LIMITS.overlayHeightPx.min);
+    // The maximum too. The acrylic window's native resize edges consult
+    // neither `CH-127`'s schema nor the settings clamp, so without these the
+    // window on screen could exceed the size that would be stored for it.
+    expect(opts.maxWidth).toBe(SETTINGS_LIMITS.overlayWidthPx.max);
+    expect(opts.maxHeight).toBe(SETTINGS_LIMITS.overlayHeightPx.max);
     expect(opts.alwaysOnTop).toBe(true);
     expect(opts.skipTaskbar).toBe(true);
     expect(opts.show).toBe(false);

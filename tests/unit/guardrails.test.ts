@@ -181,7 +181,7 @@ describe('TC-008 content security policy', () => {
  * directions are now allowlisted, and the overlay's list is deliberately tiny.
  */
 describe('FR-086 preload invoke allowlists', () => {
-  it('the overlay may invoke only the five channels its UI needs', () => {
+  it('the overlay may invoke only the six channels its UI needs', () => {
     const source = readFileSync('src/preload/overlay.ts', 'utf8');
     const block = /ALLOWED_INVOKE[^=]*=\s*\[([^\]]*)\]/s.exec(source)?.[1] ?? '';
     const channels = [...block.matchAll(/'([^']+)'/g)].map((m) => m[1]).sort();
@@ -196,6 +196,7 @@ describe('FR-086 preload invoke allowlists', () => {
       'consent:dismiss',
       'overlay:ready',
       'overlay:savePosition',
+      'overlay:setConsentHitTest',
       'overlay:setFontSize',
       'overlay:setSize',
     ]);
@@ -590,6 +591,9 @@ describe('FR-086 the preload allowlists account for every invoke channel', () =>
     // the default position, so there is nothing for it to write here (FR-009,
     // FR-081, TASK-052).
     'overlay:setSize',
+    // The pointer is over the overlay or it is not. The Dashboard has no
+    // opinion about that and no window of its own to hit-test (CH-128).
+    'overlay:setConsentHitTest',
   ];
 
   it('the Dashboard may invoke every channel not explicitly reserved to another window', () => {

@@ -296,6 +296,53 @@ function Overlay(): JSX.Element {
 
   const idle = shouldShowIdle(cards, paused);
   const visible = cards.slice(-MAX_CARDS);
+  const reminderUp = consent !== null && !dismissed;
+
+  /**
+   * Report which side of the consent card the pointer is on (FR-006, CH-128).
+   *
+   * The reminder has to be clickable, and a window is a rectangle: making the
+   * dismiss button reachable makes the whole overlay reachable, and clicks
+   * meant for the application behind every other part of it are then
+   * intercepted. `FR-006` says the reminder must not block interaction with
+   * other applications, so the main process follows the pointer instead.
+   *
+   * `mousemove` on the window is enough, and it arrives even while the window
+   * is ignoring mouse events, because it is created with `forward: true`. Only
+   * a change is sent: the pointer produces a move event per pixel and this is
+   * an IPC call.
+   *
+   * Not run in interactive mode, where the whole window is clickable by the
+   * user's own choice and there is nothing to decide.
+   */
+  const lastHitTest = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (!reminderUp || interactive) {
+      lastHitTest.current = null;
+      return;
+    }
+    const report = (event: MouseEvent): void => {
+      const card = document.querySelector('[data-testid="consent-reminder"]');
+      // No card yet, or it is on its way out. Claiming the pointer is over it
+      // is the safe answer: it keeps the window clickable, and an extra
+      // clickable frame costs far less than a dismiss button that is dead.
+      const box = card?.getBoundingClientRect();
+      const over =
+        box === undefined ||
+        (event.clientX >= box.left &&
+          event.clientX <= box.right &&
+          event.clientY >= box.top &&
+          event.clientY <= box.bottom);
+      if (over === lastHitTest.current) return;
+      lastHitTest.current = over;
+      void window.copilot.invoke('overlay:setConsentHitTest', { over });
+    };
+    window.addEventListener('mousemove', report);
+    return () => {
+      window.removeEventListener('mousemove', report);
+      lastHitTest.current = null;
+    };
+  }, [reminderUp, interactive]);
 
   /**
    * Keep the newest cue against the bottom of the scroll region (FR-090).
@@ -317,12 +364,32 @@ function Overlay(): JSX.Element {
    * animated scroll under arriving text would be motion `NFR-007` and `FR-092`
    * exist to keep out of this window.
    */
+  /**
+   * Whether the card region has more content than it can show (FR-081, FR-082).
+   *
+   * It decides whether the region opts out of the drag region. In interactive
+   * mode the shell is `-webkit-app-region: drag`, and Windows gives a drag
+   * region the pointer **and the wheel**, so a scroller inside one cannot be
+   * scrolled: the overflow this change added would have been as unreachable as
+   * the text it replaced. Opting out unconditionally is not the answer either,
+   * because the card region is nearly the whole window and `FR-082` needs the
+   * overlay draggable from somewhere.
+   *
+   * So it is decided by whether there is anything to scroll. Nothing overflows,
+   * nothing is lost by dragging; something overflows, reaching it wins and the
+   * padding, the reminder and the control row still drag.
+   */
+  const [overflowing, setOverflowing] = useState(false);
   const cardRegion = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     const region = cardRegion.current;
     if (!region || typeof ResizeObserver === 'undefined') return;
     const pin = (): void => {
       region.scrollTop = region.scrollHeight;
+      // One pixel of tolerance: `scrollHeight` and `clientHeight` are rounded
+      // independently, so a region that fits exactly can report a difference of
+      // less than a pixel and take the drag region away for nothing.
+      setOverflowing(region.scrollHeight - region.clientHeight > 1);
     };
     const observer = new ResizeObserver(pin);
     observer.observe(region);
@@ -352,7 +419,7 @@ function Overlay(): JSX.Element {
       // would swallow clicks meant for the application behind it (FR-083).
       {...(interactive ? { 'data-drag-region': 'true' } : {})}
     >
-      {consent !== null && !dismissed ? (
+      {reminderUp ? (
         <ConsentReminder text={consent} captureNotice={captureNotice} onDismiss={dismiss} />
       ) : null}
 
@@ -376,6 +443,11 @@ function Overlay(): JSX.Element {
       */}
       <div
         ref={cardRegion}
+        data-testid="card-region"
+        // Out of the drag region only while there is something to scroll. See
+        // `overflowing` above: a drag region consumes the wheel as well as the
+        // pointer, so a scroller inside one cannot be scrolled at all.
+        {...(overflowing ? { 'data-no-drag': 'true' } : {})}
         className="flex min-h-0 flex-1 flex-col overflow-y-auto overflow-x-hidden"
       >
         {idle ? (

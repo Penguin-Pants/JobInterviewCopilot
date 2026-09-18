@@ -184,6 +184,24 @@ let overlayInteractive = false;
 let consentReminderPending = false;
 
 /**
+ * Whether the pointer is over the consent card (FR-006, FR-083, CH-128).
+ *
+ * A `BrowserWindow` is a rectangle, so suspending click-through for the
+ * reminder suspends it for the whole overlay, and clicks meant for the
+ * application behind every other part of the window are intercepted until the
+ * reminder is dismissed. `FR-006` says the reminder must not block interaction
+ * with other applications, so the window follows the pointer: clickable over
+ * the card, click-through everywhere else.
+ *
+ * It defaults to `true` and is reset to `true` at the start of every reminder.
+ * A renderer that never reports, or reports late, therefore leaves the window
+ * clickable rather than leaving the dismiss button dead, which is the bug this
+ * whole change exists to fix. The blast radius is the failure this can have;
+ * an undismissable reminder is not.
+ */
+let consentPointerOverCard = true;
+
+/**
  * A single instance owns the app. A second launch focuses the existing
  * Dashboard rather than opening a second set of windows (TC-009).
  */
@@ -799,7 +817,11 @@ function setOverlayInteractive(interactive: boolean): void {
  */
 function applyOverlayClickThrough(): void {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
-  const clickable = overlayInteractive || consentReminderPending;
+  const clickable = overlayInteractive || (consentReminderPending && consentPointerOverCard);
+  // `forward: true` in both directions, and load-bearing in the ignoring one:
+  // it is what keeps mouse **move** events reaching the renderer while the
+  // window passes clicks through, which is how `CH-128` can report the pointer
+  // crossing back onto the card and make the window clickable again.
   overlayWindow.setIgnoreMouseEvents(!clickable, { forward: true });
 }
 
@@ -813,6 +835,10 @@ function applyOverlayClickThrough(): void {
 function setConsentReminderPending(pending: boolean): void {
   if (consentReminderPending === pending) return;
   consentReminderPending = pending;
+  // Each reminder starts clickable. A stale "the pointer is elsewhere" from the
+  // last one would open this one with the dismiss button already dead, and the
+  // renderer cannot correct it until the pointer moves (CH-128).
+  if (pending) consentPointerOverCard = true;
   applyOverlayClickThrough();
 }
 
@@ -1240,6 +1266,19 @@ function registerIpcHandlers(): void {
    * this channel allowlisted with no handler, so every dismissal answered with
    * an `IpcError` the overlay had to ignore.
    */
+  /**
+   * The pointer crossed onto or off the consent card (`CH-128`, FR-006).
+   *
+   * Ignored unless a reminder is actually up, so a renderer cannot use it to
+   * hold the overlay clickable outside the one moment it is meant for.
+   */
+  router.handle('overlay:setConsentHitTest', ({ over }) => {
+    if (!consentReminderPending || consentPointerOverCard === over) return { ok: true as const };
+    consentPointerOverCard = over;
+    applyOverlayClickThrough();
+    return { ok: true as const };
+  });
+
   router.handle('consent:dismiss', () => {
     getLogger().info('consent reminder dismissed');
     // The card is gone, so the overlay goes back to the click-through state the

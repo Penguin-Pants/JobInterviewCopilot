@@ -369,6 +369,13 @@ in its default position.
 **FR-083** The overlay must default to click-through using
 `setIgnoreMouseEvents(true, { forward: true })`.
 
+While an undismissed consent reminder is on screen, the overlay must accept
+clicks over the reminder card so that it can be dismissed (`FR-006`), and must
+stay click-through everywhere else so it does not block interaction with other
+applications. This hit test must fail towards accepting clicks: a reminder that
+cannot be dismissed is a worse failure than an overlay that briefly intercepts
+one.
+
 **FR-084** The `Ctrl+Shift+I` hotkey must toggle between click-through mode and
 interactive mode. The overlay must show a clear visual state difference between
 the two modes. (ASM-002)
