@@ -299,13 +299,19 @@ function Overlay(): JSX.Element {
   const reminderUp = consent !== null && !dismissed;
 
   /**
-   * Report which side of the consent card the pointer is on (FR-006, CH-128).
+   * Report whether the pointer is over one of the overlay's controls (FR-006,
+   * FR-081, FR-083, CH-128).
    *
-   * The reminder has to be clickable, and a window is a rectangle: making the
-   * dismiss button reachable makes the whole overlay reachable, and clicks
-   * meant for the application behind every other part of it are then
-   * intercepted. `FR-006` says the reminder must not block interaction with
-   * other applications, so the main process follows the pointer instead.
+   * The consent reminder has to be clickable and so does the resize grip, and a
+   * window is a rectangle: making either reachable makes the whole overlay
+   * reachable, and clicks meant for the application behind every other part of
+   * it are then intercepted. So the main process follows the pointer instead,
+   * and this is what tells it where the pointer is.
+   *
+   * Without it the grip could only exist in interactive mode, which is what the
+   * first version of this shipped: the overlay was resizable and the only way
+   * to reach the handle was a hotkey nothing on screen mentions, so in practice
+   * it was still fixed in place.
    *
    * `mousemove` on the window is enough, and it arrives even while the window
    * is ignoring mouse events, because it is created with `forward: true`. Only
@@ -317,25 +323,40 @@ function Overlay(): JSX.Element {
    */
   const lastHitTest = useRef<boolean | null>(null);
   useEffect(() => {
-    if (!reminderUp || interactive) {
+    if (interactive) {
       lastHitTest.current = null;
       return;
     }
+    const within = (box: DOMRect | undefined, x: number, y: number): boolean =>
+      box !== undefined && x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
+
     const report = (event: MouseEvent): void => {
-      const card = document.querySelector('[data-testid="consent-reminder"]');
-      // No card yet, or it is on its way out. Claiming the pointer is over it
-      // is the safe answer: it keeps the window clickable, and an extra
-      // clickable frame costs far less than a dismiss button that is dead.
-      const box = card?.getBoundingClientRect();
+      const card = document
+        .querySelector('[data-testid="consent-reminder"]')
+        ?.getBoundingClientRect();
+      // A reminder that should be on screen but has no box yet, or is on its
+      // way out, reads as "the pointer is on it". That is the safe answer: it
+      // keeps the window clickable, and an extra clickable frame costs far less
+      // than a dismiss button that is dead (FR-006).
+      // The controls are hit-tested one by one, never by the row that holds
+      // them. The row is full width, and its `flex-1` spacer is empty in
+      // click-through mode, so its bounding box would make the whole bottom
+      // strip of the overlay take clicks meant for the application behind it,
+      // which is the opposite of what this hit test is for (FR-083).
+      const onAControl = [
+        '[data-testid="overlay-resize-grip"]',
+        '[data-testid="font-size-control"]',
+      ]
+        .map((selector) => document.querySelector(selector)?.getBoundingClientRect())
+        .some((box) => within(box, event.clientX, event.clientY));
+
       const over =
-        box === undefined ||
-        (event.clientX >= box.left &&
-          event.clientX <= box.right &&
-          event.clientY >= box.top &&
-          event.clientY <= box.bottom);
+        (reminderUp && card === undefined) ||
+        within(card, event.clientX, event.clientY) ||
+        onAControl;
       if (over === lastHitTest.current) return;
       lastHitTest.current = over;
-      void window.copilot.invoke('overlay:setConsentHitTest', { over });
+      void window.copilot.invoke('overlay:setPointerOverControls', { over });
     };
     window.addEventListener('mousemove', report);
     return () => {
@@ -486,17 +507,30 @@ function Overlay(): JSX.Element {
         )}
       </div>
 
-      {interactive ? (
-        /* The two overlay-side controls share one row. `FontSizeControl` keeps
-           its own right alignment, so it takes the free space and the grip sits
-           in the corner, which is where a resize affordance is looked for. */
-        <div className="flex shrink-0 items-end gap-1">
-          <div className="min-w-0 flex-1">
+      {/*
+        The control row, and it is always on screen (FR-081, FR-084).
+
+        The grip used to be gated on `interactive`, like the text-size control
+        below still is, and that made the overlay resizable only for a user who
+        already knew about `Ctrl+Shift+I`: on the screen there was no edge, no
+        handle and no hint, so the window was fixed in place exactly as it had
+        been before it was made resizable. A control the user cannot find is not
+        a control.
+
+        It stays reachable in click-through mode because the main process makes
+        the window clickable while the pointer is over this row and passes
+        clicks through everywhere else (`CH-128`). The text-size control is
+        still interactive-only: it is four buttons wide rather than fourteen
+        pixels, and `FR-093` already gives it a home in the Dashboard.
+      */}
+      <div data-testid="overlay-controls" className="flex shrink-0 items-end gap-1">
+        <div className="min-w-0 flex-1">
+          {interactive ? (
             <FontSizeControl fontSizePx={resolved.fontSizePx} onChange={setFontSize} />
-          </div>
-          <ResizeGrip onResize={setWindowSize} />
+          ) : null}
         </div>
-      ) : null}
+        <ResizeGrip onResize={setWindowSize} />
+      </div>
     </div>
   );
 }

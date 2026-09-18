@@ -250,6 +250,45 @@ export function OverlayAppearance({
         {theme.overlayFontSizePx}
       </output>
 
+      {/*
+        Click-through, as a setting rather than only a hotkey (FR-083, FR-084).
+
+        The overlay is always on top, so it hides part of the screen whichever
+        way this is set. What the user is choosing is whether it also takes the
+        clicks it covers. Leaving that to `Ctrl+Shift+I` alone meant a user whose
+        overlay sat over their browser toolbar could see the buttons it covered,
+        click them by accident, and have no setting to point at.
+
+        Written through `CH-118` rather than `config:set`, so the live window
+        changes with the stored value instead of on the next launch. The main
+        process persists it from there.
+      */}
+      <label htmlFor="overlay-click-through">Overlay passes clicks through</label>
+      <input
+        id="overlay-click-through"
+        data-testid="overlay-click-through"
+        type="checkbox"
+        checked={settings.overlayWindow.clickThrough}
+        onChange={(e) => {
+          const clickThrough = e.target.checked;
+          setError(null);
+          void call('overlay:setInteractive', { interactive: !clickThrough }).then(
+            async (result) => {
+              if (!result.ok) {
+                setError(result.message);
+                return;
+              }
+              await onSettingsChanged();
+            },
+          );
+        }}
+      />
+      <p data-testid="overlay-click-through-note">
+        {settings.overlayWindow.clickThrough
+          ? 'On: clicks pass through the overlay to whatever is behind it. The overlay still owns its own dismiss button and resize grip.'
+          : 'Off: the overlay is a solid window. It blocks clicks on whatever it covers, can be dragged by its body, and shows its text size control.'}
+      </p>
+
       <button
         type="button"
         data-testid="reset-overlay"

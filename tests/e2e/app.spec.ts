@@ -171,8 +171,14 @@ test('TC-009 a second instance focuses rather than opening new windows', async (
 /** TC-148: Reset Overlay recovers an overlay stranded off-screen. */
 test('TC-148 Reset Overlay returns the overlay to the primary display', async () => {
   await app.evaluate(({ BrowserWindow }) => {
-    const overlay = BrowserWindow.getAllWindows().find((w) => !w.isResizable());
-    overlay?.setPosition(-30000, -30000);
+    // By `alwaysOnTop`, like TC-005 above. `!isResizable()` used to identify the
+    // overlay and stopped matching any window when `FR-081` was amended: the
+    // optional chaining below then made this a no-op, the overlay was never
+    // stranded, and the test went on asserting that a window nobody had moved
+    // was in the right place (TASK-053).
+    const overlay = BrowserWindow.getAllWindows().find((w) => w.isAlwaysOnTop());
+    if (!overlay) throw new Error('no overlay window to strand');
+    overlay.setPosition(-30000, -30000);
   });
 
   await openDashboardTab(dashboard, 'overlay');
@@ -180,8 +186,9 @@ test('TC-148 Reset Overlay returns the overlay to the primary display', async ()
   await dashboard.waitForSelector('[data-testid="reset-overlay-done"]');
 
   const position = await app.evaluate(({ BrowserWindow, screen }) => {
-    const overlay = BrowserWindow.getAllWindows().find((w) => !w.isResizable());
-    const [x, y] = overlay?.getPosition() ?? [0, 0];
+    const overlay = BrowserWindow.getAllWindows().find((w) => w.isAlwaysOnTop());
+    if (!overlay) throw new Error('no overlay window to read back');
+    const [x, y] = overlay.getPosition();
     return { x, y, primary: screen.getPrimaryDisplay().bounds };
   });
 

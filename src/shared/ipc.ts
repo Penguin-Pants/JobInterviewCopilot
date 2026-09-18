@@ -33,7 +33,7 @@ const validationResult = z.object({
 });
 
 export const settingsSchema = z.object({
-  schemaVersion: z.literal(2),
+  schemaVersion: z.literal(3),
   activeProfileId: z.string(),
   providers: z.object({
     stt: z.object({ primary: providerChoice, backup: providerChoice.nullable() }),
@@ -69,6 +69,8 @@ export const settingsSchema = z.object({
     width: z.number().nullable(),
     height: z.number().nullable(),
     displayId: z.string().nullable(),
+    // The shipped default is true, the teleprompter behavior (FR-083).
+    clickThrough: z.boolean(),
   }),
   firstRun: z.object({ modelDownloaded: z.boolean() }),
 });
@@ -444,28 +446,29 @@ export const invokeChannels = {
     response: ok,
   },
   /**
-   * Where the pointer is while the consent reminder is up (`FR-006`, `FR-083`,
-   * TASK-052).
+   * Whether the pointer is over one of the overlay's own controls (`FR-006`,
+   * `FR-081`, `FR-083`, TASK-052).
    *
-   * The reminder has to be clickable, and a `BrowserWindow` is a rectangle: the
-   * only way to make its dismiss button receive a click is to stop the whole
-   * window ignoring mouse events, which then intercepts clicks meant for the
-   * application behind every other part of the overlay. `FR-006` says the
-   * reminder must not block interaction with other applications, so the window
-   * follows the pointer instead: clickable over the card, click-through
-   * everywhere else.
+   * The consent reminder has to be clickable and so does the resize grip, and a
+   * `BrowserWindow` is a rectangle: the only way to make either receive a click
+   * is to stop the whole window ignoring mouse events, which then intercepts
+   * clicks meant for the application behind every other part of the overlay.
+   * `FR-006` says the reminder must not block interaction with other
+   * applications, so the window follows the pointer instead: clickable over a
+   * control, click-through everywhere else.
    *
    * This is what `setIgnoreMouseEvents`'s `forward: true` exists for. A window
    * that ignores mouse events still delivers **move** events to its renderer,
-   * so the renderer can say which side of the card the pointer is on even while
-   * the window is passing clicks through.
+   * so the renderer can say where the pointer is even while the window is
+   * passing clicks through.
    *
-   * It fails safe. The main process starts each reminder assuming the pointer
-   * is over the card, so a renderer that never reports, or reports late, leaves
-   * the window clickable: the worst case is the behavior before this channel
-   * existed, never a reminder that cannot be dismissed.
+   * It fails safe where it matters. The main process starts each consent
+   * reminder assuming the pointer is over it, so a renderer that never reports
+   * leaves the reminder dismissible rather than dead. Outside a reminder it
+   * starts click-through, because a grip nobody is pointing at has no claim on
+   * the user's clicks.
    */
-  'overlay:setConsentHitTest': {
+  'overlay:setPointerOverControls': {
     id: 'CH-128',
     payload: z.object({ over: z.boolean() }),
     response: ok,

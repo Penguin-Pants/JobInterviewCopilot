@@ -257,13 +257,16 @@ describe('FR-083 click-through has exactly one applier', () => {
     );
   });
 
-  it('the applier consults the consent reminder, not only the user toggle', () => {
+  it('the applier consults the pointer, not only the user toggle', () => {
+    // Both halves of `FR-083`. `overlayInteractive` is the mode the user chose
+    // and `pointerOverControls` is what lets a click-through overlay still own
+    // its dismiss button and its resize grip.
     const source = readFileSync('src/main/index.ts', 'utf8');
     const applier = source.slice(
       source.indexOf('function applyOverlayClickThrough'),
       source.indexOf('function setConsentReminderPending'),
     );
-    expect(applier).toContain('consentReminderPending');
+    expect(applier).toContain('pointerOverControls');
     expect(applier).toContain('overlayInteractive');
   });
 });

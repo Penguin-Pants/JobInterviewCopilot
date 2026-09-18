@@ -386,6 +386,18 @@ export function saveOverlayBounds(win: BrowserWindow, config: ConfigStore): void
   if (win.isDestroyed()) return;
   const { x, y, width, height } = win.getBounds();
   const display = screen.getDisplayNearestPoint({ x, y });
-  config.set({ overlayWindow: { x, y, width, height, displayId: String(display.id) } });
+  // Merged onto the stored value, not written over it. `overlayWindow` also
+  // carries the click-through preference, and a geometry write must not drop
+  // it (FR-083).
+  config.set({
+    overlayWindow: {
+      ...config.get().overlayWindow,
+      x,
+      y,
+      width,
+      height,
+      displayId: String(display.id),
+    },
+  });
 }
 /* v8 ignore stop */

@@ -718,15 +718,24 @@ test('FR-081 the overlay resizes from its grip, persists the size and scrolls', 
   // three cards of five bullets at any text size `FR-093` allows.
   expect(await bounds()).toEqual({ width: 420, height: 260 });
 
-  // The grip belongs to interactive mode, like the text-size control. In
-  // click-through mode the window passes every click to the application behind
-  // it, so a grip drawn there would be a control that cannot be used.
+  // The grip is on screen in click-through mode, which is the mode the user is
+  // in for the whole interview (FR-081, FR-084, TASK-053).
+  //
+  // It shipped gated on interactive mode, and that made the overlay resizable
+  // only for someone who already knew about `Ctrl+Shift+I`: on screen there was
+  // no edge, no handle and no hint, so it was fixed in place exactly as it had
+  // been before it was made resizable. Reported from a live session.
   await pushToOverlay(app, 'overlay:mode', { interactive: false, paused: false });
-  await expect(overlay.locator('[data-testid="overlay-resize-grip"]')).toHaveCount(0);
-
-  await pushToOverlay(app, 'overlay:mode', { interactive: true, paused: false });
   const grip = overlay.locator('[data-testid="overlay-resize-grip"]');
   await expect(grip).toBeVisible();
+
+  // The text-size control stays interactive-only. It is four buttons wide
+  // rather than fourteen pixels, and `FR-093` already gives it a Dashboard home.
+  await expect(overlay.locator('[data-testid="font-size-control"]')).toHaveCount(0);
+
+  await pushToOverlay(app, 'overlay:mode', { interactive: true, paused: false });
+  await expect(grip).toBeVisible();
+  await expect(overlay.locator('[data-testid="font-size-control"]')).toBeVisible();
 
   // Dragged, not called: this goes through the pointer handlers, `CH-127`'s
   // schema and the main process's `setBounds`, which is the whole path.
@@ -749,6 +758,99 @@ test('FR-081 the overlay resizes from its grip, persists the size and scrolls', 
   ({ app, dashboard } = await launchApp(userDataDir));
   overlay = await overlayPage(app);
   expect(await bounds()).toEqual(size);
+});
+
+test('FR-083 click-through is a persisted setting, not only a hotkey', async () => {
+  const ignoring = async (): Promise<boolean | undefined> =>
+    app.evaluate(() =>
+      (globalThis as unknown as { __icpIgnoreCalls?: boolean[] }).__icpIgnoreCalls?.at(-1),
+    );
+
+  // Record the setter, as the consent test does. `BrowserWindow` has no getter
+  // for it, and it is an operating-system hit-test property that a synthetic
+  // click never consults.
+  await app.evaluate(({ BrowserWindow }) => {
+    const [target] = BrowserWindow.getAllWindows().filter((w) => w.isAlwaysOnTop());
+    if (!target) return;
+    const seen: boolean[] = [];
+    (globalThis as unknown as { __icpIgnoreCalls: boolean[] }).__icpIgnoreCalls = seen;
+    const original = target.setIgnoreMouseEvents.bind(target);
+    target.setIgnoreMouseEvents = ((ignore: boolean, options?: unknown) => {
+      seen.push(ignore);
+      return original(ignore, options as never);
+    }) as typeof target.setIgnoreMouseEvents;
+  });
+
+  // Shipped default: the overlay is a teleprompter and the application behind
+  // it keeps every click.
+  await openDashboardTab(dashboard, 'overlay');
+  await expect(dashboard.locator('[data-testid="overlay-click-through"]')).toBeChecked();
+
+  // Turned off, the overlay is a solid window. Reported from a live session:
+  // the overlay sat over browser toolbar buttons, hid them, and let the user
+  // click them by accident, with no setting to point at.
+  await dashboard.uncheck('[data-testid="overlay-click-through"]');
+  await expect.poll(ignoring).toBe(false);
+  await expect(overlay.locator('[data-testid="overlay"]')).toHaveAttribute(
+    'data-interactive',
+    'true',
+  );
+
+  // And it survives a restart, which is what makes it a setting rather than a
+  // hotkey. The window is built click-through and the stored choice is applied
+  // to it at bootstrap.
+  await app.close();
+  ({ app, dashboard } = await launchApp(userDataDir));
+  overlay = await overlayPage(app);
+
+  await openDashboardTab(dashboard, 'overlay');
+  await expect(dashboard.locator('[data-testid="overlay-click-through"]')).not.toBeChecked();
+  await expect(overlay.locator('[data-testid="overlay"]')).toHaveAttribute(
+    'data-interactive',
+    'true',
+  );
+});
+
+test('FR-083 only the controls take clicks, not the strip that holds them', async () => {
+  const ignoring = async (): Promise<boolean | undefined> =>
+    app.evaluate(() =>
+      (globalThis as unknown as { __icpIgnoreCalls?: boolean[] }).__icpIgnoreCalls?.at(-1),
+    );
+
+  await app.evaluate(({ BrowserWindow }) => {
+    const [target] = BrowserWindow.getAllWindows().filter((w) => w.isAlwaysOnTop());
+    if (!target) return;
+    const seen: boolean[] = [];
+    (globalThis as unknown as { __icpIgnoreCalls: boolean[] }).__icpIgnoreCalls = seen;
+    const original = target.setIgnoreMouseEvents.bind(target);
+    target.setIgnoreMouseEvents = ((ignore: boolean, options?: unknown) => {
+      seen.push(ignore);
+      return original(ignore, options as never);
+    }) as typeof target.setIgnoreMouseEvents;
+  });
+
+  // Click-through, with the reminder gone, so the grip is the only thing on
+  // screen with a claim on the pointer.
+  await pushToOverlay(app, 'overlay:mode', { interactive: false, paused: false });
+  await overlay.click('[data-testid="consent-dismiss"]').catch(() => undefined);
+
+  const grip = await overlay.locator('[data-testid="overlay-resize-grip"]').boundingBox();
+  expect(grip, 'the grip has no box to test against').not.toBeNull();
+
+  // The control row is full width and its spacer is empty in this mode. Hit
+  // testing the row rather than the controls inside it would make this whole
+  // bottom strip take clicks meant for the application behind the overlay,
+  // which is the opposite of what the hit test is for.
+  await overlay.mouse.move(8, grip!.y + grip!.height / 2);
+  await expect.poll(ignoring).toBe(true);
+
+  // The grip itself does take them, or it could not be dragged.
+  await overlay.mouse.move(grip!.x + grip!.width / 2, grip!.y + grip!.height / 2);
+  await expect.poll(ignoring).toBe(false);
+
+  // And releasing it hands click-through straight back.
+  await overlay.mouse.move(8, grip!.y + grip!.height / 2);
+  await expect.poll(ignoring).toBe(true);
 });
 
 test('FR-081 text that does not fit is scrollable rather than clipped', async () => {

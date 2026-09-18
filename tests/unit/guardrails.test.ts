@@ -196,8 +196,8 @@ describe('FR-086 preload invoke allowlists', () => {
       'consent:dismiss',
       'overlay:ready',
       'overlay:savePosition',
-      'overlay:setConsentHitTest',
       'overlay:setFontSize',
+      'overlay:setPointerOverControls',
       'overlay:setSize',
     ]);
     for (const forbidden of ['secrets:set', 'config:set', 'hotkey:rebind', 'session:start']) {
@@ -591,9 +591,9 @@ describe('FR-086 the preload allowlists account for every invoke channel', () =>
     // the default position, so there is nothing for it to write here (FR-009,
     // FR-081, TASK-052).
     'overlay:setSize',
-    // The pointer is over the overlay or it is not. The Dashboard has no
-    // opinion about that and no window of its own to hit-test (CH-128).
-    'overlay:setConsentHitTest',
+    // The pointer is over the overlay's controls or it is not. The Dashboard
+    // has no opinion about that and no window of its own to hit-test (CH-128).
+    'overlay:setPointerOverControls',
   ];
 
   it('the Dashboard may invoke every channel not explicitly reserved to another window', () => {

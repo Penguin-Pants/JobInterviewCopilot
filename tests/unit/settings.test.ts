@@ -119,14 +119,32 @@ describe('TC-032 migration chain', () => {
       overlayWindow: { x: 100, y: 200, displayId: '2' },
     });
 
-    expect(migrated.schemaVersion).toBe(2);
+    expect(migrated.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
     expect(migrated.overlayWindow).toEqual({
       x: 100,
       y: 200,
       width: null,
       height: null,
       displayId: '2',
+      // Added by the 2 -> 3 step in the same chain run.
+      clickThrough: true,
     });
+  });
+
+  /**
+   * 2 -> 3: click-through became a setting (FR-083, TASK-053).
+   *
+   * True for everyone upgrading, because that is what the overlay already did.
+   * Making it block what it covers is a change the user asks for, never one an
+   * upgrade makes for them.
+   */
+  it('defaults an upgraded file to click-through, and keeps an explicit choice', () => {
+    expect(migrate({ schemaVersion: 2, overlayWindow: {} }).overlayWindow).toMatchObject({
+      clickThrough: true,
+    });
+    expect(
+      migrate({ schemaVersion: 2, overlayWindow: { clickThrough: false } }).overlayWindow,
+    ).toMatchObject({ clickThrough: false });
   });
 
   it('does not overwrite a size that is already stored', () => {

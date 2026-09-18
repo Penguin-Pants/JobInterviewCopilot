@@ -209,6 +209,20 @@ export function useDashboardData(): DashboardData {
         // History to look again for a transcript it has just compacted.
         setSessionRevision((n) => n + 1);
       }),
+      /**
+       * The overlay's interaction mode changed (`CH-212`, FR-083, FR-084).
+       *
+       * The Dashboard renders it from settings, so this reloads them rather
+       * than holding a second copy that could disagree. It matters because the
+       * mode is also changed by a **global** hotkey, which fires while the
+       * Dashboard has focus and so produces none of the focus changes or local
+       * actions that otherwise reload settings: the checkbox went on showing
+       * the old value, and clicking it then re-applied the mode that was
+       * already active instead of toggling.
+       */
+      window.copilot.on('overlay:mode', () => {
+        void reloadSettings();
+      }),
       window.copilot.on('state:usage', setUsage),
       window.copilot.on('state:providers', setProviders),
       window.copilot.on('state:audio', setAudio),
