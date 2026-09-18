@@ -1,0 +1,91 @@
+name: Release
+
+# TASK-051. What a tag is allowed to produce.
+#
+# The acceptance criterion says the manual checklist is executed and recorded
+# before a tag is cut, and that any single failure blocks the tag. Nothing in CI
+# can stop `git tag` being typed, so this does the next honest thing: it refuses
+# to build or publish anything for a tag whose record under `releases/` is
+# missing, incomplete or failing. A tag with no release behind it is inert, and
+# the same check runs on every pull request, which is where a bad record is
+# actually caught.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to dry-run the gates against, e.g. v0.1.0. Publishes nothing.'
+        required: true
+        type: string
+
+# Read-only. This workflow builds and uploads an artifact; it creates no
+# release, moves no tag and writes nothing back to the repository. Stating it
+# here keeps a later edit from silently inheriting a broader default.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  record:
+    name: Release record
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: The checklist must be recorded, complete and passing
+        # The tag reaches the shell as an environment variable, never
+        # interpolated into the script. A tag name is attacker-controllable and
+        # git permits `$` and parentheses in one, so `v$(...)` interpolated here
+        # would run on the runner before the checker ever saw the argument.
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          COMMIT: ${{ github.sha }}
+        run: npm run check:release -- "$TAG" --commit="$COMMIT"
+
+  installer:
+    name: Windows installer
+    needs: record
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # The one documented command, run exactly as README.md documents it, from
+      # a clean checkout on a clean runner. That is what NFR-013 asks for, and
+      # running anything else here would make the documentation untrue.
+      - run: npm ci
+      # The tag and the version in package.json must agree, or the job builds
+      # and uploads an installer named for a different release than the one
+      # being cut. `check:packaged` reads the version from package.json alone,
+      # so nothing downstream would notice.
+      - name: The tag must match the packaged version
+        shell: bash
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "v$version" ]; then
+            echo "Tag $TAG does not match package.json version $version." >&2
+            echo "Bump the version, or tag v$version." >&2
+            exit 1
+          fi
+      - run: npm run package
+      - name: Check the unpacked modules are on disk
+        run: npm run check:packaged
+      - name: Launch the packaged app
+        run: npm run smoke:packaged
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer-${{ github.event.inputs.tag || github.ref_name }}
+          path: release/*.exe
+          if-no-files-found: error

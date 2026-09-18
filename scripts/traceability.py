@@ -43,7 +43,14 @@ req2task = collections.defaultdict(list)
 rows = []
 for tid, name, tr, vb in blocks:
     trs = re.findall(r"(?:FR|NFR)-\d+", tr)
-    vbs = mws if re.search(r"MW-01 to MW-\d+", vb) else re.findall(r"(?:TC|MW)-\d+", vb)
+    named = re.findall(r"(?:TC|MW)-\d+", vb)
+    # "MW-01 to MW-N" stands for every manual check. Ids named alongside it are
+    # kept rather than replaced: the shorthand used to win outright, so
+    # TASK-051's "TC-001, MW-01 to MW-13" credited TC-001 to no task at all.
+    # Nothing failed, because TASK-001 also builds it; the next task to name a
+    # test only there would have been reported as building nothing.
+    expanded = set(named) | set(mws) if re.search(r"MW-01 to MW-\d+", vb) else set(named)
+    vbs = sorted(expanded, key=lambda t: (not t.startswith("TC"), t))
     rows.append((tid, name.strip(), trs, vbs))
     for r in trs:
         req2task[r].append(tid)

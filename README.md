@@ -21,8 +21,9 @@ Read them in this order. The decision log wins over every other document.
 | [`docs/00-decision-log.md`](docs/00-decision-log.md) | Which way each contested question was settled, what is still an assumption, and what is still open |
 | [`docs/01-requirements.md`](docs/01-requirements.md) | What the product must do, as 107 verifiable requirements |
 | [`docs/02-architecture.md`](docs/02-architecture.md) | Components, data model, interfaces, IPC contract, dependencies |
-| [`docs/03-tasks.md`](docs/03-tasks.md) | 26 implementation tasks with binary acceptance criteria and the global Definition of Done |
-| [`docs/04-test-strategy.md`](docs/04-test-strategy.md) | 130 automated test cases, 13 manual Windows checks, the CI pipeline |
+| [`docs/03-tasks.md`](docs/03-tasks.md) | 27 implementation tasks with binary acceptance criteria and the global Definition of Done |
+| [`docs/04-test-strategy.md`](docs/04-test-strategy.md) | 133 automated test cases, 15 manual Windows checks, the CI pipeline |
+| [`docs/07-release-checklist.md`](docs/07-release-checklist.md) | How a tag becomes an installer, and what blocks one |
 | [`docs/06-verification-map.md`](docs/06-verification-map.md) | Hand-authored. One row per requirement naming the tests that actually prove it |
 | [`docs/05-traceability.md`](docs/05-traceability.md) | Generated matrix. Do not edit |
 | [`docs/OLD_MASTER_BUILD_PROMPT.md`](docs/OLD_MASTER_BUILD_PROMPT.md) | The original product brief, corrected, kept for context |
@@ -74,6 +75,40 @@ registry entry plus one adapter (ADR-022).
 |---|---|
 | Speech to text | Deepgram `nova-3` (default) and `nova-2`, OpenAI `gpt-4o-transcribe` and `gpt-4o-mini-transcribe`, ElevenLabs `scribe-v2-realtime`, plus OpenAI `whisper-1` as a clearly labeled non-streaming option |
 | Suggestions | Anthropic `claude-haiku-4-5-20251001` (default), OpenAI `gpt-4o-mini` |
+
+---
+
+## Building the installer
+
+One command, from a clean checkout, on Windows:
+
+```bash
+npm ci && npm run package
+```
+
+It writes `release/Interview CoPilot-<version>-x64.exe`, an x64 NSIS installer,
+and `release/win-unpacked/` beside it. That is the whole of `NFR-013`: the build
+is reproducible from a clean checkout with one documented command.
+
+v1 ships **unsigned**. Windows SmartScreen warns on first run, which is expected
+rather than a defect.
+
+Two checks run against the output, in CI and available locally:
+
+```bash
+npm run check:packaged   # the installer exists and the unpacked modules are real files
+npm run smoke:packaged   # the packaged app launches and paints a Dashboard (Windows only)
+```
+
+They exist because `onnxruntime-node` ships a native addon and `chokidar` 5 is
+ESM-only, and neither can be loaded from inside an asar archive. A wrong
+`asarUnpack` glob in `electron-builder.yml` still builds a green installer; the
+app only breaks when it is run.
+
+Cutting a release needs more than a green build. See
+[`docs/07-release-checklist.md`](docs/07-release-checklist.md): the manual
+checklist is recorded under `releases/<tag>.md`, and `npm run check:release`
+refuses a release whose record is missing, incomplete or failing.
 
 ---
 

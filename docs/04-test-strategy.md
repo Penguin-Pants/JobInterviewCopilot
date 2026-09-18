@@ -235,6 +235,8 @@ All trigger tests run on fake timers with the pure state-machine module.
 | TC-162 | U | Non-retryable is terminal without a backup | With no backup, an `auth` failure enters `CONFIG_REQUIRED` and sends zero further requests for the rest of the session. A `network` failure enters `DEGRADED` and keeps retrying with backoff capped at 10 s. Saving a new valid key clears `CONFIG_REQUIRED` |
 | TC-163 | I | Re-embed SLA is bounded | A document within the 2 MB and 200-chunk ceiling is queryable within 5 s of settling. A document above the ceiling still completes, is exempt from the 5 s target, and reports progress |
 | TC-164 | I | Live session loop end to end | `session:start` opens one `SttSession` per stream and starts capture. An injected audio chunk is pushed to the provider session and its seconds reach the Cost Meter. An interviewer final followed by the gap runs retrieval and one generation, whose lines reach the overlay only through the readiness gate, whose outcome reaches `appendSuggestion` and whose usage reaches `noteGeneration`. A second turn mid-generation appends the cancelled entry before the replacement's. `session:stop` closes both sessions and stops capture, and no append lands on a closed handle |
+| TC-165 | I | Packaged app is loadable | The packaged output carries an x64 installer named for the version, and `onnxruntime-node`, `chokidar` and `readdirp` are unpacked as real files rather than left inside `app.asar`. A packaged tree missing any of them fails the check. On Windows the packaged app launches, paints a Dashboard, completes `startKnowledgeBase`, and writes no knowledge-base failure to its log, which is where a failed `chokidar` import surfaces. The native addon's own `dlopen` happens only on embedding and is `MW-15` |
+| TC-166 | I | Release record gates the release | A record that is missing, is for another tag, omits a checklist id, records one twice, carries a result with no evidence, or fails any check other than MW-12 blocks the release. MW-12 failing does not block. MW-06 and MW-11 passing without measured p50 and p95 numbers blocks |
 | TC-150 | I | Non-streaming latency harness | With a non-streaming model active and scripted fakes at fixed delays, the measured path is inside the `NFR-017` budget. Which budget applies is read from the registry entry. Real numbers come from MW-11 |
 
 ---
@@ -288,6 +290,14 @@ on a scheduled run.
 Run on one Windows 10 machine (build 19041 or later) and one Windows 11 machine.
 Record the result against the release tag. A failure blocks the release.
 
+The record is a file, not a memory of having run it: copy `releases/TEMPLATE.md`
+to `releases/<tag>.md` and fill in every row. `npm run check:release` reads it
+and refuses a release whose record is missing, incomplete or failing, and it
+runs on every pull request so a bad record is caught before the tag rather than
+after. `MW-06` and `MW-11` must carry measured `p50` and `p95` numbers rather
+than a bare verdict. `MW-12` is the only check that cannot block. The procedure
+is `docs/07-release-checklist.md`.
+
 | ID | Check | Expected |
 |---|---|---|
 | MW-01 | Share the screen in Zoom, Teams and Google Meet with the overlay visible | The overlay does not appear in the shared view on any of the three. It stays visible on the physical display |
@@ -303,6 +313,7 @@ Record the result against the release tag. A failure blocks the release.
 | MW-11 | Non-streaming rehearsal with `whisper-1`, 20 turns | Latency is inside `NFR-017` (p50 under 7.0 s, p95 under 10.0 s) and the badge states the latency cost |
 | MW-14 | Watch Task Manager across a 20-minute rehearsal | Average CPU across every app process stays under 15 percent of one core on a 4-core machine, excluding the first-run model download (`NFR-005`). TC-131 measures the main process in CI; this is the whole-app number on real hardware |
 | MW-13 | Rehearsal on each streaming STT provider, 10 turns each: Deepgram `nova-3`, OpenAI `gpt-4o-transcribe`, ElevenLabs `scribe-v2-realtime` | All three transcribe real interviewer speech correctly and all three stay inside `NFR-001` |
+| MW-15 | Install the NSIS package on a **clean** Windows 11 machine and launch it | The installer runs, the app launches, the Dashboard renders, and a document imports and embeds. The only check that exercises the **installed** app: `TC-001` builds the installer and `TC-165` launches the unpacked build, and neither runs the installer. This is TASK-051's clean-install acceptance criterion |
 | MW-12 | Play music and fire a desktop notification during a session | Both are transcribed onto the interviewer stream, as `ADR-021` predicts. The session-prep note advising the user to close other audio sources is present. This check confirms the documented limitation, it does not fail on it |
 
 ---
