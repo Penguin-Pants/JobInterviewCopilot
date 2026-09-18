@@ -199,7 +199,7 @@ All trigger tests run on fake timers with the pure state-machine module.
 | TC-130 | I | Unhandled rejection | An injected unhandled rejection during a session is logged and the session stays active |
 | TC-131 | I | Soak | A 60-minute synthetic session keeps main-process RSS under 600 MB with no upward trend over the last 30 minutes (`NFR-004`), and mean main-process CPU under 15 percent of one core (`NFR-005`). The all-processes figure on real hardware is MW-14 |
 | TC-132 | I | Offline with a cached model | With the network disabled **and the model already cached**, the app starts, imports documents and embeds. `session:start` warns that transcription is unavailable |
-| TC-133 | I | Latency harness | With scripted fakes at fixed delays, the measured turn-end to first-line path adds under 150 ms of app-side overhead. Real end-to-end `NFR-001` numbers come from MW-06 |
+| TC-133 | I | Latency harness | With scripted fakes at fixed delays, and a turn that resolves via the actionability heuristic alone (no LLM-confirm call, `TC-167`), the measured turn-end to first-line path adds under 150 ms of app-side overhead. Real end-to-end `NFR-001` numbers come from MW-06. The LLM-confirm path's own budget is `TC-169`, not this case |
 
 ### 3.12 Added from independent review
 
@@ -243,14 +243,14 @@ All trigger tests run on fake timers with the pure state-machine module.
 
 | ID | Level | Case | Pass condition |
 |---|---|---|---|
-| TC-167 | U | Actionability heuristic | A `?` or a lexicon lead word resolves `'actionable'` with zero calls to the fake LLM. An exact small-talk or acknowledgement match resolves `'non-actionable'` with zero calls. Neither list matching returns `null` |
+| TC-167 | U | Actionability heuristic | A `?` anywhere in the text, or a lexicon lead word at the **start** of the trimmed text, resolves `'actionable'` with zero calls to the fake LLM. A case-insensitive **exact** match of the **whole trimmed text** against a small-talk or acknowledgement phrase resolves `'non-actionable'` with zero calls; a turn that only **starts with** such a phrase but is longer than it (e.g. "Okay, so what's your expected salary range?") must NOT match and must fall through to `null`. Neither rule matching returns `null` |
 | TC-168 | U | Actionability LLM-confirm and failure mode | A turn `classifyHeuristically` cannot resolve calls the fake LLM exactly once. A fake LLM timeout, a provider error, and a malformed response all resolve to `'actionable'` |
 | TC-169 | I | Actionability classifier latency budget | With scripted fakes at fixed delays, the LLM-confirm path adds no more than 400 ms at p95 to the turn-end-to-first-bullet measurement `TC-133` already makes |
 | TC-170 | I | Confidence capability drives the gate | A fake STT provider with `supportsConfidence: true` and a scripted low-confidence final does not fire a generation. The identical scripted value with `supportsConfidence: false` fires normally |
 | TC-171 | U | Deepgram confidence parsing | A frame carrying `channel.alternatives[0].confidence` sets `TranscriptEvent.confidence` to that value. Fixtures for the other three adapters never set it |
 | TC-172 | U | Staleness discard timing | A generation whose `firedAt` is more than `STALE_DISCARD_MS` in the past when it would otherwise begin produces zero `suggestion:begin`, `line` or `end` pushes. One under the threshold is unaffected |
 | TC-173 | I | Staleness transcript status and cost | A discarded generation is appended to the transcript with `status: 'stale'`, and its token usage still reaches the Cost Meter |
-| TC-174 | U | Hold buffer delays replacement | A second `suggestion:begin` arriving less than `minHoldMs` after the first card became visible is queued and dispatched only once the hold elapses, driven by fake timers. One arriving after the hold dispatches immediately |
+| TC-174 | U | Hold buffer delays replacement and preserves pacing | A second `suggestion:begin` arriving less than `minHoldMs` after the first card became visible is queued and dispatched only once the hold elapses, driven by fake timers, with its `line` events replayed at their original relative spacing rather than all at once. One arriving after the hold dispatches immediately. A pause clears "a card is shown," so the next suggestion after resume is not held |
 | TC-175 | U | Hold buffer drops a cancelled queued generation | A `suggestion:end` with `status: 'cancelled'` for a `generationId` still queued in the hold buffer discards its queued entries. Nothing from that generation ever reaches `reduceCards` |
 
 ---

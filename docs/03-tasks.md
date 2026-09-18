@@ -1837,28 +1837,48 @@ section 8).
 
 ### TASK-060 Actionability filter
 **Traces** FR-111, NFR-018, ASM-015
-**Depends on** TASK-030, TASK-032
+**Depends on** TASK-030, TASK-032, TASK-061
 **Acceptance criteria**
-- A turn that passes `FR-051`'s guard is classified before `evaluateTurn` fires
-  a generation. A `?` anywhere in the turn text, or a case-insensitive match at
-  the start of the trimmed text against `ACTIONABLE_LEADS`, resolves
-  `'actionable'` with no network call. An exact case-insensitive match against
-  `NON_ACTIONABLE_PHRASES` resolves `'non-actionable'` with no network call.
-- A turn neither list resolves is classified by exactly one call to the
-  configured LLM primary (`LlmProvider`, `02-architecture.md` 3.2), capped
-  output tokens, temperature 0, carrying the turn's own `AbortSignal`.
+- A turn that passes `FR-051`'s guard and `TASK-061`'s confidence gate enters
+  the new `CLASSIFYING` state (`02-architecture.md` 5.3) before `evaluateTurn`
+  fires a generation. A `?` anywhere in the turn text, or a case-insensitive
+  match **at the start** of the trimmed text against `ACTIONABLE_LEADS`,
+  resolves `'actionable'` with no network call. A case-insensitive match of
+  **the entire trimmed turn**, not a prefix, against `NON_ACTIONABLE_PHRASES`
+  resolves `'non-actionable'` with no network call — a start-of-text match on
+  this list is a defect, not a stricter variant: it would classify "Okay, so
+  what's your expected salary range?" as non-actionable.
+- `src/main/ai/actionability.ts` exports `ACTIONABLE_LEADS`,
+  `NON_ACTIONABLE_PHRASES` and `classifyHeuristically` with **no import of
+  `LlmProvider` or anything network-capable** — `CMP-05` (`ai/trigger.ts`) may
+  not "call an LLM provider directly" (`02-architecture.md` section 1), and
+  this file is what `trigger.ts` is allowed to import.
+- `classifyWithLlm(text, llm, signal)`, the LLM-backed half, also lives in
+  `actionability.ts` but is imported and called only from `live.ts` (`CMP-15`).
+  `TriggerOptions` gains `classify: (text, signal) => Promise<ActionabilityVerdict>`;
+  `live.ts` constructs it as a closure over the configured LLM primary and
+  passes it in at wiring time, the same pattern `onFire` already is.
+  `trigger.ts` calls `this.options.classify(...)` only when
+  `classifyHeuristically` returns `null`; it never imports `classifyWithLlm`
+  or `LlmProvider` itself.
+- A turn neither rule resolves calls `this.options.classify`, capped output
+  tokens, temperature 0, sharing the turn's own `AbortController` (the same
+  controller stamps `firedAt`, `TASK-062`).
 - A classifier failure of any kind — timeout, provider error, a response that
   is not cleanly `'actionable'` or `'non-actionable'` — resolves to
   `'actionable'`.
 - A turn classified `'non-actionable'` returns to `LISTENING` with no card, no
   generation and no transcript entry: the same path a `FR-051` guard failure
   already takes, not a new one.
-- The classifier (`ACTIONABLE_LEADS`, `NON_ACTIONABLE_PHRASES`,
-  `classifyHeuristically`, `classifyWithLlm`) is a pure module with no Electron
+- A new turn's gap elapsing while a previous turn is still `CLASSIFYING` aborts
+  the in-flight classification (via its `AbortController`) before the guard
+  chain restarts for the new, combined text — `abortInFlight` generalized to
+  "whichever async op is in flight," not specific to a generation.
+- `actionability.ts`'s heuristic half is a pure module with no Electron
   import, matching the trigger's own module boundary (`TASK-030`).
 - The LLM-confirm path adds no more than 400 ms at p95 to the existing latency
-  harness (`NFR-018`), measured with scripted fakes at fixed delays, the same
-  method `TC-133` already uses.
+  harness (`NFR-018`), measured with scripted fakes at fixed delays. `TC-133`
+  is unaffected because its fixtures resolve via the heuristic path only.
 **Verified by** TC-167, TC-168, TC-169
 
 ### TASK-061 STT confidence capability and gate
@@ -1869,17 +1889,22 @@ section 8).
   states it explicitly — `true` for `deepgram`'s models, `false` for
   `openai-realtime`, `elevenlabs` and `whisper-1` — rather than leaving it to a
   default, the same discipline `TC-056` already holds `supportsEndpointing` to.
+  This flag inherits the same primary-vs-active-after-failover resolution
+  `supportsEndpointing` already has (`ADR-046`); not this task's to fix.
 - `TranscriptEvent` carries an optional `confidence`, populated only when the
   emitting adapter's active model has `supportsConfidence: true`.
 - The `deepgram` adapter reads `channel.alternatives[0].confidence` off the
   frame it already parses and sets it on every emitted `TranscriptEvent`. The
   other three adapters emit no `confidence` field; this task does not touch
   their request shape or response parsing.
-- A turn whose completing final segment carries `confidence` below
-  `CONFIDENCE_THRESHOLD` (0.55) does not fire, when the active model's
-  `supportsConfidence` is `true`. The gate is not evaluated at all — not
-  evaluated and passing, evaluated and passing — when `supportsConfidence` is
-  `false`.
+- This gate is checked **immediately after `FR-051`'s guard and before
+  `TASK-060`'s actionability classification** — it is free, the classifier can
+  cost a network round trip, and a turn that fails this gate must never also
+  pay for a classification call.
+- A turn whose **last final segment received before the turn-end gap elapsed**
+  carries `confidence` below `CONFIDENCE_THRESHOLD` (0.55) does not fire, when
+  the active model's `supportsConfidence` is `true`. The gate is not evaluated
+  at all — not evaluated-and-passing — when `supportsConfidence` is `false`.
 - A fake STT provider drives both directions: `supportsConfidence: true` with a
   scripted low-confidence final proves the gate suppresses the turn;
   `supportsConfidence: false` with the same scripted value proves the gate does
@@ -1888,10 +1913,13 @@ section 8).
 
 ### TASK-062 Stale-suggestion discard
 **Traces** FR-114
-**Depends on** TASK-030, TASK-032, TASK-044
+**Depends on** TASK-030, TASK-032, TASK-044, TASK-060, TASK-061
 **Acceptance criteria**
-- `TurnFired` carries `firedAt`, an epoch millisecond set once when the turn
-  fires and never revised.
+- `TurnFired` carries `firedAt`, an epoch millisecond captured **once, when the
+  turn-end gap elapses and `FR-051`'s guard passes** (the moment the guard
+  chain begins, i.e. entry to `CLASSIFYING`), and carried through unchanged —
+  never re-stamped when `GENERATING` is finally entered. It must measure true
+  turn-end-to-now, confidence gate and classifier included.
 - Immediately before `CMP-15` would call `onSuggestion` for `suggestion:begin`,
   it checks `Date.now() - firedAt` against `STALE_DISCARD_MS` (20000). Over the
   threshold, no `onSuggestion` call is made for `begin`, `line` or `end` — the
@@ -1901,9 +1929,11 @@ section 8).
   underlying LLM call.
 - The transcript entry for a discarded generation is appended with
   `status: 'stale'`, distinct from `'cancelled'`.
-- `GenerationStatus` and `CH-209`'s payload schema both carry `'stale'`.
-  `CardStatus` in `cards.ts` is unchanged — a stale generation never reaches
-  the renderer, so it has no reachable use there.
+- `GenerationStatus` and `TranscriptEntry`'s `'suggestion'` variant both carry
+  `'stale'`. `CH-209`'s wire schema does **not** — the `suggestion:begin` that
+  would carry it is exactly what this task guarantees is never sent, so a wire
+  branch for it would be unreachable by construction. `CardStatus` in
+  `cards.ts` is unchanged for the same reason.
 - A test drives a scripted delay past the threshold and asserts zero
   `suggestion:begin`/`line`/`end` pushes plus one `'stale'` transcript entry; a
   delay under the threshold asserts the existing behavior is unaffected.
@@ -1930,7 +1960,13 @@ section 8).
   against one card's worst case and reduced if the existing default now leaves
   most of the window empty. The exact value is confirmed by `TC-006`, not
   fixed by this document.
-**Verified by** TC-111
+- A returning user's own resized overlay is untouched: `overlayWindow.width`/
+  `height` are only ever `null` (pick up whatever the default is) or an
+  explicit number the user or a prior default set (`02-architecture.md` 2.1).
+  Lowering the default changes what a stored `null` resolves to; it does not
+  touch a stored number. No migration step is needed beyond shipping the new
+  default.
+**Verified by** TC-111, TC-006
 
 ### TASK-064 Card hold buffer
 **Traces** FR-115, ASM-018
@@ -1942,11 +1978,15 @@ section 8).
 - With no card shown, or the shown card visible at least `minHoldMs` (1500), an
   incoming `CardEvent` dispatches immediately.
 - With a card shown less than `minHoldMs`, incoming events for a new
-  `generationId` queue and replay, in arrival order, once the hold elapses.
-  Tests drive this with injected timers, not real waits.
+  `generationId` queue and replay once the hold elapses, in arrival order and
+  **at the spacing they originally arrived in** — not flushed all at once —
+  so a held card's bullets still trigger their per-bullet reveal (`FR-092`)
+  individually. Tests drive this with injected timers, not real waits.
 - A `suggestion:end` with `status: 'cancelled'` for a `generationId` still
   queued discards that generation's queued entries; nothing from it ever
   dispatches.
-- The first card shown after an idle period (no card currently shown) is not
-  subject to the hold.
+- A pause (`CH-212 overlay:mode`) clears the buffer's notion of "a card is
+  currently shown," so the first suggestion after resume is not held.
+- Whenever no card is currently shown — the first suggestion of a session, or
+  the first one after a pause — the hold does not apply.
 **Verified by** TC-174, TC-175

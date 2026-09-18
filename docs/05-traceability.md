@@ -163,5 +163,5 @@ Coverage: 113 requirements, 32 tasks, 142 automated test cases, 15 manual checks
 | TASK-060 | Actionability filter | FR-111, NFR-018 | TC-167, TC-168, TC-169 |
 | TASK-061 | STT confidence capability and gate | FR-112, FR-113 | TC-170, TC-171 |
 | TASK-062 | Stale-suggestion discard | FR-114 | TC-172, TC-173 |
-| TASK-063 | Single-card overlay | FR-091 | TC-111 |
+| TASK-063 | Single-card overlay | FR-091 | TC-006, TC-111 |
 | TASK-064 | Card hold buffer | FR-115 | TC-174, TC-175 |

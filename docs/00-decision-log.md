@@ -1599,21 +1599,61 @@ project": both clear the same two numbers. The UX review that motivated this
 milestone found this to be the largest source of suggestions that should not
 have appeared at all.
 
-**Decision.** A turn that passes `FR-051`'s guard is classified before it is
-allowed to fire:
+**Decision.** A turn that passes `FR-051`'s guard and `FR-113`'s confidence gate
+is classified before it is allowed to fire:
 - A fixed, exported lexicon (`ACTIONABLE_LEADS`, `NON_ACTIONABLE_PHRASES`, see
-  `FR-111`) resolves the common cases with no network call: a `?` or an
-  interrogative lead word fires immediately; an exact small-talk or
-  acknowledgement match suppresses immediately.
-- Anything the lexicon does not resolve gets exactly one classification call to
-  the already-configured LLM primary, capped at a few output tokens, before the
-  turn is allowed to fire.
-- A classifier failure (timeout, provider error) resolves to **fire**, never to
-  suppress. `NFR-009`'s resilience policy already fails a live session toward
-  continuing, not toward silence induced by a broken dependency; a suggestion
-  that should not have appeared costs a glance, a missing one that should have
-  costs the candidate an unaided answer to a question this tool exists to help
-  with.
+  `FR-111`) resolves the common cases with no network call: a `?` anywhere in
+  the text, or a case-insensitive match **at the start** of the trimmed text
+  against `ACTIONABLE_LEADS`, fires immediately. A case-insensitive **exact**
+  match of the **whole trimmed turn** against `NON_ACTIONABLE_PHRASES`
+  suppresses immediately.
+- Anything neither rule resolves gets exactly one classification call, capped
+  at a few output tokens, before the turn is allowed to fire.
+- A classifier failure (timeout, provider error, a response that is not
+  cleanly one verdict) resolves to **fire**, never to suppress. `NFR-009`'s
+  resilience policy already fails a live session toward continuing, not toward
+  silence induced by a broken dependency; a suggestion that should not have
+  appeared costs a glance, a missing one that should have costs the candidate
+  an unaided answer to a question this tool exists to help with.
+
+**The two lexicons are matched asymmetrically on purpose, corrected during the
+two-reviewer spec-consistency check before implementation began.** An earlier
+draft applied the same start-of-text match to both lists. That is safe for
+`ACTIONABLE_LEADS` — a false positive there only means an ordinary turn takes
+the same path it already would have (fire) — but not for
+`NON_ACTIONABLE_PHRASES`: a start-of-text match would let "Okay, so what's your
+expected salary range?" match "okay" and suppress a real, consequential
+question with no recourse, exactly the failure direction this ADR just ruled
+out for the LLM-confirm path. Requiring the whole trimmed turn to match closes
+that hole: a real question can never be long enough to exactly equal a
+five-word acknowledgement.
+
+**The classification call is injected, not called by the trigger.** `CMP-05`
+(`ai/trigger.ts`) may not "call an LLM provider directly" (section 1's
+component table, unchanged by this milestone). `TriggerOptions` gains
+`classify: (text: string, signal: AbortSignal) => Promise<ActionabilityVerdict>`,
+the same shape of dependency `onFire` already is. `CMP-05` calls
+`classifyHeuristically` directly (pure, synchronous, no import of anything
+network-capable) and falls back to `this.options.classify(...)` only when the
+heuristic returns `null`. The real, `LlmProvider`-backed implementation is
+constructed once, in `CMP-15` (`live.ts`), exactly where `LlmProvider` is
+already legitimately called, and handed to the trigger at wiring time. `CMP-05`
+itself imports no LLM adapter and stays the pure, fake-timer-testable module
+`TASK-030` built.
+
+**A new state, `CLASSIFYING`, carries the wait.** The state machine (5.3) gains
+`AWAITING_TURN_END --gap elapsed, guard + confidence pass--> CLASSIFYING` and
+`CLASSIFYING --resolved 'actionable' or classifier failure--> GENERATING` /
+`CLASSIFYING --resolved 'non-actionable'--> LISTENING`. This is not cosmetic: an
+earlier draft left the classification call floating outside the diagram
+entirely, which left "a new interviewer turn arrives while classification for
+the previous one is still in flight" undefined. `CLASSIFYING` behaves exactly
+like `GENERATING` already does for this: a pending turn survives its
+predecessor (new text accumulates and arms its own gap timer), and a new turn's
+gap elapsing while still `CLASSIFYING` aborts the in-flight classification call
+before starting the guard chain over for the new text — the same
+`abortInFlight` the trigger already uses for `GENERATING`, now generic over
+"whichever async op is in flight," not only over a generation.
 
 **Reason.** Heuristic-only was rejected: a fixed lexicon cannot cover a
 paraphrased question ("so what would you say is, like, your biggest gap"), and
@@ -1622,7 +1662,11 @@ drop real questions, the worse of the two failure directions. LLM-only was
 rejected on latency grounds: it puts a network round trip in front of every
 turn, including the common, unambiguous case that already worked, which fights
 the streaming-latency budget `NFR-001` protects. Hybrid keeps the fast path fast
-and spends the round trip only where the fast path cannot decide.
+and spends the round trip only where the fast path cannot decide. Injecting the
+classifier function, rather than having `CMP-05` call `LlmProvider` itself, was
+not a stylistic choice: it is the only way to add an LLM-backed decision to the
+guard chain without breaking the "no Electron, no network" purity `TASK-030`'s
+own tests already rely on.
 
 **Consequence.** `FR-111` and `NFR-018` are new. `TASK-060` implements it. The
 lexicon is a starting point (`ASM-015`), not a closed list; growing it does not
@@ -1655,6 +1699,25 @@ wiring regardless of which choice is made here. A capability flag makes "not
 yet wired" and "will never be wired" the same code path with a different data
 value, so a new provider that never exposes confidence is not a special case,
 it is the default.
+
+**The confidence gate runs before the actionability classifier, not after.**
+`FR-113` is free (one local comparison); `FR-111`'s LLM-confirm path can cost a
+network round trip. Checking confidence first means a turn garbled enough to
+fail it is never also paid for with a classification call that would only have
+been thrown away. Corrected during the two-reviewer spec-consistency check
+before implementation began; an earlier draft ordered them the other way with
+no stated reason.
+
+**This gate inherits a known, already-deferred limitation.** `supportsConfidence`
+is read the same way `supportsEndpointing` is, which is currently resolved off
+the STT **primary**'s registry entry rather than whichever model is actually
+active after a mid-session failover to backup (`03-tasks.md` records this as
+harmless today because nothing fails over during a live session yet, and
+carries it forward rather than fixing it). `TASK-061` does not fix this either:
+a session that has failed over to a backup STT model would have its confidence
+gate decided against the primary's flag, not the backup's, exactly as
+`supportsEndpointing` already is. Worth a line here so it is not mistaken for a
+gap this milestone introduced.
 
 **Consequence.** `FR-112` (registry and event shape) and `FR-113` (the gate
 itself) are new. `TASK-061` implements it. `ASM-016` records the threshold as a
@@ -1699,14 +1762,38 @@ silence do not restart the trigger, so the old answer would otherwise still
 land. The alternative considered was counting subsequent interviewer turns
 rather than measuring elapsed time.
 
-**Decision.** `TurnFired` gains `firedAt: number` (epoch ms, set when the turn
-fires). Immediately before a generation would become visible — the point at
+**Decision.** `firedAt: number` (epoch ms) is captured once, at the moment the
+guard chain begins — when the turn-end gap elapses and `FR-051`'s guard passes
+— not at whatever later moment `GENERATING` is actually entered. It is carried
+through `CLASSIFYING` (`ADR-045`) into the eventual `TurnFired`, so the elapsed
+time it measures is the true "turn end to now," including whatever the
+actionability classifier and the confidence gate themselves cost, matching the
+"turn-end-to-first-bullet" framing `NFR-001`/`NFR-017`/`ASM-017` already use
+elsewhere. Immediately before a generation would become visible — the point at
 which `CMP-15` would otherwise call `onSuggestion` for `suggestion:begin` —
-`CMP-15` checks `Date.now() - turn.firedAt` against a fixed threshold. Over it,
-the generation is not sent to the overlay at all: no `suggestion:begin`, no
-lines, no `suggestion:end`. It is recorded in the transcript with a new status,
+`CMP-15` checks `Date.now() - firedAt` against a fixed threshold. Over it, the
+generation is not sent to the overlay at all: no `suggestion:begin`, no lines,
+no `suggestion:end`. It is recorded in the transcript with a new status,
 `'stale'`, distinct from `'cancelled'` (a new turn interrupted it), so the two
-are not confused when a session is reviewed later.
+are not confused when a session is reviewed later. `'stale'` is added to the
+shared `GenerationStatus` type and to `TranscriptEntry`'s `'suggestion'`
+variant, but **not** to `CH-209`'s wire schema: a value the overlay can
+structurally never receive (the `suggestion:begin` that would have carried it
+is the one thing this decision guarantees is never sent) is exactly the "code
+with no reachable second branch" `ADR-044` and `ADR-047` both already refuse to
+keep.
+
+**One checkpoint, not a check on every push, is enough for what this decision
+protects against.** The scenario this ADR exists for is a generation that sits
+*unstarted* for too long — RAG retrieval plus however many failed attempts the
+health machine's own retry ladder ran (capped at 10 s by `ADR-024`'s
+`DEGRADED` backoff) before a request finally goes out. Once a generation has
+actually begun streaming, its total length is already bounded by
+`GENERATION_PARAMS.maxTokens` (200) and the line buffer's own caps, so an
+unbounded slow-drip stream after `suggestion:begin` is not a failure mode this
+system has anywhere else either. A second check before every `suggestion:line`
+would guard against a scenario nothing else in this architecture can actually
+produce.
 
 **Reason.** A turn-count signal was rejected because it does nothing when the
 interviewer says nothing else — the exact silence-after-the-real-question case
@@ -1724,8 +1811,9 @@ floor.
 
 **Consequence.** `FR-114` is new. `GenerationStatus` and `TranscriptEntry`'s
 `'suggestion'` variant gain `'stale'`; `CardStatus` does **not**, because a
-stale generation never reaches the renderer. `CH-209`'s payload enum gains
-`'stale'`. `ASM-017` records the threshold. `TASK-062` implements it.
+stale generation never reaches the renderer, and neither does `CH-209`'s wire
+schema, for the same reason. `ASM-017` records the threshold. `TASK-062`
+implements it.
 
 ### ADR-049 — The minimum-hold floor is renderer-side, in front of the reducer, not a delay in the main process
 
@@ -1742,9 +1830,21 @@ card reducer.
 `suggestion:begin`/`suggestion:line`/`suggestion:end` as it arrives over IPC; if
 a card is currently shown and it became visible less than `MIN_HOLD_MS` ago,
 the buffer holds the incoming events and replays them once the hold elapses, in
-arrival order. If a `suggestion:end` with `status: 'cancelled'` arrives for a
-`generationId` still sitting in the buffer, the buffer discards everything
-queued for it instead of replaying a card that was itself superseded.
+arrival order **and at the spacing they originally arrived in**, not
+compressed into one instant — a card's bullets already stream in one at a time
+with their own reveal animation (`FR-092`), and a held card should still arrive
+that way, not as a single flushed batch. If a `suggestion:end` with
+`status: 'cancelled'` arrives for a `generationId` still sitting in the buffer,
+the buffer discards everything queued for it instead of replaying a card that
+was itself superseded.
+
+**A pause clears the buffer's notion of "a card is shown."** `CH-212
+overlay:mode` (pausing, `FR-053`) already drives the overlay to its idle state
+outside the suggestion channels this buffer watches. Losing that context would
+otherwise leave the buffer measuring visibility against a card the idle state
+has already replaced on screen. The buffer treats a pause exactly like an empty
+card slot: the next suggestion after resume dispatches immediately, the same
+`FR-115` rule already applies to the first card of a session.
 
 **Reason.** A main-process delay was rejected because "became visible" is a
 renderer fact — the main process does not know when a push actually painted,
