@@ -211,6 +211,13 @@ come from the registry entry, not be hard-coded to Whisper. Turn detection falls
 back to the silence-gap timer for any model whose registry entry declares
 `supportsEndpointing: false`. (ADR-022)
 
+**FR-112** `SttModelDescriptor` must carry `supportsConfidence: boolean`, read
+the same way as `supportsEndpointing` (`FR-037`): off the registry entry for the
+selected model, never off a provider id. `TranscriptEvent` must carry an
+optional `confidence` field (0 to 1), populated only by a model whose registry
+entry sets `supportsConfidence: true`. A model that does not set it must emit no
+`confidence` field at all, not a fabricated one. (ADR-046)
+
 ---
 
 ## 6. Turn detection and trigger (`FR-05n`)
@@ -242,6 +249,25 @@ the newest question. The cancelled partial output must be removed from the
 overlay. (ASM-004)
 
 **FR-055** The trigger must never fire from the candidate stream.
+
+**FR-111** A turn that passes `FR-051`'s guard must be classified as actionable
+before it is allowed to fire a generation. A `?` in the turn text or a fixed
+interrogative lead word must classify it actionable with no network call. An
+exact match against a fixed small-talk or acknowledgement list must classify it
+non-actionable with no network call. A turn neither pattern resolves must be
+classified by exactly one call to the configured LLM primary, capped at a few
+output tokens. A classifier failure of any kind (timeout, provider error) must
+resolve to actionable. A turn classified non-actionable must return to
+`LISTENING` exactly as a guard failure does: no card, no generation, no
+transcript entry. (ADR-045, ASM-015)
+
+**FR-113** When the active STT model's registry entry sets
+`supportsConfidence: true` (`FR-112`), a turn must not fire if the final
+transcript segment that completed it carries a `confidence` below the
+configured threshold. A turn suppressed this way must return to `LISTENING`
+exactly as a guard failure does. A model with `supportsConfidence: false` is
+unaffected: the gate does not apply and the turn fires on the existing rules
+alone. (ADR-046, ASM-016)
 
 ---
 
@@ -337,6 +363,15 @@ provider request, not merely stop reading it.
 **FR-076** The overlay must never show an error card. Provider failures are
 reported only through the Dashboard status badge. (`FR-100`)
 
+**FR-114** `TurnFired` must carry `firedAt`, the epoch millisecond the turn
+fired. Immediately before a generation would be sent to the overlay
+(`suggestion:begin`), the elapsed time since `firedAt` must be checked against a
+fixed threshold. Over the threshold, the generation must not reach the overlay
+at all: no `suggestion:begin`, no `suggestion:line`, no `suggestion:end`. It
+must still be recorded in the transcript, with status `'stale'`, a value
+distinct from `'cancelled'` so a slow, unanswered generation is never confused
+with one a new turn interrupted. (ADR-048, ASM-017)
+
 ---
 
 ## 9. Windows and IPC (`FR-08n`)
@@ -421,9 +456,19 @@ not be used as a substitute. (ADR-015)
 **FR-090** The idle state must be a small translucent card with a standing-by
 message, shown before the first suggestion and whenever the trigger is paused.
 
-**FR-091** The active state must show a stack of the 3 most recent suggestion
-cards. A new card entering must fade the oldest out through Framer Motion
-`AnimatePresence`. (ASM-010)
+**FR-091** The active state must show at most one suggestion card. A new
+suggestion must replace it. (ASM-010)
+
+> **Amended.** This requirement previously specified a stack of the 3 most
+> recent cards, with a new card fading the oldest out through Framer Motion
+> `AnimatePresence`. The UX review that produced `FR-111` through `FR-115`
+> found that distinguishing which of several stacked cards is current asks a
+> nervous candidate for a judgment call the interview leaves no attention for.
+> `ADR-047` is the decision; `depthOpacity`, the eviction-fade transition and
+> the multi-card layer of `SuggestionCardView` are removed rather than kept
+> behind a cap of 1, because code with no reachable second branch is not kept
+> on this project (`ADR-044`). `TC-111` is redefined in place for the
+> single-card behavior.
 
 **FR-092** Each completed bullet must reveal with a fade plus a slight upward
 slide over 200 to 300 ms. Per-word reveal is forbidden.
@@ -435,6 +480,14 @@ control.
 
 **FR-094** Overlay cards must be built from Magic UI components on Tailwind,
 styled from the theme tokens in `FR-029`.
+
+**FR-115** A new suggestion must not replace a currently visible card until the
+card has been visible for at least a configured minimum hold duration. The hold
+must be enforced in the overlay renderer, in front of the card reducer, not by
+delaying the IPC push from the main process. A `suggestion:end` with
+`status: 'cancelled'` for a generation still waiting out the hold must discard
+it rather than display it once the hold elapses. The first card shown after an
+idle period is not subject to the hold. (ADR-049, ASM-018)
 
 ---
 
@@ -559,6 +612,13 @@ turn end to first bullet must be p50 under 7.0 s and p95 under 10.0 s. `NFR-001`
 applies only to streaming models. Which budget applies is read from the selected
 model's registry entry, not from a provider name. The Dashboard badge must state
 the latency cost, not only the accuracy cost. (ADR-022)
+
+**NFR-018** *(Actionability classifier latency)* The heuristic path (a `?` or a
+lexicon match resolves the turn) must add no measurable latency: no network
+call. The LLM-confirm path, taken only when the heuristic cannot resolve the
+turn, must add no more than 400 ms at p95 to the turn-end-to-first-bullet
+budget `NFR-001`/`NFR-017` already sets, achieved with a capped, low-token
+classification call. (ADR-045)
 
 **NFR-015** *(Licensing)* Every runtime dependency must carry an MIT, Apache-2.0,
 BSD or ISC license. A license check must run in CI and must fail the build on a

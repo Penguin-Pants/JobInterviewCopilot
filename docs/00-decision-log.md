@@ -1080,11 +1080,15 @@ specified but can be changed cheaply before build starts.
 | ASM-007 | Turn-end silence gap defaults to 800 ms, user-adjustable 500 to 1500 ms | `FR-050` | Low |
 | ASM-008 | A turn shorter than 3 words or 12 characters does not fire a suggestion | `FR-051` | Low |
 | ASM-009 | Candidate context window is the last 2 candidate turns, capped at 400 characters | `FR-052` | Low |
-| ASM-010 | Overlay holds 3 suggestion cards, oldest fades out on the 4th | `FR-091` | Low |
+| ASM-010 | ~~Overlay holds 3 suggestion cards, oldest fades out on the 4th~~ **Superseded by `ADR-047`.** The overlay holds exactly 1 card; a new suggestion replaces it | `FR-091` | Low, the reducer's existing cap collapses to this behavior at `MAX_CARDS = 1` |
 | ASM-011 | Cost estimates use a hard-coded price table shipped with the app, versioned and shown with an "estimate" label | `FR-103` | Medium, needs a table per provider |
 | ASM-012 | Session History retains transcripts indefinitely until the user deletes them. No auto-purge, no size cap, and the files are plaintext JSON. Transcripts are the most sensitive user data in the product and get less protection than the API keys. Escalated to **OQ-001** | `FR-101` | Medium, adds retention UI. High if encryption at rest is added |
 | ASM-013 | The app ships unsigned for v1. Code signing is a release-engineering follow-up | `NFR-013` | High, needs a certificate |
 | ASM-014 | English only. No localization layer in v1 | `NFR-014` | High |
+| ASM-015 | The actionability lexicon (`ACTIONABLE_LEADS`, `NON_ACTIONABLE_PHRASES`) is a seed list, not exhaustive. A pattern it does not recognize falls to the LLM-confirm path rather than being misclassified | `FR-111` | Low, a lexicon entry is a one-line addition |
+| ASM-016 | Confidence gate threshold defaults to 0.55 on Deepgram's 0 to 1 scale, chosen below typical clear-speech confidence and above typical garbled-audio confidence, pending calibration against real session data | `FR-113` | Low, one constant, but wrong until calibrated |
+| ASM-017 | Stale-suggestion discard threshold defaults to 20000 ms measured from `firedAt`, chosen well above both latency budgets it must not trip during normal operation (`NFR-001` p95 4.0 s streaming, `NFR-017` p95 10.0 s non-streaming) | `FR-114` | Low |
+| ASM-018 | Minimum card-hold floor defaults to 1500 ms | `FR-115` | Low |
 
 Any change to an `ASM` row requires an update to this table, to the bound
 requirement, and to the affected test cases in the same change.
@@ -1585,6 +1589,175 @@ singleton and passes a sink in, which is what keeps the module testable.
 
 **Reason.** A criterion whose code cannot be reached from a test is not a
 criterion. Both moves are the smallest change that makes the stated check real.
+
+### ADR-045 — The actionability filter is heuristic-first, LLM-confirm second, not one or the other
+
+**Context.** `FR-051`'s guard (`passesTurnGuard`, 3 words or 12 characters) was
+the entire filter between an interviewer utterance and a generation. It cannot
+tell "thanks so much for having me today" from "tell me about a time you led a
+project": both clear the same two numbers. The UX review that motivated this
+milestone found this to be the largest source of suggestions that should not
+have appeared at all.
+
+**Decision.** A turn that passes `FR-051`'s guard is classified before it is
+allowed to fire:
+- A fixed, exported lexicon (`ACTIONABLE_LEADS`, `NON_ACTIONABLE_PHRASES`, see
+  `FR-111`) resolves the common cases with no network call: a `?` or an
+  interrogative lead word fires immediately; an exact small-talk or
+  acknowledgement match suppresses immediately.
+- Anything the lexicon does not resolve gets exactly one classification call to
+  the already-configured LLM primary, capped at a few output tokens, before the
+  turn is allowed to fire.
+- A classifier failure (timeout, provider error) resolves to **fire**, never to
+  suppress. `NFR-009`'s resilience policy already fails a live session toward
+  continuing, not toward silence induced by a broken dependency; a suggestion
+  that should not have appeared costs a glance, a missing one that should have
+  costs the candidate an unaided answer to a question this tool exists to help
+  with.
+
+**Reason.** Heuristic-only was rejected: a fixed lexicon cannot cover a
+paraphrased question ("so what would you say is, like, your biggest gap"), and
+suppressing anything the lexicon does not clearly recognize as actionable would
+drop real questions, the worse of the two failure directions. LLM-only was
+rejected on latency grounds: it puts a network round trip in front of every
+turn, including the common, unambiguous case that already worked, which fights
+the streaming-latency budget `NFR-001` protects. Hybrid keeps the fast path fast
+and spends the round trip only where the fast path cannot decide.
+
+**Consequence.** `FR-111` and `NFR-018` are new. `TASK-060` implements it. The
+lexicon is a starting point (`ASM-015`), not a closed list; growing it does not
+change the architecture.
+
+### ADR-046 — Confidence gating rides the existing capability-flag pattern, wired for one provider
+
+**Context.** No `TranscriptEvent` carries a confidence score (`FR-048`), so a
+badly transcribed question is indistinguishable from a clean one by the time it
+reaches the trigger. The project already solves an analogous problem —
+providers vary in what they can do — with a capability flag read off the
+model's registry entry rather than a check on provider id
+(`supportsEndpointing`, `FR-037`, `TC-056`, `TC-151`). More STT providers are
+expected after this milestone, so whatever gates on confidence must not need
+editing every time one is added.
+
+**Decision.** `SttModelDescriptor` gains `supportsConfidence: boolean`, read
+the same way `supportsEndpointing` is. `TranscriptEvent` gains an optional
+`confidence?: number`. Only `deepgram` is wired to populate it in this
+milestone: its wire protocol already carries
+`channel.alternatives[0].confidence` and the adapter simply was not reading it.
+`openai-realtime`, `elevenlabs` and `whisper-1` keep `supportsConfidence: false`
+and emit no `confidence`, exactly as if the field did not exist for them, until
+a follow-up milestone wires each in turn.
+
+**Reason.** Blocking this fix on parity across all four current adapters
+(rejected) would hold a real defect hostage to the slowest provider to expose
+the data, and a fifth provider arriving next quarter would still need its own
+wiring regardless of which choice is made here. A capability flag makes "not
+yet wired" and "will never be wired" the same code path with a different data
+value, so a new provider that never exposes confidence is not a special case,
+it is the default.
+
+**Consequence.** `FR-112` (registry and event shape) and `FR-113` (the gate
+itself) are new. `TASK-061` implements it. `ASM-016` records the threshold as a
+starting value pending calibration.
+
+### ADR-047 — The overlay shows one card, not a stack, and the code for a stack is removed
+
+**Context.** `FR-091`/`ASM-010` specified a 3-card stack with depth-based
+dimming (`TASK-043`). The UX review argues that distinguishing "which of these
+three is current" is exactly the kind of judgment call a candidate mid-interview
+has no attention to spare for, and recommends a single card that is replaced
+rather than appended to. The alternative considered was keeping `MAX_CARDS` as a
+setting defaulting to 1, preserving the multi-card path for a possible future
+panel-interview mode.
+
+**Decision.** `MAX_CARDS` is removed as a concept; the overlay shows at most one
+suggestion card. `depthOpacity`, the eviction-fade transition, and the
+multi-card layer of `SuggestionCardView` are deleted rather than kept behind a
+cap of 1, because a depth function that can only ever be called with
+`depth = 0` and an eviction animation that can only ever fire for a card
+nothing else is stacked on are code with no reachable second branch — the
+standard this project already holds itself to (`ADR-044`: "a criterion whose
+code cannot be reached from a test is not a criterion").
+
+**Reason.** A configurable cap defaulting to 1 was rejected because it keeps
+exactly the code this decision means to remove, on the promise of a future need
+that is not yet a requirement. Restoring multi-card support later, if testing
+of a panel-interview mode shows a real need for it, is a new decision with its
+own requirement, not a flag flip on dead code kept warm on spec.
+
+**Consequence.** `FR-091` is amended in place (`01-requirements.md` section 10).
+`TC-111` is redefined in place for the single-card behavior, the same way
+`TC-041` was once redefined rather than retired and replaced. `ASM-010` is
+corrected in the same change (DoD 9). `TASK-063` implements it.
+
+### ADR-048 — Staleness is measured from when the turn fired, not from a count of turns
+
+**Context.** Nothing today stops a slow generation from surfacing an answer to
+a question the interviewer has since moved past without asking anything else
+that would count as a new turn under `FR-111` — small talk, a comment, or plain
+silence do not restart the trigger, so the old answer would otherwise still
+land. The alternative considered was counting subsequent interviewer turns
+rather than measuring elapsed time.
+
+**Decision.** `TurnFired` gains `firedAt: number` (epoch ms, set when the turn
+fires). Immediately before a generation would become visible — the point at
+which `CMP-15` would otherwise call `onSuggestion` for `suggestion:begin` —
+`CMP-15` checks `Date.now() - turn.firedAt` against a fixed threshold. Over it,
+the generation is not sent to the overlay at all: no `suggestion:begin`, no
+lines, no `suggestion:end`. It is recorded in the transcript with a new status,
+`'stale'`, distinct from `'cancelled'` (a new turn interrupted it), so the two
+are not confused when a session is reviewed later.
+
+**Reason.** A turn-count signal was rejected because it does nothing when the
+interviewer says nothing else — the exact silence-after-the-real-question case
+this decision exists for — and because it would need the trigger to expose a
+running count to a component (`CMP-15`) that today only consumes `TurnFired`
+once per turn, a larger seam than one timestamp comparison. A time signal is
+one field and one comparison, and it degrades the same way whether the
+interviewer stays silent or moves on to something else.
+
+Checking only once, right before `suggestion:begin`, rather than also aborting
+a stale-but-still-generating request early, is deliberate for this milestone:
+the cost of letting an already-started generation finish is one wasted LLM
+call, and adding an early-abort path is `TASK-062`'s stretch scope, not its
+floor.
+
+**Consequence.** `FR-114` is new. `GenerationStatus` and `TranscriptEntry`'s
+`'suggestion'` variant gain `'stale'`; `CardStatus` does **not**, because a
+stale generation never reaches the renderer. `CH-209`'s payload enum gains
+`'stale'`. `ASM-017` records the threshold. `TASK-062` implements it.
+
+### ADR-049 — The minimum-hold floor is renderer-side, in front of the reducer, not a delay in the main process
+
+**Context.** Cutting to one card (`ADR-047`) means a fast reply can replace what
+the candidate is reading before they have had a chance to read it. The UX
+review recommends a floor: a card must have been visible for a minimum
+duration before a new one can replace it. Two places could hold a ready
+`suggestion:begin` back: `CMP-15` in the main process before it pushes the
+channel, or the overlay renderer before it dispatches the pushed event into the
+card reducer.
+
+**Decision.** The hold lives in the renderer, in front of `reduceCards`, not in
+`CMP-15`. A small buffer keyed by `generationId` receives every
+`suggestion:begin`/`suggestion:line`/`suggestion:end` as it arrives over IPC; if
+a card is currently shown and it became visible less than `MIN_HOLD_MS` ago,
+the buffer holds the incoming events and replays them once the hold elapses, in
+arrival order. If a `suggestion:end` with `status: 'cancelled'` arrives for a
+`generationId` still sitting in the buffer, the buffer discards everything
+queued for it instead of replaying a card that was itself superseded.
+
+**Reason.** A main-process delay was rejected because "became visible" is a
+renderer fact — the main process does not know when a push actually painted,
+only when it sent it — and because `CMP-15` already has one buffering
+responsibility at this boundary (`OverlayGate`, `ADR-016`) built around a
+different invariant (has the renderer mounted at all, not has enough time
+passed since the last paint). Reusing that gate for a second, unrelated purpose
+would make one component responsible for two questions that fail independently.
+`reduceCards` itself is untouched and every existing test of it still describes
+real behavior; the hold is a component in front of it, not a change to it.
+
+**Consequence.** `FR-115` is new. `ASM-018` records the default. `TASK-064`
+implements it, depending on `TASK-063`.
 
 ---
 

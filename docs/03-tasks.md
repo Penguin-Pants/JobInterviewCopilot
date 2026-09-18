@@ -1823,3 +1823,130 @@ exists, so nothing in CI can stop `git tag` being typed. `release.yml` refuses t
 build or publish anything for a tag whose record is missing or failing, and
 `ci.yml` checks any record in the tree on every pull request, which is where a
 bad record is actually caught. A tag with no release behind it is inert.
+
+---
+
+## Milestone 6 — Overlay relevance and pacing (from UX review)
+
+**Status: NOT STARTED.** Follows a UX review of the live overlay against the
+core interview scenario, scoped into `FR-111` through `FR-115`, `NFR-018` and
+`ADR-045` through `ADR-049`. Every task below extends an existing, complete
+component (`TASK-030`, `TASK-032`, `TASK-012`, `TASK-043`) rather than
+replacing it, and none adds a runtime dependency (`02-architecture.md`
+section 8).
+
+### TASK-060 Actionability filter
+**Traces** FR-111, NFR-018, ASM-015
+**Depends on** TASK-030, TASK-032
+**Acceptance criteria**
+- A turn that passes `FR-051`'s guard is classified before `evaluateTurn` fires
+  a generation. A `?` anywhere in the turn text, or a case-insensitive match at
+  the start of the trimmed text against `ACTIONABLE_LEADS`, resolves
+  `'actionable'` with no network call. An exact case-insensitive match against
+  `NON_ACTIONABLE_PHRASES` resolves `'non-actionable'` with no network call.
+- A turn neither list resolves is classified by exactly one call to the
+  configured LLM primary (`LlmProvider`, `02-architecture.md` 3.2), capped
+  output tokens, temperature 0, carrying the turn's own `AbortSignal`.
+- A classifier failure of any kind — timeout, provider error, a response that
+  is not cleanly `'actionable'` or `'non-actionable'` — resolves to
+  `'actionable'`.
+- A turn classified `'non-actionable'` returns to `LISTENING` with no card, no
+  generation and no transcript entry: the same path a `FR-051` guard failure
+  already takes, not a new one.
+- The classifier (`ACTIONABLE_LEADS`, `NON_ACTIONABLE_PHRASES`,
+  `classifyHeuristically`, `classifyWithLlm`) is a pure module with no Electron
+  import, matching the trigger's own module boundary (`TASK-030`).
+- The LLM-confirm path adds no more than 400 ms at p95 to the existing latency
+  harness (`NFR-018`), measured with scripted fakes at fixed delays, the same
+  method `TC-133` already uses.
+**Verified by** TC-167, TC-168, TC-169
+
+### TASK-061 STT confidence capability and gate
+**Traces** FR-112, FR-113, ASM-016
+**Depends on** TASK-012, TASK-030
+**Acceptance criteria**
+- `SttModelDescriptor` carries `supportsConfidence`. Every v1 registry entry
+  states it explicitly — `true` for `deepgram`'s models, `false` for
+  `openai-realtime`, `elevenlabs` and `whisper-1` — rather than leaving it to a
+  default, the same discipline `TC-056` already holds `supportsEndpointing` to.
+- `TranscriptEvent` carries an optional `confidence`, populated only when the
+  emitting adapter's active model has `supportsConfidence: true`.
+- The `deepgram` adapter reads `channel.alternatives[0].confidence` off the
+  frame it already parses and sets it on every emitted `TranscriptEvent`. The
+  other three adapters emit no `confidence` field; this task does not touch
+  their request shape or response parsing.
+- A turn whose completing final segment carries `confidence` below
+  `CONFIDENCE_THRESHOLD` (0.55) does not fire, when the active model's
+  `supportsConfidence` is `true`. The gate is not evaluated at all — not
+  evaluated and passing, evaluated and passing — when `supportsConfidence` is
+  `false`.
+- A fake STT provider drives both directions: `supportsConfidence: true` with a
+  scripted low-confidence final proves the gate suppresses the turn;
+  `supportsConfidence: false` with the same scripted value proves the gate does
+  not apply, following the registry-driven pattern `TC-151` established.
+**Verified by** TC-170, TC-171
+
+### TASK-062 Stale-suggestion discard
+**Traces** FR-114
+**Depends on** TASK-030, TASK-032, TASK-044
+**Acceptance criteria**
+- `TurnFired` carries `firedAt`, an epoch millisecond set once when the turn
+  fires and never revised.
+- Immediately before `CMP-15` would call `onSuggestion` for `suggestion:begin`,
+  it checks `Date.now() - firedAt` against `STALE_DISCARD_MS` (20000). Over the
+  threshold, no `onSuggestion` call is made for `begin`, `line` or `end` — the
+  overlay receives nothing for that generation.
+- A discarded generation still runs to completion and its usage still reaches
+  the Cost Meter (`FR-103`); only the overlay push is suppressed, not the
+  underlying LLM call.
+- The transcript entry for a discarded generation is appended with
+  `status: 'stale'`, distinct from `'cancelled'`.
+- `GenerationStatus` and `CH-209`'s payload schema both carry `'stale'`.
+  `CardStatus` in `cards.ts` is unchanged — a stale generation never reaches
+  the renderer, so it has no reachable use there.
+- A test drives a scripted delay past the threshold and asserts zero
+  `suggestion:begin`/`line`/`end` pushes plus one `'stale'` transcript entry; a
+  delay under the threshold asserts the existing behavior is unaffected.
+**Verified by** TC-172, TC-173
+
+### TASK-063 Single-card overlay
+**Traces** FR-091 (amended), ASM-010
+**Depends on** TASK-043
+**Acceptance criteria**
+- `MAX_CARDS` is deleted as an exported, tunable constant. `reduceCards`'s
+  `'begin'` case holds at most one card; nothing in the module can be
+  configured back to a stack.
+- `depthOpacity`, the eviction-fade transition, and every prop or code path in
+  `SuggestionCardView` that exists only to support more than one simultaneous
+  card are removed, not kept behind a cap of 1 (`ADR-047`).
+- A new `suggestion:begin` replaces the currently shown card outright. There is
+  no fade-out-the-oldest transition, because there is no second card to fade.
+- Every existing test asserting the 3-card cap, depth-dimming values, or
+  eviction-fade timing is removed or rewritten for the 1-card behavior.
+  `TC-111` is redefined in place for the single-card behavior, not retired.
+- `TC-006`'s clip-from-the-top layout logic (`FR-081`'s amendment) is
+  re-verified against a single card; the default overlay height, sized in
+  `TASK-005`/`TASK-052` to fit three cards of five lines, is re-measured
+  against one card's worst case and reduced if the existing default now leaves
+  most of the window empty. The exact value is confirmed by `TC-006`, not
+  fixed by this document.
+**Verified by** TC-111
+
+### TASK-064 Card hold buffer
+**Traces** FR-115, ASM-018
+**Depends on** TASK-063
+**Acceptance criteria**
+- A `HoldBuffer` sits between the overlay's IPC subscriptions and dispatch into
+  `reduceCards`. `reduceCards` itself, and every existing test describing it,
+  is unchanged.
+- With no card shown, or the shown card visible at least `minHoldMs` (1500), an
+  incoming `CardEvent` dispatches immediately.
+- With a card shown less than `minHoldMs`, incoming events for a new
+  `generationId` queue and replay, in arrival order, once the hold elapses.
+  Tests drive this with injected timers, not real waits.
+- A `suggestion:end` with `status: 'cancelled'` for a `generationId` still
+  queued discards that generation's queued entries; nothing from it ever
+  dispatches.
+- The first card shown after an idle period (no card currently shown) is not
+  subject to the hold.
+**Verified by** TC-174, TC-175

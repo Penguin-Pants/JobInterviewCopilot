@@ -174,10 +174,27 @@ interface SttModelDescriptor {
   streaming: boolean;             // false => held to NFR-017, not NFR-001
   supportsInterim: boolean;
   supportsEndpointing: boolean;
+  supportsConfidence: boolean;    // FR-112, ADR-046. Read the same way as supportsEndpointing:
+                                   // off this entry, never off the provider id.
   audio: { encoding: 'linear16'; sampleRate: 16000; channels: 1 };
   pricePerAudioMinuteUsd: number;
   badge?: string;                 // shown in the Dashboard, e.g. the Whisper penalty text
 }
+```
+
+**`supportsConfidence` (`FR-112`, `ADR-046`).** Only `deepgram`'s entries set
+this `true` in this milestone: its wire protocol already carries
+`channel.alternatives[0].confidence`, so wiring it costs a parsing change, not a
+new request shape. `openai-realtime`, `elevenlabs` and `whisper-1` are `false` —
+not because their audio is worse, but because exposing a comparable number costs
+a request-shape change (OpenAI, ElevenLabs) or both a request-shape change and a
+response-format change (`whisper-1`, whose `response_format: 'text'` carries no
+structured data at all). A provider added after this milestone ships
+`supportsConfidence: false` until its own adapter is wired; nothing else in the
+trigger, the overlay or the session manager needs to change when that happens
+(`TC-151`'s guarantee extends to this flag).
+
+```ts
 
 interface LlmModelDescriptor {
   id: string;
@@ -340,8 +357,12 @@ type TranscriptEntry = { seq: number } & (
   | { kind: 'turn'; source: 'interviewer' | 'candidate'; text: string; at: string }
   | { kind: 'suggestion'; forQuestion: string; bullets: string[];
       model: string; providerId: string; at: string;
-      status: 'complete' | 'cancelled' | 'nonconforming' }
+      status: 'complete' | 'cancelled' | 'nonconforming' | 'stale' }
 );
+// 'stale' is new (FR-114, ADR-048): a generation discarded for arriving too
+// long after its turn fired, never sent to the overlay. It is distinct from
+// 'cancelled' (a new turn interrupted it) so the two are not confused when a
+// session is reviewed later.
 // `seq` is monotonic and assigned by CMP-08 at append time. Order is seq order,
 // not file order. A cancelled generation is appended, carrying the bullets
 // already flushed, before the replacing generation's entry. (ADR-018, FR-106)
@@ -414,6 +435,9 @@ interface TranscriptEvent {
   isFinal: boolean;
   timestamp: number;        // epoch ms, chunk arrival time
   providerId: string;         // registry key, e.g. 'deepgram'
+  confidence?: number;      // 0 to 1. Present only when supportsConfidence is
+                             // true for the active model (FR-112, ADR-046).
+                             // Absent, not fabricated, for every other model.
 }
 
 interface AudioChunk {
@@ -688,6 +712,102 @@ CONFIG_REQUIRED  -- non-retryable failure (auth, client). Terminal for that
                     runs live validation (FR-026). Overlay unchanged.
 ```
 
+### 3.6 Actionability classifier (`CMP-05`, `FR-111`, `ADR-045`)
+
+```ts
+/** Fixed seed lexicon (ASM-015). Growing it is a data change, not an
+ *  architecture change. */
+const ACTIONABLE_LEADS: readonly string[];
+// 'who', 'what', 'when', 'where', 'why', 'how', 'tell me', 'describe',
+// 'walk me through', 'can you', 'could you', 'would you', 'give an example'
+
+const NON_ACTIONABLE_PHRASES: readonly string[];
+// 'thanks for joining', 'nice to meet you', 'how are you', 'welcome',
+// 'okay', 'great', 'got it', 'sounds good', 'perfect', 'sure', 'no problem'
+
+type ActionabilityVerdict = 'actionable' | 'non-actionable';
+
+/** A '?' anywhere in the text, or a case-insensitive match at the start of
+ *  the trimmed text against either list, resolves. Neither match: null. */
+function classifyHeuristically(text: string): ActionabilityVerdict | null;
+
+/** The LLM-confirm path: one call to the configured LLM primary, capped
+ *  output tokens, temperature 0. Resolves to 'actionable' on any error,
+ *  timeout or abort (ADR-045). */
+function classifyWithLlm(
+  text: string, llm: LlmProvider, signal: AbortSignal,
+): Promise<ActionabilityVerdict>;
+```
+
+Called from `CMP-05` between the `FR-051` guard and firing, so a turn the
+guard already rejects never reaches the classifier. A heuristic verdict
+decides immediately, with no network call. `null` calls `classifyWithLlm` and
+awaits it before firing or returning to `LISTENING`. A non-actionable turn
+constructs no `AbortController`, no `generationId`, and produces no
+`TurnFired` — the trigger's existing `AWAITING_TURN_END` to `LISTENING` path
+(`TASK-030`) is reused unchanged, not duplicated.
+
+**Confidence gate (`FR-113`, `CMP-05`, `ADR-046`).** The same guard point, one
+comparison: when `FR-112`'s `supportsConfidence` is `true` for the active
+model, a turn whose completing final segment carries `confidence` under
+`CONFIDENCE_THRESHOLD` (0.55, `ASM-016`) is treated exactly as a guard
+failure. When `supportsConfidence` is `false`, the comparison is skipped
+entirely — there is no default confidence to compare, and treating a missing
+value as low confidence would silently gate every model that cannot report
+one.
+
+### 3.7 Staleness check (`FR-114`, `CMP-15`, `ADR-048`)
+
+```ts
+interface TurnFired {
+  generationId: string;
+  question: string;
+  candidateContext: string;
+  signal: AbortSignal;
+  firedAt: number;          // epoch ms. New (FR-114).
+}
+
+type GenerationStatus = 'complete' | 'cancelled' | 'nonconforming' | 'stale';
+// 'stale' is new. See 2.5 for the matching TranscriptEntry change.
+```
+
+`CMP-15` compares `Date.now() - turn.firedAt` against `STALE_DISCARD_MS`
+(20000, `ASM-017`) exactly once, immediately before the first `onSuggestion`
+call it would make for that generation (`suggestion:begin`). Over the
+threshold: no `onSuggestion` call is made for any of `begin`, `line` or `end`;
+the generation still runs to completion, because the cost of one wasted LLM
+call is cheaper than an early-abort path this milestone does not build
+(`ADR-048`); the transcript entry is appended with `status: 'stale'`.
+`CardStatus` in `cards.ts` (2.6, `CMP-14`) does **not** gain `'stale'`: a stale
+generation never reaches the renderer, so the renderer's status union has no
+reachable use for the value.
+
+### 3.8 Card hold buffer (`FR-115`, `CMP-14`, `ADR-049`)
+
+```ts
+interface HoldBufferOptions {
+  minHoldMs: number;          // 1500, ASM-018
+  now?: () => number;         // injected for fake-timer tests
+}
+
+/** Sits in front of reduceCards (2.6). Not a change to reduceCards or to the
+ *  tests that already describe it. */
+interface HoldBuffer {
+  onEvent(event: CardEvent): void;   // dispatches immediately, or queues
+  dispose(): void;
+}
+```
+
+Every `CardEvent` the overlay receives over IPC passes through the buffer
+before it reaches `useReducer(reduceCards, ...)`. With no card shown, or the
+shown card visible at least `minHoldMs`, an event dispatches immediately.
+Otherwise it queues, keyed by `generationId`, replayed in arrival order once
+the hold elapses. A `suggestion:end` with `status: 'cancelled'` for a
+`generationId` still queued discards that generation's queued entries instead
+of flushing them once the hold elapses — a card superseded before it was ever
+shown must not be shown after the fact. The first card shown after an idle
+period bypasses the hold (there is nothing to protect the reading time of).
+
 ---
 
 ## 4. IPC contract
@@ -776,7 +896,7 @@ in Milestone 0 and are recorded here for the first time. The rest are new:
 | CH-206 | `transcript:live` | dashboard | `TranscriptEvent` |
 | CH-207 | `suggestion:begin` | overlay | `{ generationId, cardId, question }` |
 | CH-208 | `suggestion:line` | overlay | `SuggestionLine` |
-| CH-209 | `suggestion:end` | overlay | `{ generationId, status: 'complete' \| 'cancelled' \| 'nonconforming' }` |
+| CH-209 | `suggestion:end` | overlay | `{ generationId, status: 'complete' \| 'cancelled' \| 'nonconforming' \| 'stale' }` |
 | CH-210 | `overlay:consent` | overlay | `{ text }` |
 | CH-211 | `overlay:theme` | overlay | theme subset of `Settings` |
 | CH-212 | `overlay:mode` | overlay | `{ interactive, paused }` |
@@ -861,6 +981,13 @@ directions, so a channel cannot be added in code and left undocumented again.
   hotkey nothing on screen mentions, so the overlay was resizable in principle
   and fixed in place in practice. The grip is always rendered now, and the hit
   test is what keeps the rest of the window click-through around it.
+
+**Changes made in `TASK-062`.** `CH-209`'s `status` enum gains `'stale'`
+(`FR-114`, `ADR-048`): a generation discarded for arriving after its threshold,
+never sent through `CH-207`/`CH-208` at all. Existing consumers that switch on
+`status` and do not name `'stale'` see it only in the transcript record, never
+on the wire to the overlay, since a stale generation's `suggestion:begin` is
+the one that is never sent.
 
 ```ts
 /** CH-124 and CH-214 both carry this (ADR-011, ADR-026, ADR-030). */
@@ -959,14 +1086,30 @@ CMP-05   final received -> start turnEndGapMs timer
          any new interim/final restarts the timer
          Deepgram endpoint event -> fire immediately
 CMP-05   timer elapses -> guard FR-051 (>=3 words, >=12 chars)
+         guard pass -> classify FR-111 (heuristic, else one LLM-confirm call)
+         non-actionable -> return to LISTENING, nothing fires
+         guard pass -> confidence gate FR-113, when supportsConfidence is true
+         below threshold -> return to LISTENING, nothing fires
          if a generation is in flight -> abort it, CH-209 status 'cancelled'
+         fires -> TurnFired.firedAt = Date.now() (FR-114)
 CMP-15   onFire -> CMP-06 query(boundProfileId, questionText, 3)
-CMP-07   build prompt, call provider, CH-207 suggestion:begin
+CMP-07   build prompt, call provider
+CMP-15   staleness check FR-114: Date.now() - firedAt > threshold?
+         over threshold -> no CH-207/208/209 at all, TranscriptEntry 'stale'
+         within threshold -> CH-207 suggestion:begin
 CMP-07   buffer deltas, flush per line -> CH-208 suggestion:line (xN)
 CMP-07   stream ends -> CH-209 suggestion:end 'complete'
+CMP-14   hold buffer FR-115: dispatch now, or queue until minHoldMs elapses
 CMP-08   append the suggestion TranscriptEntry
 CMP-09   add token usage, recompute spend, maybe CH-205 usage:warning
 ```
+
+**The staleness check sits between retrieval and the first push, not before
+retrieval.** Checking `firedAt` before `CMP-06` even runs would save a wasted
+RAG query on a turn already stale, but retrieval is fast (`FR-065`'s 50 ms
+ceiling at the documented scale) next to an LLM round trip, and the simpler
+invariant — one check, immediately before the overlay could show anything —
+is worth more than the query it would occasionally skip.
 
 Three rules `CMP-15` adds to that sequence, each from a case the diagram does
 not show. All three are asserted by `TC-164` and the cases beside it.
@@ -1035,6 +1178,19 @@ context.
 
 Candidate-stream finals only append to the context ring. They never cause a
 state change. This is the mechanical guarantee behind `FR-003` and `FR-055`.
+
+**The guard at `AWAITING_TURN_END --gap elapsed, guard pass-->GENERATING` is now
+three checks, not one, added by `TASK-060`/`TASK-061` and recorded as
+`ADR-045`/`ADR-046`.** No state or transition in the diagram above changes: a
+turn that fails any of the three still returns to `LISTENING` exactly as a
+`FR-051` guard failure always has, and the existing `TASK-030` tests for that
+path describe real behavior for all three, not only the original one.
+
+1. `FR-051`'s word/character guard (unchanged).
+2. `FR-111`'s actionability classification (new): heuristic first, one
+   LLM-confirm call only when the heuristic cannot resolve it.
+3. `FR-113`'s confidence gate (new): only evaluated when the active model's
+   registry entry sets `supportsConfidence: true`.
 
 ---
 
@@ -1217,6 +1373,12 @@ The remaining concentrations of risk:
 `npm ls electron --omit=dev` must return empty. A package that declares
 `electron` as a peer dependency pulls it into the production tree, which breaks
 `electron-builder`. This is asserted in CI, not assumed.
+
+**`TASK-060`'s actionability classifier adds no runtime dependency.** The
+LLM-confirm path (`FR-111`) is a `GenerationRequest`-shaped call through the
+existing `LlmProvider` interface (3.2) against the already-configured LLM
+primary, not a separate model, library or provider. A lexicon is data, not a
+dependency.
 
 ---
 

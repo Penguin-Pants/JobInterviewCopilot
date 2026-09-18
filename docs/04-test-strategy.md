@@ -173,7 +173,7 @@ All trigger tests run on fake timers with the pure state-machine module.
 | ID | Level | Case | Pass condition |
 |---|---|---|---|
 | TC-110 | E | Idle card | The standing-by card shows before the first suggestion and whenever paused |
-| TC-111 | E | Card stack cap | After 4 suggestions, exactly 3 cards remain and the oldest has exited |
+| TC-111 | E | Single card replaces, not stacks | A second `suggestion:begin` replaces the currently shown card outright. At no point are two suggestion cards simultaneously present in the DOM. Replaces the original 3-card-cap assertion, which `FR-091` no longer makes (`ADR-047`) |
 | TC-112 | E | Reveal granularity | DOM mutations equal the bullet count, not the character count. No per-word reveal element exists |
 | TC-113 | E | Font size | Default 22 px. The in-overlay control and the Dashboard control both move it within 16 to 32 px, and the value persists across relaunch |
 | TC-114 | U | Contrast | A computed contrast check over every theme and opacity combination returns at least 4.5 to 1 |
@@ -238,6 +238,20 @@ All trigger tests run on fake timers with the pure state-machine module.
 | TC-165 | I | Packaged app is loadable | The packaged output carries an x64 installer named for the version, and `onnxruntime-node`, `chokidar` and `readdirp` are unpacked as real files rather than left inside `app.asar`. A packaged tree missing any of them fails the check. On Windows the packaged app launches, paints a Dashboard, completes `startKnowledgeBase`, and writes no knowledge-base failure to its log, which is where a failed `chokidar` import surfaces. The native addon's own `dlopen` happens only on embedding and is `MW-15` |
 | TC-166 | I | Release record gates the release | A record that is missing, is for another tag, omits a checklist id, records one twice, carries a result with no evidence, or fails any check other than MW-12 blocks the release. MW-12 failing does not block. MW-06 and MW-11 passing without measured p50 and p95 numbers blocks |
 | TC-150 | I | Non-streaming latency harness | With a non-streaming model active and scripted fakes at fixed delays, the measured path is inside the `NFR-017` budget. Which budget applies is read from the registry entry. Real numbers come from MW-11 |
+
+### 3.13 Overlay relevance and pacing (UX review follow-on)
+
+| ID | Level | Case | Pass condition |
+|---|---|---|---|
+| TC-167 | U | Actionability heuristic | A `?` or a lexicon lead word resolves `'actionable'` with zero calls to the fake LLM. An exact small-talk or acknowledgement match resolves `'non-actionable'` with zero calls. Neither list matching returns `null` |
+| TC-168 | U | Actionability LLM-confirm and failure mode | A turn `classifyHeuristically` cannot resolve calls the fake LLM exactly once. A fake LLM timeout, a provider error, and a malformed response all resolve to `'actionable'` |
+| TC-169 | I | Actionability classifier latency budget | With scripted fakes at fixed delays, the LLM-confirm path adds no more than 400 ms at p95 to the turn-end-to-first-bullet measurement `TC-133` already makes |
+| TC-170 | I | Confidence capability drives the gate | A fake STT provider with `supportsConfidence: true` and a scripted low-confidence final does not fire a generation. The identical scripted value with `supportsConfidence: false` fires normally |
+| TC-171 | U | Deepgram confidence parsing | A frame carrying `channel.alternatives[0].confidence` sets `TranscriptEvent.confidence` to that value. Fixtures for the other three adapters never set it |
+| TC-172 | U | Staleness discard timing | A generation whose `firedAt` is more than `STALE_DISCARD_MS` in the past when it would otherwise begin produces zero `suggestion:begin`, `line` or `end` pushes. One under the threshold is unaffected |
+| TC-173 | I | Staleness transcript status and cost | A discarded generation is appended to the transcript with `status: 'stale'`, and its token usage still reaches the Cost Meter |
+| TC-174 | U | Hold buffer delays replacement | A second `suggestion:begin` arriving less than `minHoldMs` after the first card became visible is queued and dispatched only once the hold elapses, driven by fake timers. One arriving after the hold dispatches immediately |
+| TC-175 | U | Hold buffer drops a cancelled queued generation | A `suggestion:end` with `status: 'cancelled'` for a `generationId` still queued in the hold buffer discards its queued entries. Nothing from that generation ever reaches `reduceCards` |
 
 ---
 
