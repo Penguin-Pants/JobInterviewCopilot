@@ -338,14 +338,22 @@ function Overlay(): JSX.Element {
       // way out, reads as "the pointer is on it". That is the safe answer: it
       // keeps the window clickable, and an extra clickable frame costs far less
       // than a dismiss button that is dead (FR-006).
+      // The controls are hit-tested one by one, never by the row that holds
+      // them. The row is full width, and its `flex-1` spacer is empty in
+      // click-through mode, so its bounding box would make the whole bottom
+      // strip of the overlay take clicks meant for the application behind it,
+      // which is the opposite of what this hit test is for (FR-083).
+      const onAControl = [
+        '[data-testid="overlay-resize-grip"]',
+        '[data-testid="font-size-control"]',
+      ]
+        .map((selector) => document.querySelector(selector)?.getBoundingClientRect())
+        .some((box) => within(box, event.clientX, event.clientY));
+
       const over =
         (reminderUp && card === undefined) ||
         within(card, event.clientX, event.clientY) ||
-        within(
-          document.querySelector('[data-testid="overlay-controls"]')?.getBoundingClientRect(),
-          event.clientX,
-          event.clientY,
-        );
+        onAControl;
       if (over === lastHitTest.current) return;
       lastHitTest.current = over;
       void window.copilot.invoke('overlay:setPointerOverControls', { over });

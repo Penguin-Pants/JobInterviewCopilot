@@ -54,6 +54,10 @@ const ALLOWED_PUSH: readonly PushChannel[] = [
   'notice:captureFidelity',
   'notice:platform',
   'notice:session',
+  // The overlay's interaction mode. The Dashboard shows it as a checkbox and
+  // the global hotkey can change it while the Dashboard has focus, so it needs
+  // telling rather than waiting for a focus change (CH-212, FR-083).
+  'overlay:mode',
 ];
 
 const allowedInvoke = new Set<string>(ALLOWED_INVOKE);

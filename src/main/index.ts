@@ -435,7 +435,13 @@ async function bootstrap(): Promise<void> {
   // the shipped default; a user who chose a solid overlay last time would
   // otherwise get a click-through one on every launch and have to press the
   // hotkey again. Not persisted, because nothing was chosen here.
-  setOverlayInteractive(!settings.overlayWindow.clickThrough);
+  //
+  // Read afresh rather than from the `settings` snapshot above. The Dashboard
+  // and the IPC handlers exist by now and the overlay's renderer load is
+  // awaited, so a toggle during that window would be persisted and applied and
+  // then overwritten here by a value captured before it happened: the checkbox
+  // would show the new mode over a window running the old one.
+  setOverlayInteractive(!config.get().overlayWindow.clickThrough);
 
   registerHotkeys();
 
@@ -823,14 +829,38 @@ async function applyThemeChange(before: Settings, after: Settings): Promise<void
  */
 function setOverlayInteractive(interactive: boolean, { persist = false } = {}): void {
   overlayInteractive = interactive;
-  if (persist) {
+  // Applied before the write, and never conditional on it. `config.set` can
+  // throw on a file that is momentarily unwritable, and persisting first left
+  // `overlayInteractive` already flipped with the window still in the old mode:
+  // the flag and the window then disagreed, so the next press toggled from the
+  // wrong state and looked like it had done nothing. A preference that failed
+  // to save is a small loss; a mode toggle that does not toggle is not.
+  applyOverlayClickThrough();
+  pushOverlayMode();
+  if (!persist) return;
+
+  try {
     const stored = config.get().overlayWindow;
     if (stored.clickThrough === interactive) {
       config.set({ overlayWindow: { ...stored, clickThrough: !interactive } });
     }
+  } catch (err) {
+    getLogger().warn('could not persist the overlay interaction mode', {
+      error: (err as Error).message,
+    });
+    return;
   }
-  applyOverlayClickThrough();
-  pushOverlayMode();
+
+  // The Dashboard reads this from settings, and it reloads them on its own
+  // actions and on focus. The hotkey is neither: pressed while the Dashboard
+  // has focus, it changed the stored value under a checkbox that went on
+  // showing the old one, and the next click then re-applied the mode that was
+  // already active instead of toggling. `CH-212` is what tells it to look
+  // again (FR-083, FR-084).
+  push(dashboardWindow?.webContents, 'overlay:mode', {
+    interactive: overlayInteractive,
+    paused: trigger?.isPaused ?? false,
+  });
 }
 
 /**

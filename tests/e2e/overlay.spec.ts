@@ -811,6 +811,48 @@ test('FR-083 click-through is a persisted setting, not only a hotkey', async () 
   );
 });
 
+test('FR-083 only the controls take clicks, not the strip that holds them', async () => {
+  const ignoring = async (): Promise<boolean | undefined> =>
+    app.evaluate(() =>
+      (globalThis as unknown as { __icpIgnoreCalls?: boolean[] }).__icpIgnoreCalls?.at(-1),
+    );
+
+  await app.evaluate(({ BrowserWindow }) => {
+    const [target] = BrowserWindow.getAllWindows().filter((w) => w.isAlwaysOnTop());
+    if (!target) return;
+    const seen: boolean[] = [];
+    (globalThis as unknown as { __icpIgnoreCalls: boolean[] }).__icpIgnoreCalls = seen;
+    const original = target.setIgnoreMouseEvents.bind(target);
+    target.setIgnoreMouseEvents = ((ignore: boolean, options?: unknown) => {
+      seen.push(ignore);
+      return original(ignore, options as never);
+    }) as typeof target.setIgnoreMouseEvents;
+  });
+
+  // Click-through, with the reminder gone, so the grip is the only thing on
+  // screen with a claim on the pointer.
+  await pushToOverlay(app, 'overlay:mode', { interactive: false, paused: false });
+  await overlay.click('[data-testid="consent-dismiss"]').catch(() => undefined);
+
+  const grip = await overlay.locator('[data-testid="overlay-resize-grip"]').boundingBox();
+  expect(grip, 'the grip has no box to test against').not.toBeNull();
+
+  // The control row is full width and its spacer is empty in this mode. Hit
+  // testing the row rather than the controls inside it would make this whole
+  // bottom strip take clicks meant for the application behind the overlay,
+  // which is the opposite of what the hit test is for.
+  await overlay.mouse.move(8, grip!.y + grip!.height / 2);
+  await expect.poll(ignoring).toBe(true);
+
+  // The grip itself does take them, or it could not be dragged.
+  await overlay.mouse.move(grip!.x + grip!.width / 2, grip!.y + grip!.height / 2);
+  await expect.poll(ignoring).toBe(false);
+
+  // And releasing it hands click-through straight back.
+  await overlay.mouse.move(8, grip!.y + grip!.height / 2);
+  await expect.poll(ignoring).toBe(true);
+});
+
 test('FR-081 text that does not fit is scrollable rather than clipped', async () => {
   // Five long bullets on three cards at the largest text size, in the smallest
   // window the user can make. Something has to overflow, and what overflows has
