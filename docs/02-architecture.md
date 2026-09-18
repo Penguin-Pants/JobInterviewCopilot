@@ -47,7 +47,7 @@ Electron gives three process kinds. This app uses four window contexts.
 | CMP-03a | Audio Supervisor | Audio Worker lifecycle, stream health, chunk fan-out | Touch WebAudio APIs directly (ADR-005) |
 | CMP-03b | Audio Worker | Two `MediaStream`s, two `AudioContext`s at 16 kHz, PCM framing | Persist anything, render UI |
 | CMP-04 | STT Layer | Provider adapters, per-stream sessions, normalized events | Decide when a turn ends |
-| CMP-05 | Trigger | Turn-end state machine, candidate context ring, pause state | Call an LLM provider directly |
+| CMP-05 | Trigger | Turn-end state machine, candidate context ring, pause state, confidence gate, `CLASSIFYING` state (delegates the actual call to an injected `classify` callback) | Call an LLM provider directly |
 | CMP-06 | RAG Engine | Ingest, convert, chunk, embed, cache, watch, query, startup reconciliation | Know about sessions. Only `rag.ts` is importable from outside, enforced by a lint rule against deep imports |
 | CMP-07 | LLM Layer | Provider adapters, prompt assembly, line buffering, cancellation | Write to the transcript |
 | CMP-08 | Session Manager | Session lifecycle, sole writer of the session file, `seq` assignment, consent gate, profile binding | Own provider retry logic |
@@ -57,7 +57,7 @@ Electron gives three process kinds. This app uses four window contexts.
 | CMP-12 | Provider Health | Failover state keyed by **credential**, backoff, background re-probe | Be keyed by capability (ADR-017) |
 | CMP-15 | Live Session Loop | Joining capture, transcription, the trigger, retrieval, generation, the overlay gate, the transcript writer and the Cost Meter for the length of one session | Own a policy of its own, write a file, create a window, or import Electron (TASK-044, ADR-035) |
 | CMP-13 | Dashboard renderer | All configuration and history UI | Hold authoritative state |
-| CMP-14 | Overlay renderer | Idle card, suggestion stack, consent reminder, font control | Fetch from any network |
+| CMP-14 | Overlay renderer | Idle card, single suggestion card, the hold buffer, consent reminder, font control | Fetch from any network |
 
 **State ownership rule.** The main process is the single source of truth.
 Renderers hold only derived view state and re-render from pushed events. A
@@ -830,11 +830,16 @@ const ACTIONABLE_LEADS: readonly string[];
 // 'walk me through', 'can you', 'could you', 'would you', 'give an example'
 
 /** Checked in this order — the exact-match rule FIRST:
- *  1. A case-insensitive match of the WHOLE trimmed text against
+ *  1. Trim the text, then strip any run of trailing '?', '.', '!', ','
+ *     characters from the end of the trimmed text. A case-insensitive match
+ *     of that punctuation-stripped, whole-trimmed text against
  *     NON_ACTIONABLE_PHRASES — exact, not prefix — resolves
- *     'non-actionable'.
- *  2. A '?' anywhere in the text, or a case-insensitive match at the START
- *     of the trimmed text against ACTIONABLE_LEADS, resolves 'actionable'.
+ *     'non-actionable'. The strip happens ONLY for this comparison — the
+ *     original text (with its punctuation) is what step 2 and
+ *     classifyWithLlm still see.
+ *  2. A '?' anywhere in the (unstripped) text, or a case-insensitive match
+ *     at the START of the trimmed text against ACTIONABLE_LEADS, resolves
+ *     'actionable'.
  *  3. Neither: null.
  *  Order matters, found during a second round of spec review: the seed
  *  NON_ACTIONABLE_PHRASES entry "how are you" also starts with "how", an
@@ -843,7 +848,14 @@ const ACTIONABLE_LEADS: readonly string[];
  *  never exactly equal to a five-word acknowledgement), while an
  *  acknowledgement that happens to share a lead word never reaches the
  *  prefix check at all. The reverse order was tried first and misclassified
- *  "how are you" as actionable. */
+ *  "how are you" as actionable.
+ *  The punctuation strip in step 1 was added during a fourth round of spec
+ *  review: without it, "How are you?" fails the exact match (the lexicon
+ *  entry has no '?'), falls through to step 2, and its own trailing '?'
+ *  misclassifies it 'actionable' — a canonical greeting fired a suggestion.
+ *  Stripping only for the step-1 comparison, and only trailing runs (never
+ *  interior punctuation), keeps "what's the risk, really?" fully intact for
+ *  step 2. */
 function classifyHeuristically(text: string): ActionabilityVerdict | null;
 ```
 
@@ -855,6 +867,36 @@ timeout, or a settled value that is not cleanly one verdict resolves to
 `'actionable'` (`ADR-045`). A non-actionable turn produces no `TurnFired` — the
 trigger's existing `AWAITING_TURN_END → LISTENING` path (`TASK-030`) is reused,
 not duplicated.
+
+**An aborted classification's eventual settlement is a stale settle report,
+not a classifier failure (`ADR-045`).** `signal` firing (a newer turn's
+guard-pass superseded this one, 3.6's own abort-at-guard-pass rule above)
+does not itself mean `classify`'s promise settles synchronously — an
+in-flight LLM call notices the abort on its own schedule. When it does
+resolve or reject after the fact, the trigger checks it against its current
+in-flight marker (the same marker `noteGenerationSettled`, `TASK-030`,
+already keys generation settlements against) before acting: if the marker no
+longer names this classification, the settlement is discarded outright,
+exactly as a stale generation settlement already is. It is never treated as
+an `'actionable'` fallback, and never turned into a `TurnFired` for a turn
+the trigger has already moved past. Only a classification that is still the
+current in-flight operation when it settles can produce a verdict or fall
+back to `'actionable'`.
+
+**The `classify` call is a single best-effort attempt, not routed through
+`CMP-12`'s retry/failover machinery (`ADR-045`).** `live.ts`'s implementation
+of `classify` reads the LLM primary credential's current health state
+(`CMP-12`, `ADR-017`, `ADR-024`) before calling — a read, not a `runFor`
+attempt. `CONFIG_REQUIRED`, or `DEGRADED` with its backoff not yet due, skips
+the call entirely and fails open to `'actionable'` immediately, with no
+network attempt and no effect on the health state either way. Otherwise
+exactly one attempt is made against `llm.generate`, under an 800ms
+client-side timeout (`ASM-020`) local to the classification call, distinct
+from and shorter than any retry-driven timeout `runFor` applies to a real
+generation. A timeout or any other failure resolves to `'actionable'`
+(`ADR-045`, same fallback as above) and is never itself reported to `CMP-12`
+as a probe outcome — classification calls observe health state, they never
+drive it.
 
 **The `CLASSIFYING` state carries the wait, and `firedAt`/the abort both
 happen before it, not inside it (5.3).** The moment `FR-051`'s guard passes —
@@ -1025,17 +1067,25 @@ interface HoldBufferOptions {
  *  tests that already describe it. */
 interface HoldBuffer {
   onEvent(event: CardEvent): void;   // dispatches immediately, or queues
+  onPause(): void;                   // CH-212's pause transition; not a CardEvent
   dispose(): void;
 }
 ```
+
+`onPause` exists because `CH-212`'s pause transition does not arrive as a
+`CardEvent` at all — `reduceCards` and the buffer both react to it through a
+separate call, not a fourth member of the `CardEvent` union — yet the buffer
+must still observe it to implement the clear-and-discard rule below. The
+overlay renderer calls `onPause()` wherever it currently handles `CH-212`,
+alongside (not instead of) whatever `reduceCards` already does for a pause.
 
 Every `CardEvent` the overlay receives over IPC passes through the buffer
 before it reaches `useReducer(reduceCards, ...)`, with three exceptions to the
 general dispatch-or-queue rule below: a `'reset'` event (a session boundary)
 always bypasses the buffer and dispatches immediately, clearing anything
 queued — a session boundary is never held, the same way `reduceCards` itself
-treats it as unconditional (2.6a); and `CH-212`'s pause transition, which does
-not arrive as a `CardEvent` at all but which the buffer also observes, both
+treats it as unconditional (2.6a); and `CH-212`'s pause transition, delivered
+to the buffer through `onPause()` above rather than as a `CardEvent`, both
 clears the buffer's notion of "a card is currently shown" **and** discards
 every event currently queued, regardless of that generation's eventual
 status — a generation that finished streaming while queued, waiting out the
@@ -1068,6 +1118,15 @@ restatement:
   discards that generation's queued entries instead of flushing them once the
   hold elapses — a card superseded before it was ever shown must not be shown
   after the fact.
+- **The buffer holds at most one not-yet-shown candidate at a time.** If a
+  `'begin'` for a third `generationId` arrives while a different one is
+  already queued (waiting out the hold), the newly queued one **replaces**
+  the previously queued one outright — its entries are discarded, not
+  appended behind the new arrival. This is the same one-held-slot rule
+  `OverlayGate` (`ADR-016`) already applies to a comparable race ("one held
+  generation, second `begin` discards first"); the hold buffer reuses it
+  rather than inventing a multi-item pending queue, so there is never more
+  than one shown card and one queued candidate to reason about at once.
 
 The first card shown with no card currently on screen — a session's first
 suggestion, or the first one after a pause — bypasses the hold (there is
@@ -1349,8 +1408,12 @@ CMP-03a  fan-out to the interviewer SttSession
 CMP-04   CH-206 transcript:live (interim, then final)
 CMP-05   final received -> start turnEndGapMs timer
          any new interim/final restarts the timer
-         Deepgram endpoint event -> fire immediately
-CMP-05   timer elapses -> guard FR-051 (>=3 words, >=12 chars)
+         Deepgram endpoint event -> fire immediately, same guard chain below
+           (a native endpoint only removes the wait for turnEndGapMs to
+           elapse; it is the same "new turn end" trigger as a gap-elapse,
+           entering the guard/firedAt/abort/confidence/classify sequence
+           below identically, never a separate or older path, 5.3)
+CMP-05   timer elapses, or a native endpoint fires -> guard FR-051 (>=3 words, >=12 chars)
          guard fail -> return to LISTENING, nothing stamped, nothing aborted
            (too short to be "a new turn end", FR-054 does not apply, TC-086)
          guard pass -> firedAt = Date.now() (FR-114)
@@ -1411,8 +1474,12 @@ LISTENING       --interviewer final-->        AWAITING_TURN_END
 AWAITING_TURN_END --new interim/final-->      AWAITING_TURN_END (timer reset)
 
 -- A "new turn end" is the SAME transition regardless of which state it fires
-   from (AWAITING_TURN_END, CLASSIFYING or GENERATING): the gap elapses and
-   FR-051's guard passes. It always does these three things, in order, before
+   from (AWAITING_TURN_END, CLASSIFYING or GENERATING) AND regardless of what
+   fires it: a local turnEndGapMs timer elapsing and a provider's native
+   endpoint signal (5.2) are both just ways of reaching "the gap has ended"
+   -- the endpoint only removes the wait for the timer, it does not skip or
+   shortcut any of the three steps below. Either way FR-051's guard is
+   checked next. It always does these three things, in order, before
    anything about the new turn's own actionability is known:
 
 any of {AWAITING_TURN_END, CLASSIFYING, GENERATING}
@@ -1481,7 +1548,11 @@ change what the machine does, not only how it is written.
   `AWAITING_TURN_END`, so the second question of a pair does not wait out a
   local gap the provider has already observed. An endpoint arriving *before* the
   text it ends, which is the order OpenAI's server VAD uses, is held for the
-  next final rather than discarded.
+  next final rather than discarded. Once honored, it is the identical "new
+  turn end" trigger described above — same guard, same `firedAt` stamp, same
+  abort, same confidence gate, same classifier — never a shortcut around any
+  of them; the only thing a native endpoint changes is not having to wait out
+  `turnEndGapMs` first.
 - **The gap a batch model is measured against is the user's gap plus the
   model's `batchIntervalMs`.** A batch model has no interims and no endpoint: it
   answers once per window, and between two answers nothing arrives. The absence

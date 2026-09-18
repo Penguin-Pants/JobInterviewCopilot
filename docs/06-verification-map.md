@@ -58,11 +58,11 @@ is broken. A test that merely runs nearby code does not count.
 | FR-047 | TC-050, TC-051, TC-052, TC-152, TC-153, TC-164 |
 | FR-048 | TC-050 |
 | FR-049 | TC-055, TC-056, TC-057 |
-| FR-050 | TC-033, TC-053, TC-080, TC-081, TC-082, TC-159 |
+| FR-050 | TC-033, TC-053, TC-080, TC-081, TC-082, TC-159, TC-187 |
 | FR-051 | TC-083 |
 | FR-052 | TC-085 |
 | FR-053 | TC-087, TC-088, MW-08 |
-| FR-054 | TC-086, TC-134, TC-178 |
+| FR-054 | TC-086, TC-134, TC-178, TC-183 |
 | FR-055 | TC-084 |
 | FR-060 | TC-060, TC-063 |
 | FR-061 | TC-061, TC-062 |
@@ -110,11 +110,11 @@ is broken. A test that merely runs nearby code does not count.
 | FR-108 | TC-135, MW-10 |
 | FR-109 | TC-145 |
 | FR-110 | TC-120 |
-| FR-111 | TC-167, TC-168, TC-169 |
-| FR-112 | TC-171 |
-| FR-113 | TC-170 |
+| FR-111 | TC-167, TC-168, TC-169, TC-180, TC-181, TC-182, TC-184 |
+| FR-112 | TC-171, TC-185 |
+| FR-113 | TC-170, TC-187 |
 | FR-114 | TC-172, TC-173, TC-179 |
-| FR-115 | TC-174, TC-175, TC-176, TC-177 |
+| FR-115 | TC-174, TC-175, TC-176, TC-177, TC-186 |
 | NFR-001 | TC-133, MW-06, MW-13 |
 | NFR-002 | TC-042, TC-137 |
 | NFR-003 | TC-022, TC-023, TC-139 |

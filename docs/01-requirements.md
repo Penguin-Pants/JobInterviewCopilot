@@ -201,8 +201,12 @@ instantiated once per stream, so each stream keeps its own connection and its
 own interim and final transcript state.
 
 **FR-048** Every transcript event must be normalized to
-`{ source, text, isFinal, timestamp, providerId }`, extended by an optional
-`confidence` field per `FR-112`.
+`{ source, text, isFinal, timestamp, providerId }`.
+
+> **Amended.** The normalized shape gains an optional `confidence` field,
+> populated only per `FR-112`'s capability-flag rule. The five original fields
+> are unchanged; a reader relying on the original five-field list alone is
+> missing only an additive field, never a breaking one.
 
 **FR-049** A **non-streaming** STT model, `whisper-1` being the only one shipped
 in v1, must buffer 4 seconds of audio per request, must emit only
@@ -262,36 +266,49 @@ overlay. (ASM-004)
 
 **FR-055** The trigger must never fire from the candidate stream.
 
-**FR-055** The trigger must never fire from the candidate stream.
-
 **FR-111** A turn that passes `FR-051`'s guard and `FR-113`'s confidence gate
 must be classified as actionable before it is allowed to fire a generation,
 checked in this order. First, a case-insensitive **exact** match of **the
-whole trimmed turn** against a fixed small-talk or acknowledgement list must
-classify it non-actionable with no network call — a start-of-text match on
-this list is forbidden, because it would let a real question that happens to
-begin with an acknowledgement ("Okay, so tell me about your salary
-expectations" — real-time STT frequently drops terminal punctuation, so a
-missing `?` is the common case, not the exception) be silently suppressed.
-Second, a `?` anywhere in the turn text, or a case-insensitive match **at the
-start** of the trimmed turn against a fixed lead-word list, must classify it
-actionable with no network call. The exact-match check must run first: an
-exact match is more specific than a prefix match, and checking it first is
-what keeps an entry that is itself a prefix of a lead word (e.g. a
-non-actionable phrase beginning with "how") from being misclassified. A turn
-neither rule resolves must be classified by exactly one call to an injected
-classification function backed by the configured LLM primary, capped at a few
-output tokens, using the fixed classification prompt (`02-architecture.md`
-3.6a); the component making this check (`CMP-05`) must not call an
-`LlmProvider` itself, consistent with its own
-"must not call an LLM provider directly" rule. A classifier failure of any kind
-(timeout, provider error, a response that is not cleanly one verdict) must
-resolve to actionable. A turn classified non-actionable must return to
+whole trimmed turn, with any run of trailing `?`/`.`/`!`/`,` stripped first**,
+against a fixed small-talk or acknowledgement list must classify it
+non-actionable with no network call. Stripping trailing punctuation before
+this comparison (never interior punctuation, and never before the `?`-anywhere
+check below) is required so a transcript that *does* render terminal marks —
+"How are you?" — still matches the lexicon entry `"how are you"`; a
+start-of-text (prefix) match on this list is forbidden regardless, because it
+would let a real question that happens to begin with an acknowledgement
+("Okay, so tell me about your salary expectations" — real-time STT frequently
+drops terminal punctuation, so a missing `?` is the common case, not the
+exception) be silently suppressed. Second, a `?` anywhere in the unstripped
+turn text, or a case-insensitive match **at the start** of the trimmed turn
+against a fixed lead-word list, must classify it actionable with no network
+call. The exact-match check must run first: an exact match is more specific
+than a prefix match, and checking it first is what keeps an entry that is
+itself a prefix of a lead word (e.g. a non-actionable phrase beginning with
+"how") from being misclassified. A turn neither rule resolves must be
+classified by exactly one call to an injected classification function backed
+by the configured LLM primary, capped at a few output tokens, using the fixed
+classification prompt (`02-architecture.md` 3.6a); the component making this
+check (`CMP-05`) must not call an `LlmProvider` itself, consistent with its
+own "must not call an LLM provider directly" rule. Before making this call,
+the LLM primary credential's current health state must be checked (a read,
+not a retry attempt): an already-`CONFIG_REQUIRED` or not-yet-due `DEGRADED`
+credential must skip the call entirely and fail open with no network attempt.
+Otherwise exactly one attempt is made, under a fixed client-side timeout; a
+classifier failure of any kind (that timeout, a provider error, or a response
+that is not cleanly one verdict) must resolve to actionable, and must never
+itself drive the credential to `CONFIG_REQUIRED` or `DEGRADED` — only a real
+generation's failures do that. A turn classified non-actionable must return to
 `LISTENING` exactly as a guard failure does: no card, no generation, no
-transcript entry. A classification call is a real, billable LLM request; its
-token usage must reach the Cost Meter under a key that cannot collide with any
+transcript entry. If a classification is aborted because a newer turn's
+guard-pass superseded it, its eventual settlement (verdict or abort) must be
+discarded as a stale settle report, the same treatment an aborted
+generation's late settlement already gets — never acted on as if it were a
+fresh failure or a fresh verdict for a turn the trigger has already moved
+past. A classification call is a real, billable LLM request; its token usage
+must reach the Cost Meter under a key that cannot collide with any
 generation's, the same "never silently understate spend" standard `FR-103`
-already holds usage accounting to. (ADR-045, ASM-015)
+already holds usage accounting to. (ADR-045, ASM-015, ASM-019, ASM-020)
 
 **FR-113** This gate is checked immediately after `FR-051`'s guard and before
 `FR-111`'s actionability classification, so a turn garbled enough to fail it is
@@ -543,9 +560,13 @@ delaying the IPC push from the main process. Held events for a queued,
 not-yet-shown generation must replay, once the hold elapses, in arrival order
 and at their original relative spacing, not compressed into a single instant,
 so the per-bullet reveal (`FR-092`) still applies once that card is promoted.
-A `suggestion:end` with `status: 'cancelled'` for a generation still waiting
-out the hold (never shown) must discard it rather than display it once the
-hold elapses. A pause (`FR-053`) must both clear the renderer's
+At most one not-yet-shown generation may be queued at a time: if a different
+generation's `suggestion:begin` arrives while another is already queued, it
+must replace the queued one outright, the same one-held-slot rule
+`FR-008`/`ADR-016`'s overlay-readiness gate already applies to a comparable
+race. A `suggestion:end` with `status: 'cancelled'` for a generation still
+waiting out the hold (never shown) must discard it rather than display it once
+the hold elapses. A pause (`FR-053`) must both clear the renderer's
 notion of "a card is currently shown" and discard any events currently
 queued, whatever their status — nothing paused should surface once resumed,
 including a generation that had already completed while queued. A session

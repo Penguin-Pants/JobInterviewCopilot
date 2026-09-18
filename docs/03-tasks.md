@@ -1835,8 +1835,15 @@ component (`TASK-030`, `TASK-032`, `TASK-012`, `TASK-043`) rather than
 replacing it, and none adds a runtime dependency (`02-architecture.md`
 section 8).
 
+**Numbering note.** `TASK-060` (actionability filter) is listed before
+`TASK-061` (confidence gate) because the actionability filter is the
+higher-level, user-visible feature the UX review asked for, but `TASK-060`
+**depends on** `TASK-061`: the confidence gate runs first in the guard chain
+(`02-architecture.md` 3.6) and a turn it suppresses must never reach the
+classifier. Build `TASK-061` first regardless of the numbering.
+
 ### TASK-060 Actionability filter
-**Traces** FR-111, NFR-018, ASM-015
+**Traces** FR-054 (amended), FR-111, NFR-018, ASM-015, ASM-019, ASM-020
 **Depends on** TASK-030, TASK-032, TASK-044, TASK-061
 **Acceptance criteria**
 - The moment `FR-051`'s guard passes, `firedAt` is stamped and whatever async
@@ -1844,12 +1851,21 @@ section 8).
   unconditionally, before `TASK-061`'s confidence gate or this task's
   classifier run (`02-architecture.md` 5.2/5.3). Only once the confidence gate
   also passes does the turn enter the new `CLASSIFYING` state.
-- Checked in this order (the order matters, see the next bullet): a
-  case-insensitive match of **the entire trimmed turn**, not a prefix, against
-  `NON_ACTIONABLE_PHRASES` resolves `'non-actionable'` with no network call.
-  Only if that does not match: a `?` anywhere in the turn text, or a
-  case-insensitive match **at the start** of the trimmed text against
-  `ACTIONABLE_LEADS`, resolves `'actionable'` with no network call.
+- Checked in this order (the order matters, see the next bullet): the trimmed
+  turn has any run of trailing `?`/`.`/`!`/`,` characters stripped, **only for
+  this comparison**, and a case-insensitive match of that punctuation-stripped
+  whole text, not a prefix, against `NON_ACTIONABLE_PHRASES` resolves
+  `'non-actionable'` with no network call. Only if that does not match: a `?`
+  anywhere in the **original, unstripped** turn text, or a case-insensitive
+  match **at the start** of the trimmed text against `ACTIONABLE_LEADS`,
+  resolves `'actionable'` with no network call.
+- The trailing-punctuation strip exists because "How are you?" would otherwise
+  fail the exact match against the lexicon entry `"how are you"` (no `?`) and
+  fall through to the next rule, where its own `?` misclassifies a canonical
+  greeting as actionable — found during a fourth round of spec review. The
+  strip is trailing-only and scoped to the exact-match comparison alone, so
+  "what's the risk, really?" still reaches the second rule with its interior
+  punctuation and its own `?` intact.
 - The exact-match rule against `NON_ACTIONABLE_PHRASES` must be checked
   **before** the prefix-match rule against `ACTIONABLE_LEADS`, not after: the
   seed `NON_ACTIONABLE_PHRASES` entry "how are you" also starts with "how", an
@@ -1891,6 +1907,27 @@ section 8).
 - A classifier failure of any kind — timeout, provider error, a response that
   is not cleanly `'actionable'` or `'non-actionable'` — resolves to
   `'actionable'`.
+- **An aborted classification's eventual settlement is discarded as a stale
+  settle report, not acted on as a fresh failure or a fresh verdict.** When
+  `signal` fires because a newer turn's guard-pass superseded this
+  classification, the promise it wraps does not necessarily settle at that
+  same instant; whenever it does resolve or reject afterward, the trigger
+  checks it against its current in-flight marker (the same marker
+  `noteGenerationSettled`, `TASK-030`, already keys generation settlements
+  against) and discards it outright if that marker no longer names this
+  classification. It must never produce a `TurnFired` for a turn the trigger
+  has already moved past, and must never be treated as this turn's own
+  `'actionable'` fallback.
+- **`live.ts`'s `classify` closure checks the LLM primary credential's health
+  state (`CMP-12`) before calling, as a read, never as a `runFor` attempt.**
+  `CONFIG_REQUIRED`, or `DEGRADED` with its backoff not yet due, skips the
+  network call entirely and fails open to `'actionable'` immediately.
+  Otherwise exactly one attempt is made, under an 800 ms client-side timeout
+  (`ASM-020`) local to this call and distinct from any retry-driven timeout
+  `runFor` applies to a real generation. A timeout or any other failure
+  resolves to `'actionable'` and is never itself reported to `CMP-12` as a
+  probe outcome — this call is not routed through the retry/failover
+  machinery and never drives credential health state either way.
 - A turn classified `'non-actionable'` returns to `LISTENING` with no card, no
   generation and no transcript entry: the same path a `FR-051` guard failure
   already takes, not a new one.
@@ -1900,15 +1937,19 @@ section 8).
   generalized to "whichever async op is in flight," not specific to a
   generation.
 - `actionability.ts`'s heuristic half is a pure module with no Electron
-  import, matching the trigger's own module boundary (`TASK-030`).
+  import, matching the trigger's own module boundary (`TASK-030`). A static
+  check (grep/import-graph, the same technique `TC-042`/`TC-096` already use
+  for their own module-boundary claims) asserts `trigger.ts` never imports
+  `LlmProvider` or `classifyWithLlm`, so this stays true by construction, not
+  only by review.
 - The LLM-confirm path adds no more than 400 ms at p95 to the existing latency
   harness (`NFR-018`), measured with scripted fakes at fixed delays. `TC-133`
   is unaffected because its fixtures resolve via the heuristic path only.
-**Verified by** TC-167, TC-168, TC-169, TC-178
+**Verified by** TC-167, TC-168, TC-169, TC-178, TC-180, TC-181, TC-182, TC-183, TC-184, TC-187
 
 ### TASK-061 STT confidence capability and gate
 **Traces** FR-112, FR-113, ASM-016
-**Depends on** TASK-012, TASK-013, TASK-030
+**Depends on** TASK-012, TASK-013, TASK-030, TASK-044
 **Acceptance criteria**
 - `SttModelDescriptor` carries `supportsConfidence`. Every v1 registry entry
   states it explicitly — `true` for `deepgram`'s models, `false` for
@@ -1917,7 +1958,13 @@ section 8).
   The `whisper-1` row is `TASK-013`'s, not `TASK-012`'s (`TASK-012` explicitly
   deferred it), which is why this task depends on both.
   This flag inherits the same primary-vs-active-after-failover resolution
-  `supportsEndpointing` already has (`ADR-046`); not this task's to fix.
+  `supportsEndpointing` already has: `TASK-044` already rebinds the trigger's
+  capability flags to whichever model is actually serving the session, not
+  the configured primary, and `ADR-036`'s health machine re-opens the STT
+  pair on whatever model it then serves after a failure. `supportsConfidence`
+  is read through that same existing mechanism, not a new one this task
+  builds (`ADR-046`); this is why this task depends on `TASK-044` rather than
+  reinventing the rebinding.
 - `TranscriptEvent` carries an optional `confidence`, populated only when the
   emitting adapter's active model has `supportsConfidence: true`.
 - The `deepgram` adapter reads `channel.alternatives[0].confidence` off the
@@ -1936,10 +1983,10 @@ section 8).
   scripted low-confidence final proves the gate suppresses the turn;
   `supportsConfidence: false` with the same scripted value proves the gate does
   not apply, following the registry-driven pattern `TC-151` established.
-**Verified by** TC-170, TC-171
+**Verified by** TC-170, TC-171, TC-185, TC-187
 
 ### TASK-062 Stale-suggestion discard
-**Traces** FR-114
+**Traces** FR-114, ASM-017
 **Depends on** TASK-030, TASK-032, TASK-044, TASK-060, TASK-061
 **Acceptance criteria**
 - `TurnFired` carries `firedAt`, an epoch millisecond captured **once, the
@@ -2031,14 +2078,24 @@ section 8).
   `generationId` discards that generation's queued entries; nothing from it
   ever dispatches. (This is distinct from the first bullet above, which
   covers cancelling the card already on screen.)
+- **The buffer holds at most one queued (not-yet-shown) candidate at a time.**
+  A `'begin'` for a third, distinct `generationId` arriving while a different
+  one is already queued replaces the queued one outright — its entries are
+  discarded, not appended behind the new arrival — the same one-held-slot
+  rule `OverlayGate` (`ADR-016`) already applies to a comparable race ("one
+  held generation, second `begin` discards first").
 - A `'reset'` event (session boundary) bypasses the buffer entirely — it
   dispatches immediately and clears anything queued, never held, matching how
   `reduceCards` itself treats a session boundary as unconditional.
-- A pause (`CH-212 overlay:mode`) both clears the buffer's notion of "a card is
-  currently shown" **and** discards everything currently queued, regardless of
-  that generation's eventual status — a generation that finished streaming
-  while queued must not surface after the session resumes, the same as one
-  still mid-stream when the pause arrived.
+- `HoldBuffer` exposes `onPause(): void` alongside `onEvent`/`dispose`,
+  because `CH-212`'s pause transition does not arrive as a `CardEvent`
+  (`02-architecture.md` 3.8). The overlay renderer calls it wherever it
+  already handles `CH-212`. A pause, delivered through `onPause()`, both
+  clears the buffer's notion of "a card is currently shown" **and** discards
+  everything currently queued, regardless of that generation's eventual
+  status — a generation that finished streaming while queued must not
+  surface after the session resumes, the same as one still mid-stream when
+  the pause arrived.
 - Whenever no card is currently shown — the first suggestion of a session, or
   the first one after a pause — the hold does not apply.
-**Verified by** TC-174, TC-175, TC-176, TC-177
+**Verified by** TC-174, TC-175, TC-176, TC-177, TC-186
