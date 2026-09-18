@@ -788,29 +788,38 @@ interface TriggerOptions {
 `classify` is constructed once in `CMP-15` (`live.ts`), the same place
 `LlmProvider` is already legitimately called for real generations, and wired
 into the trigger at startup — the identical pattern `onFire` already is.
-`CMP-05` itself never imports an LLM adapter.
+`CMP-05` itself never imports an LLM adapter. `live.ts`'s implementation of
+`classify` also reports the call's own token usage to the Cost Meter before
+resolving (3.6a) — the trigger only ever sees the verdict.
 
 ```ts
-/** Fixed seed lexicon (ASM-015). Growing it is a data change, not an
+/** Fixed seed lexicons (ASM-015). Growing either is a data change, not an
  *  architecture change. Lives beside the trigger, but has no network
- *  import — CMP-05 calls this directly, never `classify`'s real
- *  implementation. */
-const ACTIONABLE_LEADS: readonly string[];
-// 'who', 'what', 'when', 'where', 'why', 'how', 'tell me', 'describe',
-// 'walk me through', 'can you', 'could you', 'would you', 'give an example'
-
+ *  import — CMP-05 calls classifyHeuristically directly, never
+ *  `classify`'s real, LlmProvider-backed implementation. */
 const NON_ACTIONABLE_PHRASES: readonly string[];
 // 'thanks for joining', 'nice to meet you', 'how are you', 'welcome',
 // 'okay', 'great', 'got it', 'sounds good', 'perfect', 'sure', 'no problem'
 
-/** A '?' anywhere in the text resolves 'actionable'. A case-insensitive match
- *  at the START of the trimmed text against ACTIONABLE_LEADS resolves
- *  'actionable'. A case-insensitive match of the WHOLE trimmed text against
- *  NON_ACTIONABLE_PHRASES — exact, not prefix — resolves 'non-actionable'.
- *  The two lists are matched asymmetrically on purpose: a prefix match on
- *  NON_ACTIONABLE_PHRASES would let "Okay, so what's your expected salary
- *  range?" match "okay" and silently drop a real question. Neither rule
- *  matching: null. */
+const ACTIONABLE_LEADS: readonly string[];
+// 'who', 'what', 'when', 'where', 'why', 'how', 'tell me', 'describe',
+// 'walk me through', 'can you', 'could you', 'would you', 'give an example'
+
+/** Checked in this order — the exact-match rule FIRST:
+ *  1. A case-insensitive match of the WHOLE trimmed text against
+ *     NON_ACTIONABLE_PHRASES — exact, not prefix — resolves
+ *     'non-actionable'.
+ *  2. A '?' anywhere in the text, or a case-insensitive match at the START
+ *     of the trimmed text against ACTIONABLE_LEADS, resolves 'actionable'.
+ *  3. Neither: null.
+ *  Order matters, found during a second round of spec review: the seed
+ *  NON_ACTIONABLE_PHRASES entry "how are you" also starts with "how", an
+ *  ACTIONABLE_LEADS entry. Checking the exact, whole-turn match first means
+ *  a real question can never accidentally match it (a real question is
+ *  never exactly equal to a five-word acknowledgement), while an
+ *  acknowledgement that happens to share a lead word never reaches the
+ *  prefix check at all. The reverse order was tried first and misclassified
+ *  "how are you" as actionable. */
 function classifyHeuristically(text: string): ActionabilityVerdict | null;
 ```
 
@@ -823,15 +832,92 @@ timeout, or a settled value that is not cleanly one verdict resolves to
 trigger's existing `AWAITING_TURN_END → LISTENING` path (`TASK-030`) is reused,
 not duplicated.
 
-**The `CLASSIFYING` state carries the wait (5.3).** `signal` above comes from
-the trigger's own per-turn `AbortController`, created once the guard chain
-begins — the same moment `firedAt` (3.7) is captured — and shared by the
+**The `CLASSIFYING` state carries the wait, and `firedAt`/the abort both
+happen before it, not inside it (5.3).** The moment `FR-051`'s guard passes —
+before the confidence gate or the classifier run — the trigger stamps
+`firedAt` (3.7) and aborts whatever async operation (a previous
+classification or generation) is currently in flight, unconditionally
+(`FR-054`). Only after that does the confidence gate run, and only if it
+passes does the turn enter `CLASSIFYING`. `signal` above is the
+`AbortController` created at that same guard-pass moment, shared by the
 classification call and, if it fires, the eventual generation: there is one
-in-flight async operation per turn, not two independently-tracked ones. A new
-turn's gap elapsing while a previous turn is still `CLASSIFYING` aborts that
-controller before the guard chain restarts for the new text, the same
-`abortInFlight` mechanism `GENERATING` already uses, now generic over
-"whichever async op is in flight."
+in-flight async operation per turn, not two independently-tracked ones. Doing
+the abort this early, before the new turn's own outcome is known, is what
+keeps "a turn suppressed by the confidence gate or the classifier returns to
+`LISTENING` exactly as a guard failure does" true without qualification: by
+the time either check resolves, there is never a competing in-flight
+operation left to reconcile, because it was already dealt with at guard-pass.
+A turn that instead *fails* `FR-051`'s guard (too short to count as a new
+turn) stamps nothing and aborts nothing, exactly as before this milestone
+(`TC-086`).
+
+`CLASSIFYING` behaves exactly like `GENERATING` already did for a pending
+successor: a pending turn survives its predecessor (new text accumulates and
+arms its own gap timer), and a new turn's gap elapsing while a previous turn
+is still `CLASSIFYING` runs the same guard-pass sequence described above
+before the guard chain restarts for the new text.
+
+### 3.6a Actionability classification prompt (`FR-111`, `CMP-15`)
+
+Fixed, not user-editable, the same discipline section 6 holds the suggestion
+prompt to. `GenerationRequest` (3.2) gains one optional field so the
+classification call can use `LlmProvider.generate` — "the existing interface,"
+per `TASK-060` — without going through the fixed interview-cue system prompt
+and `GENERATION_PARAMS` that `buildMessages`/`prompt.ts` otherwise always
+apply:
+
+```ts
+interface GenerationRequest {
+  generationId: string;
+  question: string;
+  candidateContext: string;
+  chunks: RetrievedChunk[];
+  choice: ProviderChoice;
+  /** When present, buildMessages uses this system prompt and these
+   *  parameters instead of prompt.ts's fixed SYSTEM_PROMPT and
+   *  GENERATION_PARAMS. Used only by the actionability classifier
+   *  (FR-111); a real suggestion generation never sets this. */
+  promptOverride?: {
+    system: string;
+    user: string;
+    maxTokens: number;
+    temperature: number;
+  };
+}
+```
+
+System prompt, verbatim:
+
+```
+You classify whether an interviewer's spoken turn in a job interview requires
+the candidate's AI assistant to prepare a suggestion. Respond with exactly one
+word: ACTIONABLE or NON_ACTIONABLE.
+
+ACTIONABLE means the turn asks the candidate a question, or otherwise expects
+a substantive response. NON_ACTIONABLE means the turn is small talk, a
+greeting, an acknowledgement, or other content that needs no prepared
+response.
+
+Respond with the one word and nothing else.
+```
+
+User message template: `TURN:\n${text.trim()}`. Parameters: `maxTokens: 5`
+(one word, with margin for tokenization), `temperature: 0`.
+
+`classifyWithLlm(text, llm, signal)` builds this request, calls
+`llm.generate(req, signal)`, and reads the first delta: checked in this
+order because the string `"NON_ACTIONABLE"` contains `"ACTIONABLE"` as a
+substring, a case-insensitive match on `NON_ACTIONABLE` is checked **first**
+and resolves `'non-actionable'`; only if that does not match, a
+case-insensitive match on `ACTIONABLE` resolves `'actionable'`. Anything
+else — including no response, a stream that ends without a recognizable
+token, or the same non-aborted-stream-ends-early failure 3.2 already defines
+as a `ProviderError` — resolves to `'actionable'` (`ADR-045`).
+
+The call's `TokenUsage` is reported to the Cost Meter (`CMP-09`,
+`cost.noteGeneration`) before `classify` resolves, under a key that cannot
+collide with any real generation's `<generationId>#<attempt>` scheme
+(`ADR-036`) — a classification call has no `generationId` of its own.
 
 ### 3.7 Staleness check (`FR-114`, `CMP-15`, `ADR-048`)
 
@@ -850,10 +936,13 @@ interface TurnFired {
 }
 
 type GenerationStatus = 'complete' | 'cancelled' | 'nonconforming' | 'stale';
-// 'stale' is new, on this shared type and on the matching TranscriptEntry
-// variant (2.5) only. It is NOT added to CH-209's wire schema (4): the
-// suggestion:begin that would carry it is exactly what this check guarantees
-// is never sent, so the wire value would be unreachable by construction —
+// GenerationStatus (ai/llm.ts) and TranscriptEntry's independently-declared
+// 'suggestion' status union (2.5) are two separate declarations, not one
+// shared type despite the similar name — both gain 'stale' in this milestone,
+// so both need editing. Neither CH-209's wire schema (4) nor CardStatus
+// (2.6a) gains it: the suggestion:begin that would carry it to the overlay is
+// exactly what this check guarantees is never sent, so the wire value and
+// the renderer's status union would both be unreachable by construction —
 // the same standard ADR-044 and ADR-047 already hold this project to.
 ```
 
@@ -867,6 +956,18 @@ transcript entry is appended with `status: 'stale'`. `CardStatus` in
 `cards.ts` (2.6a) does **not** gain `'stale'`: a stale generation never reaches
 the renderer, so the renderer's status union has no reachable use for the
 value.
+
+**One checkpoint, evaluated once per generation, not once per attempt.** A
+single `generationId` can be billed across several attempts when the health
+machine retries or fails over (`ADR-036`: each attempt accounted under
+`<generationId>#<attempt>`), and `onSuggestion` for `suggestion:begin` is
+still called at most once for that `generationId` — on whichever attempt
+finally succeeds enough to produce output. The staleness check sits at that
+one call site, so it is checked exactly once regardless of how many attempts
+preceded it, and the elapsed time it measures already includes every attempt
+before the one that succeeded — a generation that burned through the full
+retry ladder before finally going out is exactly the case this check is
+meant to catch.
 
 **One checkpoint is enough.** The failure mode this guards against is a
 generation that sits *unstarted* too long — retrieval plus however many failed
@@ -893,19 +994,30 @@ interface HoldBuffer {
 ```
 
 Every `CardEvent` the overlay receives over IPC passes through the buffer
-before it reaches `useReducer(reduceCards, ...)`. With no card shown, or the
-shown card visible at least `minHoldMs`, an event dispatches immediately.
-Otherwise it queues, keyed by `generationId`, replayed once the hold elapses —
-in arrival order **and at the spacing the events originally arrived in**, not
-flushed simultaneously, so a held card's bullets still trigger their per-bullet
-reveal (`FR-092`) one at a time rather than appearing all at once. A
-`suggestion:end` with `status: 'cancelled'` for a `generationId` still queued
-discards that generation's queued entries instead of flushing them once the
-hold elapses — a card superseded before it was ever shown must not be shown
-after the fact. A pause (`CH-212`) clears the buffer's notion of "a card is
-currently shown," exactly like a fresh idle period: the first suggestion after
-resume is not held. The first card shown with no card currently on screen — a
-session's first suggestion, or the first one after a pause — bypasses the hold
+before it reaches `useReducer(reduceCards, ...)`, with three exceptions to the
+general dispatch-or-queue rule below: a `'reset'` event (a session boundary)
+always bypasses the buffer and dispatches immediately, clearing anything
+queued — a session boundary is never held, the same way `reduceCards` itself
+treats it as unconditional (2.6a); and `CH-212`'s pause transition, which does
+not arrive as a `CardEvent` at all but which the buffer also observes, both
+clears the buffer's notion of "a card is currently shown" **and** discards
+every event currently queued, regardless of that generation's eventual
+status — a generation that finished streaming while queued, waiting out the
+hold, must not surface once the session resumes, the same as one that was
+mid-stream when the pause arrived.
+
+For an ordinary `CardEvent` (`'begin'`, `'line'`, `'end'`): with no card
+shown, or the shown card visible at least `minHoldMs`, it dispatches
+immediately. Otherwise it queues, keyed by `generationId`, replayed once the
+hold elapses — in arrival order **and at the spacing the events originally
+arrived in**, not flushed simultaneously, so a held card's bullets still
+trigger their per-bullet reveal (`FR-092`) one at a time rather than appearing
+all at once. A `suggestion:end` with `status: 'cancelled'` for a
+`generationId` still queued discards that generation's queued entries instead
+of flushing them once the hold elapses — a card superseded before it was ever
+shown must not be shown after the fact. The first card shown with no card
+currently on screen — a session's first suggestion, or the first one after a
+pause — bypasses the hold
 (there is nothing to protect the reading time of).
 
 ---
@@ -1186,16 +1298,21 @@ CMP-05   final received -> start turnEndGapMs timer
          any new interim/final restarts the timer
          Deepgram endpoint event -> fire immediately
 CMP-05   timer elapses -> guard FR-051 (>=3 words, >=12 chars)
-         guard fail -> return to LISTENING
-         guard pass -> firedAt = Date.now() (FR-114), enter CLASSIFYING (5.3)
-         confidence gate FR-113 first, only when supportsConfidence is true
-         below threshold -> return to LISTENING, nothing fires
-         classify FR-111 second: heuristic, else one LLM-confirm call
-         non-actionable, or the call errors/times out and fails open -> see
-           ADR-045 (a classifier failure resolves to actionable, not silence)
+         guard fail -> return to LISTENING, nothing stamped, nothing aborted
+           (too short to be "a new turn end", FR-054 does not apply, TC-086)
+         guard pass -> firedAt = Date.now() (FR-114)
+         guard pass -> abort whatever async op (a previous classification or
+           generation) is in flight, unconditionally, before this turn's own
+           checks run (FR-054); CH-209 status 'cancelled' for an aborted
+           generation
+         guard pass -> confidence gate FR-113, only when supportsConfidence is true
+         confidence below threshold -> return to LISTENING, firedAt discarded,
+           nothing fires
+         confidence passes (or does not apply) -> enter CLASSIFYING (5.3)
+         classify FR-111: heuristic, else one LLM-confirm call
          non-actionable -> return to LISTENING, nothing fires
-         if a generation is in flight -> abort it, CH-209 status 'cancelled'
-         actionable -> enter GENERATING, TurnFired carries the same firedAt
+         actionable, or the call errors/times out and fails open (ADR-045)
+           -> enter GENERATING, TurnFired carries the firedAt stamped above
 CMP-15   onFire -> CMP-06 query(boundProfileId, questionText, 3)
 CMP-07   build prompt, call provider
 CMP-15   staleness check FR-114: Date.now() - firedAt > threshold?
@@ -1239,26 +1356,33 @@ states: IDLE, LISTENING, AWAITING_TURN_END, CLASSIFYING, GENERATING, PAUSED
 IDLE            --session:start-->            LISTENING
 LISTENING       --interviewer final-->        AWAITING_TURN_END
 AWAITING_TURN_END --new interim/final-->      AWAITING_TURN_END (timer reset)
-AWAITING_TURN_END --gap elapsed, guard fail-->LISTENING
-AWAITING_TURN_END --gap elapsed, guard pass,
-                    confidence gate fail-->   LISTENING
-AWAITING_TURN_END --gap elapsed, guard pass,
-                    confidence gate pass-->   CLASSIFYING (firedAt stamped, FR-114)
+
+-- A "new turn end" is the SAME transition regardless of which state it fires
+   from (AWAITING_TURN_END, CLASSIFYING or GENERATING): the gap elapses and
+   FR-051's guard passes. It always does these three things, in order, before
+   anything about the new turn's own actionability is known:
+
+any of {AWAITING_TURN_END, CLASSIFYING, GENERATING}
+   --new turn's gap elapses, guard fail--> (no transition: too short to be
+     "a new turn end", nothing stamped, nothing aborted, TC-086)
+   --new turn's gap elapses, guard pass-->
+       1. firedAt = Date.now() (FR-114)
+       2. abort whatever async op (a previous classification or generation)
+          is in flight, unconditionally (FR-054); CH-209 'cancelled' if it
+          was a generation
+       3. confidence gate FR-113, only when supportsConfidence is true
+   --confidence gate fails--> LISTENING (firedAt discarded)
+   --confidence gate passes (or does not apply)--> CLASSIFYING
+
 CLASSIFYING     --new interim/final-->        CLASSIFYING (new text accumulates,
                                                its own gap timer arms, same
-                                               pending-turn rule as GENERATING)
+                                               pending-turn rule as GENERATING —
+                                               its own "new turn end" still
+                                               follows the rule above)
 CLASSIFYING     --resolved non-actionable-->  LISTENING
 CLASSIFYING     --resolved actionable, or
                    classifier fails/aborts--> GENERATING (fail open, ADR-045)
 GENERATING      --stream end-->               LISTENING
-GENERATING      --new turn end-->             GENERATING (abort old, start new
-                                               from AWAITING_TURN_END's guard
-                                               chain, which may re-enter
-                                               CLASSIFYING before GENERATING)
-CLASSIFYING     --new turn's gap elapses
-                   while still classifying--> CLASSIFYING (abort the in-flight
-                                               classification, restart the
-                                               guard chain for the new text)
 any live state  --Ctrl+Shift+P-->             PAUSED
 PAUSED          --Ctrl+Shift+P-->             LISTENING
 PAUSED          --entering-->                 abort in-flight (classification
@@ -1274,16 +1398,23 @@ socket and no profile bound. Clarified during `TASK-030` and recorded as
 
 **`CLASSIFYING` is new, added by `TASK-060` and recorded as `ADR-045`.** It
 carries the actionability classifier's await (3.6) — the one state transition
-here that is not synchronous. It behaves exactly like `GENERATING` already did
-for the two cases that matter: a pending turn survives its predecessor (new
-speech arms its own gap timer without disturbing the in-flight classification),
-and a new turn's gap elapsing aborts whatever async operation is currently in
-flight before starting over, whether that operation was a classification or a
-generation. `trigger.ts`'s existing `abortInFlight` is generic over "the one
-in-flight async op for this turn," not specific to a generation — this is a
-correction to how the milestone was first specified, not a new mechanism:
-`inFlight` was always described as one slot, and `CLASSIFYING` is a second kind
-of thing that can occupy it.
+here that is not synchronous. Stamping `firedAt` and aborting whatever was in
+flight both happen at guard-pass, **before** the confidence gate or the
+classifier run, not folded into `CLASSIFYING` itself — a correction found
+during a second round of spec review, needed for two reasons together: it is
+the only way `firedAt` can include the confidence gate's own cost, as
+`ADR-048` requires, and it is what makes "a turn the confidence gate or the
+classifier suppresses returns to `LISTENING` exactly as a guard failure does"
+(`FR-111`, `FR-113`) true without qualification — by the time either check
+resolves, whatever was previously in flight is already gone, so there is
+nothing left to reconcile. `trigger.ts`'s existing `abortInFlight` is generic
+over "the one in-flight async op for this turn," not specific to a
+generation — this is a correction to how the milestone was first specified,
+not a new mechanism: `inFlight` was always described as one slot, and
+`CLASSIFYING` is a second kind of thing that can occupy it. A pending turn
+survives its predecessor exactly as it always did for `GENERATING`: new
+speech arms its own gap timer without disturbing whatever is currently in
+flight.
 
 Three further rules, each from a case the diagram does not show. All were found
 by the review on `TASK-030`'s pull request and are recorded here because they

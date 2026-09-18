@@ -252,6 +252,7 @@ All trigger tests run on fake timers with the pure state-machine module.
 | TC-173 | I | Staleness transcript status and cost | A discarded generation is appended to the transcript with `status: 'stale'`, and its token usage still reaches the Cost Meter |
 | TC-174 | U | Hold buffer delays replacement and preserves pacing | A second `suggestion:begin` arriving less than `minHoldMs` after the first card became visible is queued and dispatched only once the hold elapses, driven by fake timers, with its `line` events replayed at their original relative spacing rather than all at once. One arriving after the hold dispatches immediately. A pause clears "a card is shown," so the next suggestion after resume is not held |
 | TC-175 | U | Hold buffer drops a cancelled queued generation | A `suggestion:end` with `status: 'cancelled'` for a `generationId` still queued in the hold buffer discards its queued entries. Nothing from that generation ever reaches `reduceCards` |
+| TC-176 | U | Hold buffer: reset bypasses, pause discards queued | A `'reset'` event dispatches immediately and clears anything queued, never held. A pause discards every currently queued event regardless of that generation's status, including one that had already completed while queued, and clears "a card is shown" so the next suggestion after resume is not held |
 
 ---
 

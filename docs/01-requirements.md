@@ -252,31 +252,42 @@ overlay. (ASM-004)
 **FR-055** The trigger must never fire from the candidate stream.
 
 **FR-111** A turn that passes `FR-051`'s guard and `FR-113`'s confidence gate
-must be classified as actionable before it is allowed to fire a generation. A
-`?` anywhere in the turn text, or a case-insensitive match **at the start** of
-the trimmed turn against a fixed lead-word list, must classify it actionable
-with no network call. A case-insensitive **exact** match of **the whole
-trimmed turn** against a fixed small-talk or acknowledgement list must classify
-it non-actionable with no network call — a start-of-text match on this list is
-forbidden, because it would let a real question that happens to begin with an
-acknowledgement ("Okay, so what's your expected salary range?") be silently
-suppressed. A turn neither rule resolves must be classified by exactly one
-call to an injected classification function backed by the configured LLM
-primary, capped at a few output tokens; the component making this check
-(`CMP-05`) must not call an `LlmProvider` itself, consistent with its own
+must be classified as actionable before it is allowed to fire a generation,
+checked in this order. First, a case-insensitive **exact** match of **the
+whole trimmed turn** against a fixed small-talk or acknowledgement list must
+classify it non-actionable with no network call — a start-of-text match on
+this list is forbidden, because it would let a real question that happens to
+begin with an acknowledgement ("Okay, so tell me about your salary
+expectations" — real-time STT frequently drops terminal punctuation, so a
+missing `?` is the common case, not the exception) be silently suppressed.
+Second, a `?` anywhere in the turn text, or a case-insensitive match **at the
+start** of the trimmed turn against a fixed lead-word list, must classify it
+actionable with no network call. The exact-match check must run first: an
+exact match is more specific than a prefix match, and checking it first is
+what keeps an entry that is itself a prefix of a lead word (e.g. a
+non-actionable phrase beginning with "how") from being misclassified. A turn
+neither rule resolves must be classified by exactly one call to an injected
+classification function backed by the configured LLM primary, capped at a few
+output tokens, using the fixed classification prompt (`02-architecture.md`
+3.6a); the component making this check (`CMP-05`) must not call an
+`LlmProvider` itself, consistent with its own
 "must not call an LLM provider directly" rule. A classifier failure of any kind
 (timeout, provider error, a response that is not cleanly one verdict) must
 resolve to actionable. A turn classified non-actionable must return to
 `LISTENING` exactly as a guard failure does: no card, no generation, no
-transcript entry. (ADR-045, ASM-015)
+transcript entry. A classification call is a real, billable LLM request; its
+token usage must reach the Cost Meter under a key that cannot collide with any
+generation's, the same "never silently understate spend" standard `FR-103`
+already holds usage accounting to. (ADR-045, ASM-015)
 
 **FR-113** This gate is checked immediately after `FR-051`'s guard and before
 `FR-111`'s actionability classification, so a turn garbled enough to fail it is
 never also paid for with a classification call. When the active STT model's
 registry entry sets `supportsConfidence: true` (`FR-112`), a turn must not fire
 if the **last** final transcript segment received before the turn-end gap
-elapsed carries a `confidence` below a fixed threshold. A turn suppressed this
-way must return to `LISTENING` exactly as a guard failure does. A model with
+elapsed carries a `confidence` below a fixed threshold (not a `Settings`
+field; see `ASM-016`). A turn suppressed this way must return to `LISTENING`
+exactly as a guard failure does. A model with
 `supportsConfidence: false` is unaffected: the comparison must not be evaluated
 at all, not evaluated and passing. (ADR-046, ASM-016)
 
@@ -374,13 +385,21 @@ provider request, not merely stop reading it.
 **FR-076** The overlay must never show an error card. Provider failures are
 reported only through the Dashboard status badge. (`FR-100`)
 
-**FR-114** `firedAt`, the epoch millisecond the turn-end gap elapsed and the
-guard chain began (`FR-051` through `FR-111`), must be captured once and
-carried through into `TurnFired` unchanged, so it measures true
-turn-end-to-now including whatever the classifier and confidence gate
-themselves cost. Immediately before a generation would be sent to the overlay
+**FR-114** `firedAt`, the epoch millisecond `FR-051`'s guard passes, must be
+captured once, before the confidence gate (`FR-113`) or the actionability
+classifier (`FR-111`) run, and carried through into `TurnFired` unchanged (or
+discarded, if the confidence gate or classifier goes on to suppress the turn),
+so it measures true turn-end-to-now including whatever the confidence gate and
+classifier themselves cost. The same moment must also abort whatever async
+operation — a previous turn's classification or generation — is currently in
+flight, unconditionally, before the new turn's own confidence gate or
+classifier runs (`FR-054`); this is what keeps "a suppressed turn returns to
+`LISTENING` exactly as a guard failure does" (`FR-111`, `FR-113`)
+unambiguous — there is never a competing in-flight operation left over by the
+time a suppression verdict is reached. Immediately before a generation would be
+sent to the overlay
 (`suggestion:begin`), the elapsed time since `firedAt` must be checked against a
-fixed threshold. Over the threshold, the generation must not reach the overlay
+fixed threshold (not a `Settings` field; see `ASM-017`). Over the threshold, the generation must not reach the overlay
 at all: no `suggestion:begin`, no `suggestion:line`, no `suggestion:end`. It
 must still be recorded in the transcript, with status `'stale'`, a value
 distinct from `'cancelled'` so a slow, unanswered generation is never confused
@@ -507,10 +526,14 @@ elapses, in arrival order and at their original relative spacing, not
 compressed into a single instant, so the per-bullet reveal (`FR-092`) still
 applies to a card that was held. A `suggestion:end` with `status: 'cancelled'`
 for a generation still waiting out the hold must discard it rather than display
-it once the hold elapses. A pause (`FR-053`) must clear the renderer's notion of
-"a card is currently shown," so the first suggestion after resume is not held.
-Whenever no card is currently shown — the first suggestion of a session, or the
-first one after a pause — the hold does not apply. (ADR-049, ASM-018)
+it once the hold elapses. A pause (`FR-053`) must both clear the renderer's
+notion of "a card is currently shown" and discard any events currently
+queued, whatever their status — nothing paused should surface once resumed,
+including a generation that had already completed while queued. A session
+boundary (a `'reset'` card event) must bypass the hold entirely and dispatch
+immediately, clearing anything queued; a session boundary is never held.
+Whenever no card is currently shown — the first suggestion of a session, or
+the first one after a pause — the hold does not apply. (ADR-049, ASM-018)
 
 ---
 

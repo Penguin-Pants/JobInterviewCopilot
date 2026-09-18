@@ -1080,7 +1080,7 @@ specified but can be changed cheaply before build starts.
 | ASM-007 | Turn-end silence gap defaults to 800 ms, user-adjustable 500 to 1500 ms | `FR-050` | Low |
 | ASM-008 | A turn shorter than 3 words or 12 characters does not fire a suggestion | `FR-051` | Low |
 | ASM-009 | Candidate context window is the last 2 candidate turns, capped at 400 characters | `FR-052` | Low |
-| ASM-010 | ~~Overlay holds 3 suggestion cards, oldest fades out on the 4th~~ **Superseded by `ADR-047`.** The overlay holds exactly 1 card; a new suggestion replaces it | `FR-091` | Low, the reducer's existing cap collapses to this behavior at `MAX_CARDS = 1` |
+| ASM-010 | ~~Overlay holds 3 suggestion cards, oldest fades out on the 4th~~ **Superseded by `ADR-047`.** The overlay holds exactly 1 card; a new suggestion replaces it. `MAX_CARDS` is removed as a named constant, not set to 1 (`TASK-063`) | `FR-091` | Low |
 | ASM-011 | Cost estimates use a hard-coded price table shipped with the app, versioned and shown with an "estimate" label | `FR-103` | Medium, needs a table per provider |
 | ASM-012 | Session History retains transcripts indefinitely until the user deletes them. No auto-purge, no size cap, and the files are plaintext JSON. Transcripts are the most sensitive user data in the product and get less protection than the API keys. Escalated to **OQ-001** | `FR-101` | Medium, adds retention UI. High if encryption at rest is added |
 | ASM-013 | The app ships unsigned for v1. Code signing is a release-engineering follow-up | `NFR-013` | High, needs a certificate |
@@ -1600,15 +1600,15 @@ milestone found this to be the largest source of suggestions that should not
 have appeared at all.
 
 **Decision.** A turn that passes `FR-051`'s guard and `FR-113`'s confidence gate
-is classified before it is allowed to fire:
-- A fixed, exported lexicon (`ACTIONABLE_LEADS`, `NON_ACTIONABLE_PHRASES`, see
-  `FR-111`) resolves the common cases with no network call: a `?` anywhere in
-  the text, or a case-insensitive match **at the start** of the trimmed text
-  against `ACTIONABLE_LEADS`, fires immediately. A case-insensitive **exact**
-  match of the **whole trimmed turn** against `NON_ACTIONABLE_PHRASES`
-  suppresses immediately.
-- Anything neither rule resolves gets exactly one classification call, capped
-  at a few output tokens, before the turn is allowed to fire.
+is classified before it is allowed to fire, checked in this exact order:
+1. A case-insensitive **exact** match of the **whole trimmed turn** against a
+   fixed `NON_ACTIONABLE_PHRASES` lexicon suppresses immediately, no network
+   call.
+2. A `?` anywhere in the text, or a case-insensitive match **at the start** of
+   the trimmed text against a fixed `ACTIONABLE_LEADS` lexicon, fires
+   immediately, no network call.
+3. Anything neither rule resolves gets exactly one classification call, capped
+   at a few output tokens, before the turn is allowed to fire.
 - A classifier failure (timeout, provider error, a response that is not
   cleanly one verdict) resolves to **fire**, never to suppress. `NFR-009`'s
   resilience policy already fails a live session toward continuing, not toward
@@ -1616,17 +1616,32 @@ is classified before it is allowed to fire:
   appeared costs a glance, a missing one that should have costs the candidate
   an unaided answer to a question this tool exists to help with.
 
-**The two lexicons are matched asymmetrically on purpose, corrected during the
-two-reviewer spec-consistency check before implementation began.** An earlier
-draft applied the same start-of-text match to both lists. That is safe for
-`ACTIONABLE_LEADS` — a false positive there only means an ordinary turn takes
-the same path it already would have (fire) — but not for
-`NON_ACTIONABLE_PHRASES`: a start-of-text match would let "Okay, so what's your
-expected salary range?" match "okay" and suppress a real, consequential
-question with no recourse, exactly the failure direction this ADR just ruled
-out for the LLM-confirm path. Requiring the whole trimmed turn to match closes
-that hole: a real question can never be long enough to exactly equal a
-five-word acknowledgement.
+**The two lexicons are matched asymmetrically, and the exact-match rule is
+checked first, both corrected during two-reviewer spec-consistency checks
+before implementation began.** An earlier draft applied the same
+start-of-text match to both lists. That is safe for `ACTIONABLE_LEADS` — a
+false positive there only means an ordinary turn takes the same path it
+already would have (fire) — but not for `NON_ACTIONABLE_PHRASES`: a
+start-of-text match there would let "Okay, so tell me about your salary
+expectations" match "okay" and suppress a real, consequential question with no
+recourse, exactly the failure direction this ADR just ruled out for the
+LLM-confirm path. (Real-time STT output frequently drops terminal
+punctuation, so a live transcript is exactly this shape — a question with no
+`?` at all — more often than a hand-typed example suggests; the exact-match
+rule, not the `?` check, is what actually protects this case.) Requiring the
+whole trimmed turn to match closes that hole: a real question can never be
+long enough to exactly equal a five-word acknowledgement.
+
+A second round of review then found the two example lexicons collided with
+each other under the original check order: `NON_ACTIONABLE_PHRASES` lists
+"how are you" as a canonical greeting, and "how" is also an `ACTIONABLE_LEADS`
+entry, so checking the lead-word list first would have classified "how are
+you" as `'actionable'` before the exact-match rule ever ran. Checking the
+exact, whole-turn `NON_ACTIONABLE_PHRASES` match **first** — as the numbered
+list above now states — removes the collision generally, for this pair and
+for any future lexicon addition, rather than patching the one instance: an
+exact match is more specific than a prefix match, and the more specific rule
+should always run first.
 
 **The classification call is injected, not called by the trigger.** `CMP-05`
 (`ai/trigger.ts`) may not "call an LLM provider directly" (section 1's
@@ -1641,19 +1656,61 @@ already legitimately called, and handed to the trigger at wiring time. `CMP-05`
 itself imports no LLM adapter and stays the pure, fake-timer-testable module
 `TASK-030` built.
 
-**A new state, `CLASSIFYING`, carries the wait.** The state machine (5.3) gains
-`AWAITING_TURN_END --gap elapsed, guard + confidence pass--> CLASSIFYING` and
-`CLASSIFYING --resolved 'actionable' or classifier failure--> GENERATING` /
-`CLASSIFYING --resolved 'non-actionable'--> LISTENING`. This is not cosmetic: an
-earlier draft left the classification call floating outside the diagram
-entirely, which left "a new interviewer turn arrives while classification for
-the previous one is still in flight" undefined. `CLASSIFYING` behaves exactly
-like `GENERATING` already does for this: a pending turn survives its
-predecessor (new text accumulates and arms its own gap timer), and a new turn's
-gap elapsing while still `CLASSIFYING` aborts the in-flight classification call
-before starting the guard chain over for the new text — the same
-`abortInFlight` the trigger already uses for `GENERATING`, now generic over
-"whichever async op is in flight," not only over a generation.
+**A new state, `CLASSIFYING`, carries the wait — and `firedAt`/the abort both
+happen at guard-pass, before the confidence gate or the classifier ever run.**
+The state machine (5.3) gains one guard-pass transition that: stamps `firedAt`
+(`FR-114`); aborts whatever async operation (a previous classification or a
+previous generation) is currently in flight, if any (`FR-054`); and only then
+runs the confidence gate, which either returns to `LISTENING` (discarding the
+`firedAt` just stamped) or proceeds into `CLASSIFYING`. `CLASSIFYING` itself
+then resolves to `GENERATING` (actionable, or a classifier failure failing
+open) or back to `LISTENING` (non-actionable).
+
+**This ordering was corrected during the second round of spec-consistency
+review, for two reasons together.** First, an earlier draft stamped `firedAt`
+and entered `CLASSIFYING` only *after* the confidence gate had already passed
+— which meant `firedAt` could not include the confidence gate's own cost,
+directly contradicting `ADR-048`'s stated intent that it measure true
+turn-end-to-now. Stamping it at guard-pass, before the confidence gate runs,
+fixes that by construction. Second, an earlier draft left unstated whether a
+new turn aborts old work before or after its own classification resolves —
+`FR-054`'s existing "a new turn end cancels an in-flight generation" is
+unconditional, not conditional on what the new turn turns out to be. Moving
+the abort to guard-pass, before confidence or classification, preserves that:
+by the time `CLASSIFYING`'s own verdict determines whether to fire, there is
+never a competing in-flight operation left to reconcile, so "a suppressed turn
+returns to `LISTENING` exactly as a guard failure does" (`FR-111`, `FR-113`) is
+unambiguous in every case, not just some of them. This is also exactly the
+timing the trigger used before this milestone (`abortInFlight()` was always
+called immediately after the guard passed, before firing) — `CLASSIFYING` is
+inserted between that existing abort and the eventual fire, not around it.
+
+A short interjection that **fails** the word/character guard (`FR-051`) is
+unaffected by any of this and behaves exactly as before: nothing is stamped,
+nothing is aborted, and an in-flight classification or generation is left
+running (`TC-086`'s existing "a short interjection during a generation
+neither cancels it nor changes state" still holds, now also true for a short
+interjection during `CLASSIFYING`).
+
+`CLASSIFYING` behaves exactly like `GENERATING` already does for a pending
+successor: a pending turn survives its predecessor (new text accumulates and
+arms its own gap timer), and a new turn's gap elapsing while a previous turn
+is still `CLASSIFYING` runs the same guard-pass transition described above —
+the same `abortInFlight` the trigger already uses for `GENERATING`, now
+generic over "whichever async op is in flight," not only over a generation.
+
+**The classification call's own cost is accounted, not silently dropped.**
+`live.ts`'s `classify` closure calls `cost.noteGeneration` for its own token
+usage before returning the verdict to the trigger, under a key distinct from
+any generation's (`ADR-036`'s `<generationId>#<attempt>` scheme does not apply
+to a call with no `generationId` yet). `ADR-033` already commits this project
+to never showing a spend estimate that silently understates real usage; an
+LLM-confirm call is a real, billable request the moment the heuristic cannot
+resolve a turn, so it is accounted the same way.
+
+**The classification prompt is fixed and given in full, the same discipline
+section 6 already holds the suggestion prompt to.** See `02-architecture.md`
+section 3.6a.
 
 **Reason.** Heuristic-only was rejected: a fixed lexicon cannot cover a
 paraphrased question ("so what would you say is, like, your biggest gap"), and

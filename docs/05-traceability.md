@@ -9,7 +9,7 @@ so a requirement could report coverage with no test that would fail if it
 broke. The script exits non-zero on any gap, so CI fails when the documents
 drift.
 
-Coverage: 113 requirements, 32 tasks, 142 automated test cases, 15 manual checks.
+Coverage: 113 requirements, 32 tasks, 143 automated test cases, 15 manual checks.
 
 ## Requirement to task to test
 
@@ -109,7 +109,7 @@ Coverage: 113 requirements, 32 tasks, 142 automated test cases, 15 manual checks
 | FR-112 | TASK-061 | TC-171 |
 | FR-113 | TASK-061 | TC-170 |
 | FR-114 | TASK-062 | TC-172, TC-173 |
-| FR-115 | TASK-064 | TC-174, TC-175 |
+| FR-115 | TASK-064 | TC-174, TC-175, TC-176 |
 | NFR-001 | TASK-012, TASK-050 | TC-133, MW-06, MW-13 |
 | NFR-002 | TASK-011, TASK-050 | TC-042, TC-137 |
 | NFR-003 | TASK-004 | TC-022, TC-023, TC-139 |
@@ -163,5 +163,5 @@ Coverage: 113 requirements, 32 tasks, 142 automated test cases, 15 manual checks
 | TASK-060 | Actionability filter | FR-111, NFR-018 | TC-167, TC-168, TC-169 |
 | TASK-061 | STT confidence capability and gate | FR-112, FR-113 | TC-170, TC-171 |
 | TASK-062 | Stale-suggestion discard | FR-114 | TC-172, TC-173 |
-| TASK-063 | Single-card overlay | FR-091 | TC-006, TC-111 |
-| TASK-064 | Card hold buffer | FR-115 | TC-174, TC-175 |
+| TASK-063 | Single-card overlay | FR-091 | TC-111 |
+| TASK-064 | Card hold buffer | FR-115 | TC-174, TC-175, TC-176 |

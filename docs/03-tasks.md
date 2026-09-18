@@ -1837,43 +1837,61 @@ section 8).
 
 ### TASK-060 Actionability filter
 **Traces** FR-111, NFR-018, ASM-015
-**Depends on** TASK-030, TASK-032, TASK-061
+**Depends on** TASK-030, TASK-032, TASK-044, TASK-061
 **Acceptance criteria**
-- A turn that passes `FR-051`'s guard and `TASK-061`'s confidence gate enters
-  the new `CLASSIFYING` state (`02-architecture.md` 5.3) before `evaluateTurn`
-  fires a generation. A `?` anywhere in the turn text, or a case-insensitive
-  match **at the start** of the trimmed text against `ACTIONABLE_LEADS`,
-  resolves `'actionable'` with no network call. A case-insensitive match of
-  **the entire trimmed turn**, not a prefix, against `NON_ACTIONABLE_PHRASES`
-  resolves `'non-actionable'` with no network call — a start-of-text match on
-  this list is a defect, not a stricter variant: it would classify "Okay, so
-  what's your expected salary range?" as non-actionable.
+- The moment `FR-051`'s guard passes, `firedAt` is stamped and whatever async
+  op (a previous classification or generation) is in flight is aborted,
+  unconditionally, before `TASK-061`'s confidence gate or this task's
+  classifier run (`02-architecture.md` 5.2/5.3). Only once the confidence gate
+  also passes does the turn enter the new `CLASSIFYING` state.
+- Checked in this order (the order matters, see the next bullet): a
+  case-insensitive match of **the entire trimmed turn**, not a prefix, against
+  `NON_ACTIONABLE_PHRASES` resolves `'non-actionable'` with no network call.
+  Only if that does not match: a `?` anywhere in the turn text, or a
+  case-insensitive match **at the start** of the trimmed text against
+  `ACTIONABLE_LEADS`, resolves `'actionable'` with no network call.
+- The exact-match rule against `NON_ACTIONABLE_PHRASES` must be checked
+  **before** the prefix-match rule against `ACTIONABLE_LEADS`, not after: the
+  seed `NON_ACTIONABLE_PHRASES` entry "how are you" also starts with "how", an
+  `ACTIONABLE_LEADS` entry, so checking the lead-word list first would
+  misclassify it as actionable. A start-of-text match on `NON_ACTIONABLE_PHRASES`
+  is a defect regardless of order — it would classify "Okay, so tell me about
+  your salary expectations" (no question mark, as a live transcript often
+  reads) as non-actionable.
 - `src/main/ai/actionability.ts` exports `ACTIONABLE_LEADS`,
   `NON_ACTIONABLE_PHRASES` and `classifyHeuristically` with **no import of
   `LlmProvider` or anything network-capable** — `CMP-05` (`ai/trigger.ts`) may
   not "call an LLM provider directly" (`02-architecture.md` section 1), and
   this file is what `trigger.ts` is allowed to import.
 - `classifyWithLlm(text, llm, signal)`, the LLM-backed half, also lives in
-  `actionability.ts` but is imported and called only from `live.ts` (`CMP-15`).
-  `TriggerOptions` gains `classify: (text, signal) => Promise<ActionabilityVerdict>`;
+  `actionability.ts` but is imported and called only from `live.ts` (`CMP-15`),
+  using the fixed classification prompt and the `GenerationRequest.promptOverride`
+  field (`02-architecture.md` 3.2, 3.6a) — not the fixed interview-cue system
+  prompt. `TriggerOptions` gains `classify: (text, signal) => Promise<ActionabilityVerdict>`;
   `live.ts` constructs it as a closure over the configured LLM primary and
   passes it in at wiring time, the same pattern `onFire` already is.
   `trigger.ts` calls `this.options.classify(...)` only when
   `classifyHeuristically` returns `null`; it never imports `classifyWithLlm`
   or `LlmProvider` itself.
-- A turn neither rule resolves calls `this.options.classify`, capped output
-  tokens, temperature 0, sharing the turn's own `AbortController` (the same
-  controller stamps `firedAt`, `TASK-062`).
+- `live.ts`'s `classify` closure reports the call's own `TokenUsage` to the
+  Cost Meter (`cost.noteGeneration`) under a key that cannot collide with any
+  generation's, before resolving the verdict to the trigger — a classification
+  call is real, billable spend and must not be silently dropped from the
+  session estimate (`FR-103`).
+- A turn neither rule resolves calls `this.options.classify`, sharing the
+  turn's own `AbortController` (the same controller `firedAt` was stamped
+  alongside, `TASK-062`).
 - A classifier failure of any kind — timeout, provider error, a response that
   is not cleanly `'actionable'` or `'non-actionable'` — resolves to
   `'actionable'`.
 - A turn classified `'non-actionable'` returns to `LISTENING` with no card, no
   generation and no transcript entry: the same path a `FR-051` guard failure
   already takes, not a new one.
-- A new turn's gap elapsing while a previous turn is still `CLASSIFYING` aborts
-  the in-flight classification (via its `AbortController`) before the guard
-  chain restarts for the new, combined text — `abortInFlight` generalized to
-  "whichever async op is in flight," not specific to a generation.
+- A new turn's gap elapsing while a previous turn is still `CLASSIFYING` runs
+  the same guard-pass sequence as any other new turn (abort first, then
+  confidence, then classification for the new text) — `abortInFlight`
+  generalized to "whichever async op is in flight," not specific to a
+  generation.
 - `actionability.ts`'s heuristic half is a pure module with no Electron
   import, matching the trigger's own module boundary (`TASK-030`).
 - The LLM-confirm path adds no more than 400 ms at p95 to the existing latency
@@ -1915,11 +1933,14 @@ section 8).
 **Traces** FR-114
 **Depends on** TASK-030, TASK-032, TASK-044, TASK-060, TASK-061
 **Acceptance criteria**
-- `TurnFired` carries `firedAt`, an epoch millisecond captured **once, when the
-  turn-end gap elapses and `FR-051`'s guard passes** (the moment the guard
-  chain begins, i.e. entry to `CLASSIFYING`), and carried through unchanged —
-  never re-stamped when `GENERATING` is finally entered. It must measure true
-  turn-end-to-now, confidence gate and classifier included.
+- `TurnFired` carries `firedAt`, an epoch millisecond captured **once, the
+  moment `FR-051`'s guard passes** — before `TASK-061`'s confidence gate or
+  `TASK-060`'s classifier run, not at entry to `CLASSIFYING` and not when
+  `GENERATING` is finally entered — and carried through unchanged (or
+  discarded, if the confidence gate or classifier goes on to suppress the
+  turn). It must measure true turn-end-to-now, confidence gate and classifier
+  cost included, which is only possible because it is stamped before either
+  runs.
 - Immediately before `CMP-15` would call `onSuggestion` for `suggestion:begin`,
   it checks `Date.now() - firedAt` against `STALE_DISCARD_MS` (20000). Over the
   threshold, no `onSuggestion` call is made for `begin`, `line` or `end` — the
@@ -1954,19 +1975,25 @@ section 8).
 - Every existing test asserting the 3-card cap, depth-dimming values, or
   eviction-fade timing is removed or rewritten for the 1-card behavior.
   `TC-111` is redefined in place for the single-card behavior, not retired.
-- `TC-006`'s clip-from-the-top layout logic (`FR-081`'s amendment) is
-  re-verified against a single card; the default overlay height, sized in
-  `TASK-005`/`TASK-052` to fit three cards of five lines, is re-measured
-  against one card's worst case and reduced if the existing default now leaves
-  most of the window empty. The exact value is confirmed by `TC-006`, not
-  fixed by this document.
+- **Advisory, not a blocking criterion, and not traced to `FR-091` or any
+  other requirement in this milestone:** the default overlay height, sized in
+  `TASK-005`/`TASK-052` to fit three cards of five lines, is worth
+  re-measuring against one card's worst case and reducing if the existing
+  default now leaves most of the window empty. No test in this milestone
+  verifies it — `04-test-strategy.md`'s own definition of `TC-006` is "consent
+  reminder precedes the first suggestion," not layout, despite `TASK-043`'s
+  history citing it for exactly this kind of geometry claim (a pre-existing
+  mismatch this task does not attempt to fix). If this task's implementer
+  does resize the default, it needs its own new test case and requirement
+  trace, added in the same change (DoD 9); if not, no requirement here demands
+  it.
 - A returning user's own resized overlay is untouched: `overlayWindow.width`/
   `height` are only ever `null` (pick up whatever the default is) or an
   explicit number the user or a prior default set (`02-architecture.md` 2.1).
   Lowering the default changes what a stored `null` resolves to; it does not
   touch a stored number. No migration step is needed beyond shipping the new
   default.
-**Verified by** TC-111, TC-006
+**Verified by** TC-111
 
 ### TASK-064 Card hold buffer
 **Traces** FR-115, ASM-018
@@ -1985,8 +2012,14 @@ section 8).
 - A `suggestion:end` with `status: 'cancelled'` for a `generationId` still
   queued discards that generation's queued entries; nothing from it ever
   dispatches.
-- A pause (`CH-212 overlay:mode`) clears the buffer's notion of "a card is
-  currently shown," so the first suggestion after resume is not held.
+- A `'reset'` event (session boundary) bypasses the buffer entirely — it
+  dispatches immediately and clears anything queued, never held, matching how
+  `reduceCards` itself treats a session boundary as unconditional.
+- A pause (`CH-212 overlay:mode`) both clears the buffer's notion of "a card is
+  currently shown" **and** discards everything currently queued, regardless of
+  that generation's eventual status — a generation that finished streaming
+  while queued must not surface after the session resumes, the same as one
+  still mid-stream when the pause arrived.
 - Whenever no card is currently shown — the first suggestion of a session, or
   the first one after a pause — the hold does not apply.
-**Verified by** TC-174, TC-175
+**Verified by** TC-174, TC-175, TC-176
