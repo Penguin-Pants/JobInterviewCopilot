@@ -10,6 +10,7 @@
  * operates it without a key handler of its own (NFR-010, TC-124).
  */
 import { useEffect, useState, type JSX } from 'react';
+import { contrastRatio, parseHex } from '../../shared/color.js';
 import { call } from './call.js';
 import { CompanyProfiles } from './sections/CompanyProfiles.js';
 import { ConsentReminder } from './sections/ConsentReminder.js';
@@ -28,6 +29,19 @@ const REFUSALS: Record<string, string> = {
   'stt-key-missing': 'The speech-to-text key is missing. Add it in Provider Setup.',
   'llm-key-missing': 'The language model key is missing. Add it in Provider Setup.',
 };
+
+/**
+ * White, or the Dashboard's own dark text colour, whichever reads better on
+ * the chosen accent. The accent is user-editable (Overlay and appearance),
+ * so button text cannot assume white will always hold against it.
+ */
+function accentForeground(accentHex: string): string {
+  const accent = parseHex(accentHex);
+  if (!accent) return '#ffffff';
+  const white = { r: 255, g: 255, b: 255 };
+  const dark = { r: 22, g: 22, b: 26 }; // #16161a, this file's own --text.
+  return contrastRatio(accent, white) >= contrastRatio(accent, dark) ? '#ffffff' : '#16161a';
+}
 
 function streamText(state: StreamState): string {
   switch (state) {
@@ -63,7 +77,10 @@ export function Dashboard(): JSX.Element {
     const root = document.documentElement;
     if (mode === 'system') delete root.dataset.theme;
     else root.dataset.theme = mode;
-    if (data.settings) root.style.setProperty('--accent', data.settings.theme.accent);
+    if (data.settings) {
+      root.style.setProperty('--accent', data.settings.theme.accent);
+      root.style.setProperty('--accent-foreground', accentForeground(data.settings.theme.accent));
+    }
   }, [data.settings]);
 
   async function startSession(): Promise<void> {

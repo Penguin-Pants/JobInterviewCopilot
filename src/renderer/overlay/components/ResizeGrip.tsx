@@ -1,4 +1,10 @@
-import { useCallback, useRef, type JSX, type PointerEvent as ReactPointerEvent } from 'react';
+import {
+  useCallback,
+  useRef,
+  type JSX,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from 'react';
 import { SETTINGS_LIMITS } from '../../../shared/defaults.js';
 
 /**
@@ -28,6 +34,9 @@ export interface ResizeGripProps {
 }
 
 const LIMITS = SETTINGS_LIMITS;
+
+/** One arrow-key press, in pixels. There is no drag to derive a step from. */
+const KEYBOARD_STEP_PX = 20;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.round(Math.min(max, Math.max(min, value)));
@@ -84,6 +93,45 @@ export function ResizeGrip({ onResize }: ResizeGripProps): JSX.Element {
     }
   }, []);
 
+  /**
+   * The grip used to be pointer-only, which left resizing entirely
+   * unreachable from the keyboard (NFR-010). Arrow keys step both dimensions
+   * from the current window size, the same values a drag would end on, and
+   * are clamped through the same `LIMITS` a drag is.
+   */
+  const onKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      let dx = 0;
+      let dy = 0;
+      switch (event.key) {
+        case 'ArrowRight':
+          dx = KEYBOARD_STEP_PX;
+          break;
+        case 'ArrowLeft':
+          dx = -KEYBOARD_STEP_PX;
+          break;
+        case 'ArrowDown':
+          dy = KEYBOARD_STEP_PX;
+          break;
+        case 'ArrowUp':
+          dy = -KEYBOARD_STEP_PX;
+          break;
+        default:
+          return;
+      }
+      event.preventDefault();
+      onResize({
+        width: clamp(window.innerWidth + dx, LIMITS.overlayWidthPx.min, LIMITS.overlayWidthPx.max),
+        height: clamp(
+          window.innerHeight + dy,
+          LIMITS.overlayHeightPx.min,
+          LIMITS.overlayHeightPx.max,
+        ),
+      });
+    },
+    [onResize],
+  );
+
   return (
     <div
       data-testid="overlay-resize-grip"
@@ -93,12 +141,14 @@ export function ResizeGrip({ onResize }: ResizeGripProps): JSX.Element {
       className="overlay-resize-grip"
       role="separator"
       aria-orientation="vertical"
-      aria-label="Resize the overlay"
+      aria-label="Resize the overlay. Arrow keys resize; drag for free resizing."
       title="Drag to resize"
+      tabIndex={0}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
+      onKeyDown={onKeyDown}
     />
   );
 }

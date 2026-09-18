@@ -49,7 +49,9 @@ export function FontSizeControl({ fontSizePx, onChange }: FontSizeControlProps):
   // changes would take the most room exactly when there is least of it.
   const button =
     'rounded-md px-2 py-0.5 text-[12px] leading-none disabled:opacity-40 ' +
-    'border border-[var(--overlay-border)] text-[var(--overlay-text)]';
+    'border border-[var(--overlay-border)] text-[var(--overlay-text)] ' +
+    'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 ' +
+    'focus-visible:outline-[var(--overlay-accent)]';
 
   return (
     <div
@@ -64,7 +66,7 @@ export function FontSizeControl({ fontSizePx, onChange }: FontSizeControlProps):
       */}
       <div
         data-testid="font-size-surface"
-        className="overlay-surface flex items-center gap-1 rounded-lg px-1.5 py-1"
+        className="overlay-surface flex items-center gap-1 rounded-lg px-1.5 py-1 shadow-lg"
       >
         <button
           type="button"

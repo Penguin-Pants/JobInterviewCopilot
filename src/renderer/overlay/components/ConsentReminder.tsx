@@ -65,7 +65,7 @@ export function ConsentReminder({
           type="button"
           data-testid="consent-dismiss"
           data-no-drag="true"
-          className="rounded-md border border-[var(--overlay-border)] px-2 py-0.5 text-[12px] leading-none text-[var(--overlay-text)]"
+          className="rounded-md border border-[var(--overlay-border)] px-2 py-0.5 text-[12px] leading-none text-[var(--overlay-text)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--overlay-accent)]"
           onClick={onDismiss}
         >
           Got it

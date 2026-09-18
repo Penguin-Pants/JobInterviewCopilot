@@ -1,4 +1,7 @@
+import { contrastRatio, parseHex, relativeLuminance, toCss, type Rgb } from '../../shared/color.js';
 import type { OverlayTranslucency, Settings, ThemeMode } from '../../shared/types.js';
+
+export { contrastRatio, parseHex, relativeLuminance, toCss, type Rgb };
 
 /**
  * The overlay's colour resolution and its contrast guarantee (FR-085, FR-093,
@@ -42,13 +45,6 @@ export const WORST_CASE_BACKDROPS: readonly Rgb[] = [
   { r: 255, g: 255, b: 255 },
 ];
 
-/** An 8-bit sRGB colour. */
-export interface Rgb {
-  r: number;
-  g: number;
-  b: number;
-}
-
 /** `ThemeMode` after `system` has been resolved against the host preference. */
 export type ResolvedMode = 'light' | 'dark';
 
@@ -79,46 +75,6 @@ export const OVERLAY_PALETTES: Readonly<Record<ResolvedMode, OverlayPalette>> = 
     border: { r: 202, g: 202, b: 214 },
   },
 };
-
-/** Parse `#rgb` or `#rrggbb`. Returns null rather than guessing (FR-029). */
-export function parseHex(hex: string): Rgb | null {
-  const value = hex.trim().replace(/^#/, '');
-  if (!/^[0-9a-fA-F]{3}$|^[0-9a-fA-F]{6}$/.test(value)) return null;
-  const full =
-    value.length === 3
-      ? value
-          .split('')
-          .map((c) => c + c)
-          .join('')
-      : value;
-  return {
-    r: Number.parseInt(full.slice(0, 2), 16),
-    g: Number.parseInt(full.slice(2, 4), 16),
-    b: Number.parseInt(full.slice(4, 6), 16),
-  };
-}
-
-/** `rgb(r g b)`, the form the CSS custom properties carry. */
-export function toCss(color: Rgb): string {
-  return `rgb(${Math.round(color.r)} ${Math.round(color.g)} ${Math.round(color.b)})`;
-}
-
-/** WCAG 2.1 relative luminance of an sRGB colour. */
-export function relativeLuminance(color: Rgb): number {
-  const channel = (raw: number): number => {
-    const c = raw / 255;
-    return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
-  };
-  return 0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b);
-}
-
-/** WCAG 2.1 contrast ratio. Order of the arguments does not matter. */
-export function contrastRatio(a: Rgb, b: Rgb): number {
-  const la = relativeLuminance(a);
-  const lb = relativeLuminance(b);
-  const [light, dark] = la >= lb ? [la, lb] : [lb, la];
-  return (light + 0.05) / (dark + 0.05);
-}
 
 /** Source-over compositing of `color` at `alpha` onto an opaque `backdrop`. */
 export function compositeOver(color: Rgb, alpha: number, backdrop: Rgb): Rgb {
