@@ -24,6 +24,7 @@
  */
 import type {
   AudioChunk,
+  HealthState,
   ProviderChoice,
   Settings,
   TranscriptEvent,
@@ -106,7 +107,14 @@ export interface LiveSessionLoopOptions {
   >;
   sessions: Pick<SessionManager, 'appendTurn' | 'appendSuggestion'>;
   cost: Pick<CostMeter, 'noteAudio' | 'noteGeneration'>;
-  health: Pick<ProviderHealthRegistry, 'runFor'> & Partial<Pick<ProviderHealthRegistry, 'for'>>;
+  /**
+   * The health machine. `for` is **required**, not optional: the classifier
+   * reads the LLM primary's state through it, and an omitted `for` silently
+   * disabled the classifier through an optional chain rather than failing.
+   */
+  health: Pick<ProviderHealthRegistry, 'runFor'> & {
+    for: (capability: 'stt' | 'llm') => { current: HealthState };
+  };
   /** The current settings, read at each start rather than captured once. */
   settings: () => Settings;
   /** `RagEngine.query`, narrowed to what the loop needs (`CMP-06`). */
@@ -595,7 +603,7 @@ export class LiveSessionLoop {
   ): Promise<ActionabilityVerdict> {
     const settings = this.options.settings();
     const primary = this.resolveLlm(settings.providers.llm.primary, 'primary');
-    if (!primary || this.options.health.for?.('llm').current.kind !== 'using-primary') {
+    if (!primary || this.options.health.for('llm').current.kind !== 'using-primary') {
       return 'actionable';
     }
 

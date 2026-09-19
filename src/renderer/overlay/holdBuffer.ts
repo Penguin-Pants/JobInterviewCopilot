@@ -110,7 +110,15 @@ export class HoldBuffer {
     if (event.kind === 'begin') {
       this.shownId = event.payload.generationId;
       this.shownAt = this.now();
-    } else if (event.kind === 'end' && event.payload.status === 'cancelled') {
+    } else if (
+      event.kind === 'end' &&
+      event.payload.status === 'cancelled' &&
+      event.payload.generationId === this.shownId
+    ) {
+      // Only the shown card's own cancellation clears "a card is shown".
+      // Without the id check, a cancelled `end` for a generation that is
+      // neither shown nor queued dropped hold protection for the card really
+      // on screen, and the next replacement took it away with no hold.
       this.shownId = null;
     }
   }

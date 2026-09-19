@@ -613,3 +613,185 @@ describe('session lifecycle', () => {
     expect(h.fired).toHaveLength(1);
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * TASK-060. The classifier the machine calls but does not own.
+ * ------------------------------------------------------------------ */
+
+/**
+ * A turn neither lexicon resolves, so `evaluateTurn` has to ask the injected
+ * classifier. No `?`, no lead word at the start, and not an exact match against
+ * a non-actionable phrase (`TC-167`).
+ */
+const UNRESOLVED = 'I was reading your resume on the train last night';
+const UNRESOLVED_TWO = 'My colleague mentioned the migration you led at Acme';
+
+interface ClassifierHarness extends Harness {
+  /** One entry per `classify` call, with the signal it was handed. */
+  calls: { text: string; signal: AbortSignal }[];
+  /** Settle the nth call, in the order they were made. */
+  resolve: (index: number, verdict: 'actionable' | 'non-actionable') => void;
+  reject: (index: number, reason: Error) => void;
+}
+
+function classifierHarness(over: Partial<TriggerConfig> = {}): ClassifierHarness {
+  const calls: { text: string; signal: AbortSignal }[] = [];
+  const settlers: {
+    resolve: (v: 'actionable' | 'non-actionable') => void;
+    reject: (e: Error) => void;
+  }[] = [];
+  const fired: TurnFired[] = [];
+  const states: TriggerState[] = [];
+
+  const h: ClassifierHarness = {
+    calls,
+    fired,
+    states,
+    idleCards: 0,
+    resolve: (index, verdict) => settlers[index]?.resolve(verdict),
+    reject: (index, reason) => settlers[index]?.reject(reason),
+    trigger: new TriggerMachine({
+      config: config(over),
+      onFire: (turn) => fired.push(turn),
+      onStateChange: (state) => states.push(state),
+      onOverlayIdle: () => {
+        h.idleCards += 1;
+      },
+      newGenerationId: () => `gen-${String(fired.length + calls.length + 1)}`,
+      // Deliberately never settles on its own: every case below decides when,
+      // and in what order, a classification comes back.
+      classify: (text, signal) =>
+        new Promise((resolve, reject) => {
+          calls.push({ text, signal });
+          settlers.push({ resolve, reject });
+        }),
+    }),
+  };
+  h.trigger.start();
+  return h;
+}
+
+/**
+ * TC-178. `abortInFlight` is "whichever async op is in flight", not "the
+ * generation". Mirrors `TC-086`'s abort-during-`GENERATING` case, extended to
+ * the state this milestone added.
+ */
+describe('TC-178 a new turn end during CLASSIFYING aborts the classification', () => {
+  it('aborts the previous call before the new turn asks its own question', async () => {
+    const h = classifierHarness();
+    const callsAtAbort: number[] = [];
+
+    h.trigger.handleTranscript(event({ text: UNRESOLVED }));
+    await vi.advanceTimersByTimeAsync(GAP);
+
+    expect(h.trigger.current).toBe('CLASSIFYING');
+    expect(h.calls).toHaveLength(1);
+    const first = h.calls[0]!;
+    expect(first.signal.aborted).toBe(false);
+    // The ordering claim: at the moment of the abort, the new turn has not run
+    // its own guard chain yet, so no second classification exists.
+    first.signal.addEventListener('abort', () => callsAtAbort.push(h.calls.length));
+
+    h.trigger.handleTranscript(event({ text: UNRESOLVED_TWO }));
+    await vi.advanceTimersByTimeAsync(GAP);
+
+    expect(first.signal.aborted).toBe(true);
+    expect(callsAtAbort).toEqual([1]);
+    expect(h.calls).toHaveLength(2);
+    expect(h.calls[1]?.text).toBe(UNRESOLVED_TWO);
+    expect(h.calls[1]?.signal.aborted).toBe(false);
+    expect(h.trigger.current).toBe('CLASSIFYING');
+    // Nothing fired: the first turn was superseded and the second is still out.
+    expect(h.fired).toEqual([]);
+  });
+
+  it('aborts a classification when the session stops or pauses, too', async () => {
+    const h = classifierHarness();
+    h.trigger.handleTranscript(event({ text: UNRESOLVED }));
+    await vi.advanceTimersByTimeAsync(GAP);
+    h.trigger.pause();
+    expect(h.calls[0]?.signal.aborted).toBe(true);
+
+    const stopping = classifierHarness();
+    stopping.trigger.handleTranscript(event({ text: UNRESOLVED }));
+    await vi.advanceTimersByTimeAsync(GAP);
+    stopping.trigger.stop();
+    expect(stopping.calls[0]?.signal.aborted).toBe(true);
+  });
+});
+
+/**
+ * TC-183. An aborted classification settles whenever the promise underneath it
+ * happens to settle, which is not the instant the signal fired. The machine
+ * has already moved past that turn by then, so the late settlement is
+ * discarded against the in-flight marker, exactly as a stale generation
+ * settlement already is (`noteGenerationSettled`).
+ */
+describe('TC-183 an aborted classification settles into nothing', () => {
+  it('produces no TurnFired when it resolves actionable after being superseded', async () => {
+    const h = classifierHarness();
+
+    h.trigger.handleTranscript(event({ text: UNRESOLVED }));
+    await vi.advanceTimersByTimeAsync(GAP);
+    h.trigger.handleTranscript(event({ text: UNRESOLVED_TWO }));
+    await vi.advanceTimersByTimeAsync(GAP);
+    expect(h.calls[0]?.signal.aborted).toBe(true);
+
+    // The superseded call comes back long after the guard-pass that killed it.
+    h.resolve(0, 'actionable');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.fired).toEqual([]);
+    expect(h.trigger.current).toBe('CLASSIFYING');
+
+    // The turn that actually owns the machine is unaffected by it.
+    h.resolve(1, 'actionable');
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.fired.map((t) => t.question)).toEqual([UNRESOLVED_TWO]);
+    expect(h.trigger.current).toBe('GENERATING');
+  });
+
+  it('is not read as the superseded turn non-actionable verdict either', async () => {
+    const h = classifierHarness();
+
+    h.trigger.handleTranscript(event({ text: UNRESOLVED }));
+    await vi.advanceTimersByTimeAsync(GAP);
+    h.trigger.handleTranscript(event({ text: UNRESOLVED_TWO }));
+    await vi.advanceTimersByTimeAsync(GAP);
+
+    const statesBefore = h.states.length;
+    h.resolve(0, 'non-actionable');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // A `'non-actionable'` settle returns the machine to LISTENING. Applied to
+    // a turn the machine has already moved past, it would drop the live
+    // classification's own state on the floor.
+    expect(h.states).toHaveLength(statesBefore);
+    expect(h.trigger.current).toBe('CLASSIFYING');
+  });
+
+  /**
+   * The rejection path is the one that reads most like a fresh failure: the
+   * machine's own `.catch` turns any rejection into `'actionable'`, which is
+   * the correct fallback for a **live** classification and exactly the wrong
+   * thing for one a newer turn already replaced.
+   */
+  it('does not treat an aborted call rejection as this turn actionable fallback', async () => {
+    const h = classifierHarness();
+
+    h.trigger.handleTranscript(event({ text: UNRESOLVED }));
+    await vi.advanceTimersByTimeAsync(GAP);
+    h.trigger.handleTranscript(event({ text: UNRESOLVED_TWO }));
+    await vi.advanceTimersByTimeAsync(GAP);
+
+    h.reject(0, Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' }));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.fired).toEqual([]);
+    expect(h.trigger.current).toBe('CLASSIFYING');
+  });
+});

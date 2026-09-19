@@ -2,6 +2,9 @@
  * TASK-012. The three streaming adapters, driven through a fake socket so the
  * wire format and the reconnect path are asserted rather than assumed.
  */
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AudioChunk, ProviderError, TranscriptEvent } from '../../src/shared/types.js';
 import {
@@ -751,5 +754,105 @@ describe('stream teardown', () => {
       is_final: true,
     });
     expect(errors).toEqual([]);
+  });
+});
+
+/**
+ * TASK-061, TC-171. `confidence` is Deepgram's field, and nobody else's.
+ *
+ * `TranscriptEvent.confidence` is populated only by an adapter whose active
+ * model declares `supportsConfidence`, and only Deepgram's models do
+ * (`TC-185`). The gate in `CMP-05` reads the field's absence as "this model
+ * cannot answer the question" rather than as low confidence, so an adapter
+ * inventing a value here would silently suppress turns (`FR-113`).
+ */
+describe('TC-171 only the Deepgram adapter reports confidence', () => {
+  it('sets confidence from channel.alternatives[0].confidence on every event', async () => {
+    const { factory, sockets } = fakeFactory();
+    const session = await createDeepgramProvider(factory).open(
+      { providerId: 'deepgram', modelId: 'nova-3' },
+      'interviewer',
+      'key',
+      OPTIONS,
+    );
+    const seen: TranscriptEvent[] = [];
+    session.on('transcript', (t) => seen.push(t));
+
+    const socket = sockets[0]!;
+    socket.opened();
+    socket.receive({
+      channel: { alternatives: [{ transcript: 'tell me', confidence: 0.42 }] },
+      is_final: false,
+    });
+    socket.receive({
+      channel: { alternatives: [{ transcript: 'tell me about yourself', confidence: 0.91 }] },
+      is_final: true,
+    });
+
+    expect(seen.map((e) => e.confidence)).toEqual([0.42, 0.91]);
+
+    // A frame the provider sends without the field carries none, rather than a
+    // substituted value: no reading is not a low reading (ADR-032).
+    socket.receive({ channel: { alternatives: [{ transcript: 'and then' }] }, is_final: true });
+    expect(seen[2]).not.toHaveProperty('confidence');
+
+    await session.close();
+  });
+
+  it('never sets it on the OpenAI realtime adapter', async () => {
+    const { factory, sockets } = fakeFactory();
+    const session = await createOpenAiRealtimeProvider(factory).open(
+      { providerId: 'openai', modelId: 'gpt-4o-transcribe' },
+      'interviewer',
+      'key',
+      OPTIONS,
+    );
+    const seen: TranscriptEvent[] = [];
+    session.on('transcript', (t) => seen.push(t));
+
+    const socket = sockets[0]!;
+    socket.opened();
+    socket.receive({
+      type: 'conversation.item.input_audio_transcription.completed',
+      transcript: 'tell me about yourself',
+    });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).not.toHaveProperty('confidence');
+    await session.close();
+  });
+
+  it('never sets it on the ElevenLabs adapter', async () => {
+    const { factory, sockets } = fakeFactory();
+    const session = await createElevenLabsProvider(factory).open(
+      { providerId: 'elevenlabs', modelId: 'scribe-v2-realtime' },
+      'interviewer',
+      'key',
+      OPTIONS,
+    );
+    const seen: TranscriptEvent[] = [];
+    session.on('transcript', (t) => seen.push(t));
+
+    const socket = sockets[0]!;
+    socket.opened();
+    socket.receive({ type: 'committed_transcript', text: 'tell me about yourself' });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).not.toHaveProperty('confidence');
+    await session.close();
+  });
+
+  /**
+   * Whisper is the fourth adapter and the one this file does not drive
+   * (`TASK-013`, `tests/unit/whisper.test.ts`). Its response parsing is
+   * asserted there; what is asserted here is that this task did not touch it,
+   * which is a claim about the source rather than about one response.
+   */
+  it('leaves the three non-Deepgram adapters with no confidence field at all', () => {
+    const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+    for (const file of ['whisper.ts', 'openai-realtime.ts', 'elevenlabs.ts']) {
+      const source = readFileSync(join(root, 'src', 'main', 'ai', 'stt', file), 'utf8');
+      expect(source, `${file} mentions confidence`).not.toMatch(/confidence/);
+    }
   });
 });
