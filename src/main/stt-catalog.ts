@@ -102,15 +102,17 @@ export class SttCatalogService {
       return { schemaVersion: 1, providers: {} };
     }
   }
-  private persist(): void {
+  private persist(cache: Cache): void {
     const tmp = `${this.file}.tmp`;
-    writeFileSync(tmp, JSON.stringify(this.cache, null, 2));
+    writeFileSync(tmp, JSON.stringify(cache, null, 2));
     renameSync(tmp, this.file);
   }
   invalidate(credentialId: CredentialId): void {
     if (!PROVIDERS.includes(credentialId as SttProviderId)) return;
-    delete this.cache.providers[credentialId];
-    this.persist();
+    const next = structuredClone(this.cache);
+    delete next.providers[credentialId];
+    this.cache = next;
+    this.persist(next);
   }
   async get(force = false): Promise<SttCatalogSnapshot> {
     const providers = await Promise.all(PROVIDERS.map((id) => this.one(id, force)));
@@ -139,8 +141,13 @@ export class SttCatalogService {
         refreshedAt: new Date(this.now()).toISOString(),
         models: sortCatalogModels(models),
       };
-      this.cache.providers[providerId] = next;
-      this.persist();
+      // Do not publish the replacement in memory until the atomic disk write
+      // succeeds. A full disk must leave both copies on the last-known-good
+      // value rather than serving a result that will disappear on restart.
+      const nextCache = structuredClone(this.cache);
+      nextCache.providers[providerId] = next;
+      this.persist(nextCache);
+      this.cache = nextCache;
       return this.result(providerId, next, 'ready');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Model discovery failed.';
@@ -183,7 +190,6 @@ export class SttCatalogService {
         {
           ...known,
           providerId,
-          providerDisplayName: known.displayName,
           ...(item.created ? { releasedAt: new Date(item.created * 1000).toISOString() } : {}),
           catalogStatus: 'available' as const,
           catalogSource: 'account' as const,

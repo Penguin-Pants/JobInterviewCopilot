@@ -1249,7 +1249,14 @@ function registerIpcHandlers(): void {
     // that credential (FR-026, ADR-024). Checked on the result, because a key
     // that failed validation was never saved and changes nothing.
     if (result.ok) {
-      sttCatalog.invalidate(provider);
+      try {
+        sttCatalog.invalidate(provider);
+      } catch (error) {
+        // The key is already safely stored. A cache-cleanup filesystem error
+        // must not report that save as failed; memory is invalidated and the
+        // next catalog request will refresh it for this process.
+        getLogger().warn('STT catalog cache invalidation could not be persisted', error);
+      }
       health.noteKeySaved(provider);
     }
     return result;

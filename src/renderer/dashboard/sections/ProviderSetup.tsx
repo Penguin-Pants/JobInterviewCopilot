@@ -605,6 +605,9 @@ function SttSlot({
         disabled={providerId === ''}
         onChange={(e) => onChange({ providerId, modelId: e.target.value })}
       >
+        {choice && !models.some((model) => model.id === choice.modelId) ? (
+          <option value={choice.modelId}>{choice.modelId} (unavailable)</option>
+        ) : null}
         {models.map((model) => (
           <option key={model.id} value={model.id}>
             {model.displayName}
