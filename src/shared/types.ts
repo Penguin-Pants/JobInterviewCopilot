@@ -10,6 +10,8 @@
 export interface ProviderChoice {
   providerId: string;
   modelId: string;
+  /** Normalized model-specific setting. Adapters translate it to vendor syntax. */
+  effort?: string;
 }
 
 /** Vault key identifiers. One credential can serve several providers (ADR-017). */
@@ -59,8 +61,25 @@ export interface SttModelDescriptor {
 export interface LlmModelDescriptor {
   id: string;
   displayName: string;
-  inputPerMTokUsd: number;
-  outputPerMTokUsd: number;
+  providerId: 'openai' | 'anthropic';
+  releasedAt: string | null;
+  status: 'available' | 'legacy' | 'unavailable';
+  streamingText: boolean;
+  effort: { allowed: string[]; default: string } | null;
+  pricing: { known: true; inputPerMTokUsd: number; outputPerMTokUsd: number } | { known: false };
+}
+
+export interface LlmCatalogProvider {
+  providerId: 'openai' | 'anthropic';
+  displayName: string;
+  models: LlmModelDescriptor[];
+  lastSuccessfulRefresh: string | null;
+  state: 'ready' | 'fallback' | 'missing-key' | 'error';
+  message?: string;
+}
+
+export interface LlmCatalogResult {
+  providers: LlmCatalogProvider[];
 }
 
 export type ThemeMode = 'light' | 'dark' | 'system';
@@ -68,7 +87,7 @@ export type OverlayTranslucency = 'acrylic' | 'opacity';
 
 /** Non-secret settings, persisted by electron-store (FR-020). */
 export interface Settings {
-  schemaVersion: 3;
+  schemaVersion: 4;
   activeProfileId: string;
   providers: {
     stt: { primary: ProviderChoice; backup: ProviderChoice | null };

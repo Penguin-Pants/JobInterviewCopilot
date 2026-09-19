@@ -13,7 +13,6 @@
  * (`FR-076`, TC-096).
  */
 import type {
-  LlmModelDescriptor,
   ProviderChoice,
   ProviderDescriptor,
   ProviderError,
@@ -111,7 +110,7 @@ export function clearLlmProviders(): void {
  */
 export function requireLlmProvider(
   choice: ProviderChoice,
-  registry: ProviderDescriptor<LlmModelDescriptor>[] = LLM_REGISTRY,
+  registry: ProviderDescriptor<{ id: string }>[] = LLM_REGISTRY,
 ): LlmProvider {
   // The model is checked first, exactly as `openSttSession` checks it. Settings
   // type `modelId` as a plain string, so a stale or hand-edited choice can name

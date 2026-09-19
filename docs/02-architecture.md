@@ -1461,6 +1461,13 @@ buffering is bounded by a declared constant.
 
 ---
 
+### 4.4 Runtime LLM catalog channels
+
+| ID | Channel | Direction | Purpose |
+|---|---|---|---|
+| CH-130 | `llmCatalog:get` | Dashboard to main | Return cached normalized model catalogs and lazily refresh stale providers. |
+| CH-131 | `llmCatalog:refresh` | Dashboard to main | Force independent provider refreshes and return the retained catalogs. |
+
 ## 5. Critical sequences
 
 ### 5.1 Session start
