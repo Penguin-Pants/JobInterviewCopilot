@@ -20,6 +20,7 @@ import {
 } from './audio-host.js';
 import { ProviderHealthRegistry } from './ai/health.js';
 import { registerAllLlmProviders } from './ai/llm/index.js';
+import { LlmCatalogService } from './ai/llm/catalog.js';
 import { registerAllSttProviders } from './ai/stt/index.js';
 import { TriggerMachine, type TriggerConfig } from './ai/trigger.js';
 import { validateCredential } from './ai/validate.js';
@@ -78,6 +79,7 @@ let config: ConfigStore;
 let secrets: SecretVaultStore;
 let hotkeys: HotkeyManager;
 let router: IpcRouter;
+let llmCatalog: LlmCatalogService;
 
 let audioHost: ElectronAudioWorkerHost;
 let audio: AudioSupervisor;
@@ -245,6 +247,16 @@ async function bootstrap(): Promise<void> {
     onCorrupt: (path, reason) => getLogger().warn('settings quarantined', { path, reason }),
   });
   secrets = new SecretVaultStore({ dir: userData, safeStorage });
+  llmCatalog = new LlmCatalogService({
+    dir: userData,
+    keyFor: (provider) => secrets.peek(provider),
+    choices: () => {
+      const llm = config.get().providers.llm;
+      return [llm.primary, llm.backup];
+    },
+    onError: (message, detail) => getLogger().warn(message, detail),
+    onUpdated: (catalog) => push(dashboardWindow?.webContents, 'state:llmCatalog', catalog),
+  });
 
   await app.whenReady();
   applyContentSecurityPolicy();
@@ -1239,12 +1251,20 @@ function registerIpcHandlers(): void {
   });
 
   router.handle('secrets:status', () => secrets.status());
+  router.handle('llmCatalog:get', () => llmCatalog.get());
+  router.handle('llmCatalog:refresh', () => llmCatalog.refresh());
   router.handle('secrets:set', async ({ provider, key }) => {
     const result = await secrets.set(provider, key, validateWithinDeadline);
     // A saved, validated key is the only thing that clears CONFIG_REQUIRED for
     // that credential (FR-026, ADR-024). Checked on the result, because a key
     // that failed validation was never saved and changes nothing.
-    if (!('error' in result)) health.noteKeySaved(provider);
+    if (result.ok) {
+      health.noteKeySaved(provider);
+      if (findLlmProvider(provider)) {
+        llmCatalog.invalidate(provider);
+        void llmCatalog.refresh();
+      }
+    }
     return result;
   });
 

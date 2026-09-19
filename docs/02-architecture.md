@@ -1333,6 +1333,7 @@ in Milestone 0 and are recorded here for the first time. The rest are new:
 | CH-215 | `notice:captureFidelity` | both | `{ windowsBuild, message }` |
 | CH-216 | `notice:platform` | both | `{ windowsBuild, acrylicSupported }` |
 | CH-217 | `notice:session` | dashboard | `{ sessionId, message }` |
+| CH-218 | `state:llmCatalog` | dashboard | Completed lazy model-catalog refresh result. |
 
 `CH-215` landed in Milestone 0 with `NFR-012`, the pre-19041 capture warning
 shown once per session next to the consent reminder. It is recorded here for the
@@ -1460,6 +1461,13 @@ by copy, every reference is released once its chunk is handed on, and deliberate
 buffering is bounded by a declared constant.
 
 ---
+
+### 4.4 Runtime LLM catalog channels
+
+| ID | Channel | Direction | Purpose |
+|---|---|---|---|
+| CH-130 | `llmCatalog:get` | Dashboard to main | Return cached normalized model catalogs and lazily refresh stale providers. |
+| CH-131 | `llmCatalog:refresh` | Dashboard to main | Force independent provider refreshes and return the retained catalogs. |
 
 ## 5. Critical sequences
 

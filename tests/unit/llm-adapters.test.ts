@@ -22,6 +22,7 @@ import { registerAllLlmProviders } from '../../src/main/ai/llm/index.js';
 import { parseSse } from '../../src/main/ai/llm/sse.js';
 import { MAX_CARD_LINES } from '../../src/main/ai/llm/lineBuffer.js';
 import { SYSTEM_PROMPT } from '../../src/main/ai/prompt.js';
+import { clearRuntimeLlmModels, registerRuntimeLlmModels } from '../../src/shared/registry/llm.js';
 import { abortError, anthropicScript, openAiScript, scriptedTransport, sse } from '../fakes/llm.js';
 
 function hit(over: Partial<Chunk> = {}): RetrievedChunk {
@@ -60,6 +61,59 @@ async function drain(stream: AsyncIterable<LlmChunk>): Promise<LlmChunk[]> {
 
 afterEach(() => {
   clearLlmProviders();
+  clearRuntimeLlmModels();
+});
+
+describe('model-specific effort payloads', () => {
+  it('uses minimal OpenAI reasoning with an independent classification budget', async () => {
+    registerRuntimeLlmModels('openai', [
+      {
+        id: 'gpt-5',
+        displayName: 'gpt-5',
+        providerId: 'openai',
+        releasedAt: null,
+        status: 'available',
+        streamingText: true,
+        effort: { allowed: ['minimal', 'low', 'medium', 'high'], default: 'medium' },
+        pricing: { known: false },
+      },
+    ]);
+    const transport = scriptedTransport({ chunks: openAiScript(['ACTIONABLE']) });
+    const provider = createOpenAiLlmProvider({ keyFor: () => 'key', post: transport.post });
+    const req = request('openai', 'gpt-5');
+    req.purpose = 'classification';
+    req.promptOverride = { system: 'classify', user: 'turn', maxTokens: 5, temperature: 0 };
+    await drain(provider.generate(req, neverAbort()));
+    expect(transport.requests[0]?.body).toMatchObject({
+      max_completion_tokens: 32,
+      reasoning_effort: 'minimal',
+    });
+    expect(transport.requests[0]?.body).not.toHaveProperty('temperature');
+  });
+
+  it('omits Anthropic thinking and effort for classification', async () => {
+    registerRuntimeLlmModels('anthropic', [
+      {
+        id: 'claude-sonnet-4-6',
+        displayName: 'Claude Sonnet 4.6',
+        providerId: 'anthropic',
+        releasedAt: null,
+        status: 'available',
+        streamingText: true,
+        effort: { allowed: ['low', 'medium', 'high'], default: 'high' },
+        pricing: { known: false },
+      },
+    ]);
+    const transport = scriptedTransport({ chunks: anthropicScript(['ACTIONABLE']) });
+    const provider = createAnthropicProvider({ keyFor: () => 'key', post: transport.post });
+    const req = request('anthropic', 'claude-sonnet-4-6');
+    req.purpose = 'classification';
+    req.promptOverride = { system: 'classify', user: 'turn', maxTokens: 5, temperature: 0 };
+    await drain(provider.generate(req, neverAbort()));
+    expect(transport.requests[0]?.body).not.toHaveProperty('thinking');
+    expect(transport.requests[0]?.body).not.toHaveProperty('output_config');
+    expect(transport.requests[0]?.body).toMatchObject({ max_tokens: 5, temperature: 0 });
+  });
 });
 
 /** TC-092: both adapters send max_tokens 200 and temperature 0.3. */

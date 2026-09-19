@@ -82,6 +82,7 @@ export async function classifyWithLlm(
       candidateContext: '',
       chunks: [],
       choice,
+      purpose: 'classification',
       promptOverride: {
         system: CLASSIFICATION_SYSTEM_PROMPT,
         user: `TURN:\n${text.trim()}`,
