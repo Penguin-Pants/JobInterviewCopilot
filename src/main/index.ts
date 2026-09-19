@@ -255,6 +255,7 @@ async function bootstrap(): Promise<void> {
       return [llm.primary, llm.backup];
     },
     onError: (message, detail) => getLogger().warn(message, detail),
+    onUpdated: (catalog) => push(dashboardWindow?.webContents, 'state:llmCatalog', catalog),
   });
 
   await app.whenReady();
@@ -1259,7 +1260,10 @@ function registerIpcHandlers(): void {
     // that failed validation was never saved and changes nothing.
     if (result.ok) {
       health.noteKeySaved(provider);
-      if (findLlmProvider(provider)) llmCatalog.invalidate(provider);
+      if (findLlmProvider(provider)) {
+        llmCatalog.invalidate(provider);
+        void llmCatalog.refresh();
+      }
     }
     return result;
   });

@@ -671,6 +671,10 @@ export const pushChannels = {
     id: 'CH-217',
     payload: z.object({ sessionId: z.string(), message: z.string() }),
   },
+  'state:llmCatalog': {
+    id: 'CH-218',
+    payload: llmCatalogResult,
+  },
 } as const;
 
 /* ------------------------------------------------------------------ *

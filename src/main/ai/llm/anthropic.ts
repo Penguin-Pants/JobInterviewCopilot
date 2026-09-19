@@ -103,10 +103,11 @@ async function* stream(
   const effort = descriptor?.effort?.allowed.includes(req.choice.effort ?? '')
     ? req.choice.effort
     : descriptor?.effort?.default;
+  const classification = req.purpose === 'classification';
   const body = JSON.stringify({
     model: req.choice.modelId,
     max_tokens: messages.maxTokens,
-    ...(descriptor?.effort
+    ...(descriptor?.effort && !classification
       ? { thinking: { type: 'adaptive' }, output_config: { effort } }
       : {
           temperature: messages.temperature,

@@ -1,7 +1,9 @@
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { clearRuntimeLlmModels, findLlmModel } from '../../src/shared/registry/llm.js';
+import type { LlmCatalogResult } from '../../src/shared/types.js';
 import {
   CATALOG_MAX_AGE_MS,
   LlmCatalogService,
@@ -14,6 +16,7 @@ function response(body: unknown): Response {
 }
 
 describe('runtime LLM catalog', () => {
+  afterEach(() => clearRuntimeLlmModels());
   it('uses conservative centralized compatibility rules', () => {
     expect(openAiCompatibility({ id: 'gpt-4o-mini' })).toBeNull();
     expect(openAiCompatibility({ id: 'gpt-5' })).toEqual({
@@ -31,6 +34,8 @@ describe('runtime LLM catalog', () => {
       expect(openAiCompatibility({ id })).toBe(false);
     }
     expect(openAiCompatibility({ id: 'gpt-99-new' })).toBe(false);
+    expect(openAiCompatibility({ id: 'gpt-5-codex' })).toBe(false);
+    expect(openAiCompatibility({ id: 'gpt-5-pro' })).toBe(false);
     expect(anthropicCompatibility('claude-haiku-4-5-20251001')).toBe(false);
     expect(anthropicCompatibility('claude-sonnet-4-6')).toEqual({
       allowed: ['low', 'medium', 'high'],
@@ -140,5 +145,55 @@ describe('runtime LLM catalog', () => {
     expect(
       result.providers.find((provider) => provider.providerId === 'openai')?.models,
     ).toContainEqual(expect.objectContaining({ id: 'saved-model', status: 'unavailable' }));
+  });
+
+  it('bounds requests and publishes completed lazy refreshes', async () => {
+    const updated = vi.fn();
+    const hangingFetch = vi.fn(
+      (_input: string | URL | Request, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+            once: true,
+          });
+        }),
+    );
+    const service = new LlmCatalogService({
+      dir: mkdtempSync(join(tmpdir(), 'llm-catalog-')),
+      fetch: hangingFetch as typeof fetch,
+      keyFor: () => 'key',
+      requestTimeoutMs: 5,
+      onUpdated: updated,
+    });
+    await service.refresh();
+    expect(updated).toHaveBeenCalledOnce();
+    const pushed = updated.mock.calls[0]?.[0] as LlmCatalogResult;
+    expect(pushed.providers.every((provider) => provider.state === 'error')).toBe(true);
+  });
+
+  it('keeps an active runtime allowlist while invalidating persistent account data', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'llm-catalog-'));
+    const service = new LlmCatalogService({
+      dir,
+      fetch: (async (input: string | URL | Request) =>
+        String(input).includes('openai.com')
+          ? response({ object: 'list', data: [{ id: 'gpt-5-mini', object: 'model' }] })
+          : response({
+              data: [
+                {
+                  id: 'claude-sonnet-4-6',
+                  display_name: 'Claude Sonnet 4.6',
+                  created_at: '2026-02-05T00:00:00.000Z',
+                },
+              ],
+              has_more: false,
+            })) as typeof fetch,
+      keyFor: () => 'key',
+    });
+    await service.refresh();
+    service.invalidate('openai');
+    expect(findLlmModel({ providerId: 'openai', modelId: 'gpt-5-mini' })).not.toBeNull();
+    expect(
+      JSON.parse(readFileSync(join(dir, 'llm-catalog.json'), 'utf8')).providers.openai,
+    ).toBeUndefined();
   });
 });

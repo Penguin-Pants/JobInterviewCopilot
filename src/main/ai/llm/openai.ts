@@ -73,10 +73,14 @@ async function* stream(
   const effort = descriptor?.effort?.allowed.includes(req.choice.effort ?? '')
     ? req.choice.effort
     : descriptor?.effort?.default;
+  const classification = req.purpose === 'classification';
   const body = JSON.stringify({
     model: req.choice.modelId,
     ...(descriptor?.effort
-      ? { max_completion_tokens: messages.maxTokens, reasoning_effort: effort }
+      ? {
+          max_completion_tokens: classification ? 32 : messages.maxTokens,
+          reasoning_effort: classification ? 'minimal' : effort,
+        }
       : {
           max_tokens: messages.maxTokens,
           temperature: messages.temperature,

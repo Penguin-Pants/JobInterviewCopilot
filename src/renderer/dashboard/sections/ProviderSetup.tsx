@@ -246,6 +246,20 @@ export function ProviderSetup({
 
   useEffect(() => {
     void loadCatalog();
+    return window.copilot.on('state:llmCatalog', (result) => {
+      setCatalog(result.providers);
+      const failures = result.providers.filter((provider) => provider.state !== 'ready');
+      setCatalogMessage(
+        failures.length === 0
+          ? 'Models are up to date.'
+          : failures
+              .map(
+                (provider) =>
+                  `${provider.displayName}: ${provider.message ?? (provider.state === 'fallback' ? 'using fallback models' : provider.state)}`,
+              )
+              .join(' '),
+      );
+    });
   }, []);
 
   // The main process owns the settings, so a change made anywhere else has to

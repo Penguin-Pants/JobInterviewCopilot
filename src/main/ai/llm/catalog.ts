@@ -11,6 +11,7 @@ import { LLM_REGISTRY, registerRuntimeLlmModels } from '../../../shared/registry
 import { PRICE_TABLE } from '../../cost.js';
 
 export const CATALOG_MAX_AGE_MS = 28 * 24 * 60 * 60 * 1000;
+export const CATALOG_REQUEST_TIMEOUT_MS = 10_000;
 const OPENAI_MODELS_URL = 'https://api.openai.com/v1/models';
 const ANTHROPIC_MODELS_URL = 'https://api.anthropic.com/v1/models?limit=100';
 const ANTHROPIC_VERSION = '2023-06-01';
@@ -88,7 +89,10 @@ export function openAiCompatibility(model: OpenAiModel): LlmModelDescriptor['eff
     )
   )
     return false;
-  if (/^gpt-5(?:[.-]|$)/u.test(id))
+  // The Models API has no endpoint/capability field. Admit only the GPT-5
+  // variants documented for Chat Completions; notably, Codex and Pro are
+  // Responses-only and must never reach this app's Chat Completions adapter.
+  if (/^gpt-5(?:-(?:mini|nano))?(?:-\d{4}-\d{2}-\d{2})?$/u.test(id))
     return { allowed: ['minimal', 'low', 'medium', 'high'], default: 'medium' };
   if (/^gpt-(?:4o|4\.1)(?:[.-]|$)/u.test(id)) return null;
   return false;
@@ -129,6 +133,8 @@ export interface LlmCatalogOptions {
   now?: () => number;
   onError?: (message: string, detail?: unknown) => void;
   choices?: () => (ProviderChoice | null)[];
+  onUpdated?: (catalog: LlmCatalogResult) => void;
+  requestTimeoutMs?: number;
 }
 
 export class LlmCatalogService {
@@ -147,7 +153,9 @@ export class LlmCatalogService {
     if (provider !== 'openai' && provider !== 'anthropic') return;
     delete this.cache.providers[provider];
     this.write();
-    registerRuntimeLlmModels(provider, []);
+    // Keep the in-memory allowlist alive for a session already using it. The
+    // account-scoped persistent entry is gone immediately and the next
+    // successful discovery replaces this allowlist atomically.
   }
 
   get(): LlmCatalogResult {
@@ -200,11 +208,13 @@ export class LlmCatalogService {
         }
       }),
     );
+    this.options.onUpdated?.(this.result());
   }
 
   private async discoverOpenAi(key: string): Promise<LlmModelDescriptor[]> {
     const response = await (this.options.fetch ?? fetch)(OPENAI_MODELS_URL, {
       headers: { Authorization: `Bearer ${key}` },
+      signal: this.timeoutSignal(),
     });
     if (!response.ok) throw new Error(`OpenAI models request returned ${response.status}.`);
     const parsed = openAiResponse.parse(await response.json());
@@ -235,6 +245,7 @@ export class LlmCatalogService {
     while (hasMore) {
       const response = await (this.options.fetch ?? fetch)(url, {
         headers: { 'x-api-key': key, 'anthropic-version': ANTHROPIC_VERSION },
+        signal: this.timeoutSignal(),
       });
       if (!response.ok) throw new Error(`Anthropic models request returned ${response.status}.`);
       const page = anthropicResponse.parse(await response.json());
@@ -304,6 +315,10 @@ export class LlmCatalogService {
         } as LlmCatalogProvider;
       }),
     };
+  }
+
+  private timeoutSignal(): AbortSignal {
+    return AbortSignal.timeout(this.options.requestTimeoutMs ?? CATALOG_REQUEST_TIMEOUT_MS);
   }
 
   private read(): Cache {

@@ -43,6 +43,7 @@ export interface GenerationRequest {
   chunks: RetrievedChunk[];
   choice: ProviderChoice;
   promptOverride?: GenerationMessages;
+  purpose?: 'suggestion' | 'classification';
 }
 
 /** The one adapter interface serving both providers (FR-070, ADR-009). */
