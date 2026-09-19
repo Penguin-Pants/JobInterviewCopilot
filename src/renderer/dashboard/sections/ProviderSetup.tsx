@@ -22,6 +22,7 @@ import type {
   SecretStatus,
   Settings,
   SttModelDescriptor,
+  SttCatalogSnapshot,
 } from '../../../shared/types.js';
 import { call } from '../call.js';
 import type { ProvidersState } from '../state.js';
@@ -47,6 +48,7 @@ function modelsOf<M>(registry: ProviderDescriptor<M>[], providerId: string): M[]
 
 /** Price per audio minute, written so a fraction of a cent is still readable. */
 function sttPrice(model: SttModelDescriptor): string {
+  if (model.priceKnown === false) return 'Price unavailable';
   return `$${model.pricePerAudioMinuteUsd.toFixed(4)} per audio minute`;
 }
 
@@ -218,6 +220,40 @@ export function ProviderSetup({
   const [saved, setSaved] = useState(false);
   const [keys, setKeys] = useState<Record<string, string>>({});
   const [keyStates, setKeyStates] = useState<Record<string, KeyState>>({});
+  const [catalog, setCatalog] = useState<SttCatalogSnapshot | null>(null);
+  const [catalogLoading, setCatalogLoading] = useState(true);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
+
+  async function loadCatalog(force = false): Promise<void> {
+    setCatalogLoading(true);
+    setCatalogError(null);
+    const result = await call('catalog:stt', { force });
+    if (result.ok) setCatalog(result.value);
+    else setCatalogError(result.message);
+    setCatalogLoading(false);
+  }
+  useEffect(() => {
+    void loadCatalog();
+  }, []);
+
+  const sttRegistry = useMemo<ProviderDescriptor<SttModelDescriptor>[]>(() => {
+    if (!catalog) return STT_REGISTRY;
+    return STT_REGISTRY.map((provider) => {
+      const runtime = catalog.providers.find((entry) => entry.providerId === provider.id);
+      const models = runtime?.models ? [...runtime.models] : [...provider.models];
+      for (const choice of [draft.stt.primary, draft.stt.backup]) {
+        if (
+          choice?.providerId === provider.id &&
+          !models.some((model) => model.id === choice.modelId)
+        ) {
+          const shipped = provider.models.find((model) => model.id === choice.modelId);
+          if (shipped)
+            models.push({ ...shipped, catalogStatus: 'unavailable', catalogSource: 'fallback' });
+        }
+      }
+      return { ...provider, models };
+    });
+  }, [catalog, draft.stt]);
 
   // The main process owns the settings, so a change made anywhere else has to
   // land here or Save would write a stale draft back. Keyed on the *value*, not
@@ -230,7 +266,7 @@ export function ProviderSetup({
   }, [storedProviders]);
 
   const sttConflict = backupConflict(draft.stt.primary, draft.stt.backup, (id) =>
-    providerName(STT_REGISTRY, id),
+    providerName(sttRegistry, id),
   );
   const llmConflict = backupConflict(draft.llm.primary, draft.llm.backup, (id) =>
     providerName(LLM_REGISTRY, id),
@@ -238,19 +274,19 @@ export function ProviderSetup({
 
   const sttPrimaryModel = useMemo(
     () =>
-      modelsOf(STT_REGISTRY, draft.stt.primary.providerId).find(
+      modelsOf(sttRegistry, draft.stt.primary.providerId).find(
         (m) => m.id === draft.stt.primary.modelId,
       ) ?? null,
-    [draft.stt.primary],
+    [draft.stt.primary, sttRegistry],
   );
   const sttBackupModel = useMemo(
     () =>
       draft.stt.backup
-        ? (modelsOf(STT_REGISTRY, draft.stt.backup.providerId).find(
+        ? (modelsOf(sttRegistry, draft.stt.backup.providerId).find(
             (m) => m.id === draft.stt.backup?.modelId,
           ) ?? null)
         : null,
-    [draft.stt.backup],
+    [draft.stt.backup, sttRegistry],
   );
 
   const consequences = [sttPrimaryModel, sttBackupModel]
@@ -363,16 +399,39 @@ export function ProviderSetup({
       ) : null}
 
       <h3>Speech to text</h3>
+      <button
+        type="button"
+        disabled={catalogLoading || sessionActive}
+        onClick={() => void loadCatalog(true)}
+      >
+        {catalogLoading ? 'Loading models…' : 'Refresh models'}
+      </button>
+      {catalogError ? <p role="alert">{catalogError}</p> : null}
+      {catalog?.providers.map((provider) => (
+        <p
+          key={provider.providerId}
+          role="status"
+          data-testid={`catalog-state-${provider.providerId}`}
+        >
+          {provider.displayName}: {provider.state}
+          {provider.lastSuccessfulRefresh
+            ? ` — refreshed ${new Date(provider.lastSuccessfulRefresh).toLocaleString()}`
+            : ''}
+          {provider.message ? ` — ${provider.message}` : ''}
+        </p>
+      ))}
       <SttSlot
         slot="stt-primary"
         label="Primary"
         choice={draft.stt.primary}
+        registry={sttRegistry}
         onChange={(choice) => setSttChoice('primary', choice)}
       />
       <SttSlot
         slot="stt-backup"
         label="Backup"
         choice={draft.stt.backup}
+        registry={sttRegistry}
         optional
         onChange={(choice) => setSttChoice('backup', choice)}
       />
@@ -510,9 +569,12 @@ function SttSlot({
   choice,
   optional,
   onChange,
-}: SlotProps<ProviderChoice | null>): JSX.Element {
+  registry,
+}: SlotProps<ProviderChoice | null> & {
+  registry: ProviderDescriptor<SttModelDescriptor>[];
+}): JSX.Element {
   const providerId = choice?.providerId ?? '';
-  const models = providerId ? modelsOf(STT_REGISTRY, providerId) : [];
+  const models = providerId ? modelsOf(registry, providerId) : [];
   return (
     <div className="slot" data-testid={`slot-${slot}`}>
       <label htmlFor={`${slot}-provider`}>{label} provider</label>
@@ -523,12 +585,12 @@ function SttSlot({
         onChange={(e) => {
           const nextProvider = e.target.value;
           if (nextProvider === '') return onChange(null);
-          const first = modelsOf(STT_REGISTRY, nextProvider)[0];
+          const first = modelsOf(registry, nextProvider)[0];
           onChange(first ? { providerId: nextProvider, modelId: first.id } : null);
         }}
       >
         {optional ? <option value="">None</option> : null}
-        {STT_REGISTRY.map((provider) => (
+        {registry.map((provider) => (
           <option key={provider.id} value={provider.id}>
             {provider.displayName}
           </option>
@@ -545,8 +607,11 @@ function SttSlot({
       >
         {models.map((model) => (
           <option key={model.id} value={model.id}>
-            {model.displayName} — {model.streaming ? 'streams' : 'does not stream'} —{' '}
-            {sttPrice(model)}
+            {model.displayName}
+            {model.catalogStatus && model.catalogStatus !== 'available'
+              ? ` (${model.catalogStatus})`
+              : ''}{' '}
+            — {model.streaming ? 'streams' : 'does not stream'} — {sttPrice(model)}
           </option>
         ))}
       </select>

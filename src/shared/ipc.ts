@@ -32,6 +32,42 @@ const validationResult = z.object({
   reason: z.string().optional(),
 });
 
+const sttCatalogModel = z.object({
+  id: z.string(),
+  displayName: z.string(),
+  streaming: z.boolean(),
+  supportsInterim: z.boolean(),
+  supportsEndpointing: z.boolean(),
+  supportsConfidence: z.boolean(),
+  batchIntervalMs: z.number().optional(),
+  audio: z.object({
+    encoding: z.literal('linear16'),
+    sampleRate: z.literal(16000),
+    channels: z.literal(1),
+  }),
+  pricePerAudioMinuteUsd: z.number(),
+  badge: z.string().optional(),
+  providerId: z.string().optional(),
+  providerDisplayName: z.string().optional(),
+  releasedAt: z.string().optional(),
+  catalogStatus: z.enum(['available', 'legacy', 'unavailable']).optional(),
+  catalogSource: z.enum(['account', 'fallback']).optional(),
+  priceKnown: z.boolean().optional(),
+});
+const sttCatalog = z.object({
+  providers: z.array(
+    z.object({
+      providerId: z.string(),
+      displayName: z.string(),
+      source: z.enum(['account', 'fallback']),
+      state: z.enum(['ready', 'stale', 'missing-key', 'fallback', 'error']),
+      lastSuccessfulRefresh: z.string().nullable(),
+      models: z.array(sttCatalogModel),
+      message: z.string().optional(),
+    }),
+  ),
+});
+
 export const settingsSchema = z.object({
   schemaVersion: z.literal(3),
   activeProfileId: z.string(),
@@ -210,6 +246,11 @@ export const invokeChannels = {
       anthropic: z.boolean(),
       elevenlabs: z.boolean(),
     }),
+  },
+  'catalog:stt': {
+    id: 'CH-129',
+    payload: z.object({ force: z.boolean().default(false) }),
+    response: sttCatalog,
   },
   'profile:list': { id: 'CH-105', payload: z.void(), response: z.array(profile) },
   'profile:create': {

@@ -2187,3 +2187,5 @@ classifier. Build `TASK-061` first regardless of the numbering.
 - Whenever no card is currently shown — the first suggestion of a session, or
   the first one after a pause — the hold does not apply.
 **Verified by** TC-174, TC-175, TC-176, TC-177, TC-186
+
+- **TASK-053:** Runtime STT catalog, atomic cache, validated IPC, manual refresh, and Provider Setup states — complete.

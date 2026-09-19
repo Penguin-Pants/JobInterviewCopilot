@@ -34,6 +34,7 @@ import { RagEngine, SUPPORTED_EXTENSIONS } from './rag.js';
 import { installGlobalHandlers, useAppOwnedTempDir } from './resilience.js';
 import { SecretVaultStore } from './secrets.js';
 import { SessionNoticeHolder } from './session-notice.js';
+import { SttCatalogService } from './stt-catalog.js';
 import {
   SessionManager,
   SessionStartRefused,
@@ -78,6 +79,7 @@ let config: ConfigStore;
 let secrets: SecretVaultStore;
 let hotkeys: HotkeyManager;
 let router: IpcRouter;
+let sttCatalog: SttCatalogService;
 
 let audioHost: ElectronAudioWorkerHost;
 let audio: AudioSupervisor;
@@ -245,6 +247,7 @@ async function bootstrap(): Promise<void> {
     onCorrupt: (path, reason) => getLogger().warn('settings quarantined', { path, reason }),
   });
   secrets = new SecretVaultStore({ dir: userData, safeStorage });
+  sttCatalog = new SttCatalogService({ dir: userData, keyFor: (id) => secrets.peek(id) });
 
   await app.whenReady();
   applyContentSecurityPolicy();
@@ -1239,12 +1242,16 @@ function registerIpcHandlers(): void {
   });
 
   router.handle('secrets:status', () => secrets.status());
+  router.handle('catalog:stt', ({ force }) => sttCatalog.get(force));
   router.handle('secrets:set', async ({ provider, key }) => {
     const result = await secrets.set(provider, key, validateWithinDeadline);
     // A saved, validated key is the only thing that clears CONFIG_REQUIRED for
     // that credential (FR-026, ADR-024). Checked on the result, because a key
     // that failed validation was never saved and changes nothing.
-    if (!('error' in result)) health.noteKeySaved(provider);
+    if (result.ok) {
+      sttCatalog.invalidate(provider);
+      health.noteKeySaved(provider);
+    }
     return result;
   });
 
