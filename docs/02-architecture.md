@@ -1461,6 +1461,8 @@ buffering is bounded by a declared constant.
 
 ---
 
+**CH-129 `catalog:stt`** — Dashboard to main. Payload `{ force: boolean }`; response is the validated normalized STT provider catalog. `force` bypasses the 28-day age check. Credentials remain in main.
+
 ## 5. Critical sequences
 
 ### 5.1 Session start
@@ -2056,3 +2058,7 @@ tests/
   e2e/
 docs/
 ```
+
+## Runtime STT catalog boundary
+
+`SttCatalogService` is the single discovery, compatibility, normalization, sorting, and cache boundary. The validated `catalog:stt` IPC channel carries descriptors to Provider Setup; it never carries keys. OpenAI's authenticated Models API supplies account-visible identifiers but not transport capabilities, pricing, or lifecycle state, so results are conservatively intersected with verified adapter policy. Deepgram's project model metadata is not an entitlement list and ElevenLabs' general model response does not reliably identify realtime STT compatibility; both therefore use labelled shipped fallback metadata. The cache is `userData/stt-catalog.json`, schema version 1, written by temporary-file rename. A credential replacement invalidates only its STT entry; OpenAI retains its single shared credential ownership.

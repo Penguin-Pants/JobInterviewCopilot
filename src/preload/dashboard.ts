@@ -21,6 +21,7 @@ const ALLOWED_INVOKE: readonly InvokeChannel[] = [
   'config:set',
   'secrets:set',
   'secrets:status',
+  'catalog:stt',
   'profile:list',
   'profile:create',
   'profile:delete',

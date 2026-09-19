@@ -133,3 +133,5 @@ is broken. A test that merely runs nearby code does not count.
 | NFR-016 | TC-146 |
 | NFR-017 | TC-150, MW-11 |
 | NFR-018 | TC-167, TC-169 |
+
+| TC-170–TC-175 | `tests/unit/stt-catalog.test.ts`, `tests/unit/ipc-contract.test.ts` | Account filtering, fallback, cache age, failure preservation, boundary validation |

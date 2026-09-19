@@ -359,3 +359,7 @@ is `docs/07-release-checklist.md`.
 | Real acrylic rendering | `backgroundMaterial` needs real Windows 11 compositing | TC-142 covers the window lifecycle, MW-01 and MW-07 cover the look |
 | Interviewer-only audio isolation | Impossible with WASAPI loopback. Not a v1 goal | ADR-021, MW-12 |
 | Installer on a clean machine | No clean-VM CI stage in v1 | TASK-051 acceptance criteria |
+
+## Runtime STT catalog
+
+Transport tests inject `fetch`; no live provider is contacted. Coverage includes authentication, conservative filtering, fallback limitations, missing keys, deterministic sorting, fresh and exactly-28-day cache behavior, forced refresh, malformed/network preservation, IPC validation, and preload allowlisting.
