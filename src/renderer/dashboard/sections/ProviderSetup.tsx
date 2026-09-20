@@ -17,6 +17,7 @@ import type {
   CredentialId,
   HealthState,
   LlmModelDescriptor,
+  LlmCatalogProvider,
   ProviderChoice,
   ProviderDescriptor,
   SecretStatus,
@@ -53,9 +54,10 @@ function sttPrice(model: SttModelDescriptor): string {
 }
 
 function llmPrice(model: LlmModelDescriptor): string {
+  if (!model.pricing.known) return 'Price unavailable';
   return (
-    `$${model.inputPerMTokUsd.toFixed(2)} per million input tokens, ` +
-    `$${model.outputPerMTokUsd.toFixed(2)} per million output tokens`
+    `$${model.pricing.inputPerMTokUsd.toFixed(2)} per million input tokens, ` +
+    `$${model.pricing.outputPerMTokUsd.toFixed(2)} per million output tokens`
   );
 }
 
@@ -220,26 +222,68 @@ export function ProviderSetup({
   const [saved, setSaved] = useState(false);
   const [keys, setKeys] = useState<Record<string, string>>({});
   const [keyStates, setKeyStates] = useState<Record<string, KeyState>>({});
-  const [catalog, setCatalog] = useState<SttCatalogSnapshot | null>(null);
-  const [catalogLoading, setCatalogLoading] = useState(true);
-  const [catalogError, setCatalogError] = useState<string | null>(null);
+  const [llmCatalog, setLlmCatalog] = useState<LlmCatalogProvider[] | null>(null);
+  const [llmCatalogMessage, setLlmCatalogMessage] = useState('Loading models…');
 
-  async function loadCatalog(force = false): Promise<void> {
-    setCatalogLoading(true);
-    setCatalogError(null);
+  async function loadLlmCatalog(force = false): Promise<void> {
+    setLlmCatalogMessage(force ? 'Refreshing models…' : 'Loading models…');
+    const result = await call(force ? 'llmCatalog:refresh' : 'llmCatalog:get');
+    if (!result.ok) {
+      setLlmCatalogMessage(`Models could not be loaded. ${result.message}`);
+      return;
+    }
+    setLlmCatalog(result.value.providers);
+    const failures = result.value.providers.filter((provider) => provider.state !== 'ready');
+    setLlmCatalogMessage(
+      failures.length === 0
+        ? 'Models are up to date.'
+        : failures
+            .map(
+              (provider) =>
+                `${provider.displayName}: ${provider.message ?? (provider.state === 'fallback' ? 'using fallback models' : provider.state)}`,
+            )
+            .join(' '),
+    );
+  }
+
+  useEffect(() => {
+    void loadLlmCatalog();
+    return window.copilot.on('state:llmCatalog', (result) => {
+      setLlmCatalog(result.providers);
+      const failures = result.providers.filter((provider) => provider.state !== 'ready');
+      setLlmCatalogMessage(
+        failures.length === 0
+          ? 'Models are up to date.'
+          : failures
+              .map(
+                (provider) =>
+                  `${provider.displayName}: ${provider.message ?? (provider.state === 'fallback' ? 'using fallback models' : provider.state)}`,
+              )
+              .join(' '),
+      );
+    });
+  }, []);
+
+  const [sttCatalog, setSttCatalog] = useState<SttCatalogSnapshot | null>(null);
+  const [sttCatalogLoading, setSttCatalogLoading] = useState(true);
+  const [sttCatalogError, setSttCatalogError] = useState<string | null>(null);
+
+  async function loadSttCatalog(force = false): Promise<void> {
+    setSttCatalogLoading(true);
+    setSttCatalogError(null);
     const result = await call('catalog:stt', { force });
-    if (result.ok) setCatalog(result.value);
-    else setCatalogError(result.message);
-    setCatalogLoading(false);
+    if (result.ok) setSttCatalog(result.value);
+    else setSttCatalogError(result.message);
+    setSttCatalogLoading(false);
   }
   useEffect(() => {
-    void loadCatalog();
+    void loadSttCatalog();
   }, []);
 
   const sttRegistry = useMemo<ProviderDescriptor<SttModelDescriptor>[]>(() => {
-    if (!catalog) return STT_REGISTRY;
+    if (!sttCatalog) return STT_REGISTRY;
     return STT_REGISTRY.map((provider) => {
-      const runtime = catalog.providers.find((entry) => entry.providerId === provider.id);
+      const runtime = sttCatalog.providers.find((entry) => entry.providerId === provider.id);
       const models = runtime?.models ? [...runtime.models] : [...provider.models];
       for (const choice of [draft.stt.primary, draft.stt.backup]) {
         if (
@@ -253,7 +297,7 @@ export function ProviderSetup({
       }
       return { ...provider, models };
     });
-  }, [catalog, draft.stt]);
+  }, [sttCatalog, draft.stt]);
 
   // The main process owns the settings, so a change made anywhere else has to
   // land here or Save would write a stale draft back. Keyed on the *value*, not
@@ -401,13 +445,13 @@ export function ProviderSetup({
       <h3>Speech to text</h3>
       <button
         type="button"
-        disabled={catalogLoading || sessionActive}
-        onClick={() => void loadCatalog(true)}
+        disabled={sttCatalogLoading || sessionActive}
+        onClick={() => void loadSttCatalog(true)}
       >
-        {catalogLoading ? 'Loading models…' : 'Refresh models'}
+        {sttCatalogLoading ? 'Loading models…' : 'Refresh models'}
       </button>
-      {catalogError ? <p role="alert">{catalogError}</p> : null}
-      {catalog?.providers.map((provider) => (
+      {sttCatalogError ? <p role="alert">{sttCatalogError}</p> : null}
+      {sttCatalog?.providers.map((provider) => (
         <p
           key={provider.providerId}
           role="status"
@@ -442,16 +486,36 @@ export function ProviderSetup({
       ) : null}
 
       <h3>Language model</h3>
+      <button
+        type="button"
+        data-testid="refresh-llm-models"
+        onClick={() => void loadLlmCatalog(true)}
+      >
+        Refresh models
+      </button>
+      <span role="status" data-testid="llm-catalog-state">
+        {llmCatalogMessage}
+      </span>
+      {llmCatalog?.map((provider) =>
+        provider.lastSuccessfulRefresh ? (
+          <p key={provider.providerId}>
+            {provider.displayName} last refreshed{' '}
+            {new Date(provider.lastSuccessfulRefresh).toLocaleString()}.
+          </p>
+        ) : null,
+      )}
       <LlmSlot
         slot="llm-primary"
         label="Primary"
         choice={draft.llm.primary}
+        catalog={llmCatalog}
         onChange={(choice) => setLlmChoice('primary', choice)}
       />
       <LlmSlot
         slot="llm-backup"
         label="Backup"
         choice={draft.llm.backup}
+        catalog={llmCatalog}
         optional
         onChange={(choice) => setLlmChoice('backup', choice)}
       />
@@ -648,9 +712,20 @@ function LlmSlot({
   choice,
   optional,
   onChange,
-}: SlotProps<ProviderChoice | null>): JSX.Element {
+  catalog,
+}: SlotProps<ProviderChoice | null> & { catalog: LlmCatalogProvider[] | null }): JSX.Element {
   const providerId = choice?.providerId ?? '';
-  const models = providerId ? modelsOf(LLM_REGISTRY, providerId) : [];
+  const catalogProviders =
+    catalog ??
+    LLM_REGISTRY.map((provider) => ({
+      providerId: provider.id,
+      displayName: provider.displayName,
+      models: provider.models,
+    }));
+  const models = providerId
+    ? (catalogProviders.find((provider) => provider.providerId === providerId)?.models ?? [])
+    : [];
+  const selected = models.find((model) => model.id === choice?.modelId);
   return (
     <div className="slot" data-testid={`slot-${slot}`}>
       <label htmlFor={`${slot}-provider`}>{label} provider</label>
@@ -661,13 +736,15 @@ function LlmSlot({
         onChange={(e) => {
           const nextProvider = e.target.value;
           if (nextProvider === '') return onChange(null);
-          const first = modelsOf(LLM_REGISTRY, nextProvider)[0];
+          const nextModels =
+            catalogProviders.find((provider) => provider.providerId === nextProvider)?.models ?? [];
+          const first = nextModels.find((model) => model.status === 'available') ?? nextModels[0];
           onChange(first ? { providerId: nextProvider, modelId: first.id } : null);
         }}
       >
         {optional ? <option value="">None</option> : null}
-        {LLM_REGISTRY.map((provider) => (
-          <option key={provider.id} value={provider.id}>
+        {catalogProviders.map((provider) => (
+          <option key={provider.providerId} value={provider.providerId}>
             {provider.displayName}
           </option>
         ))}
@@ -683,10 +760,33 @@ function LlmSlot({
       >
         {models.map((model) => (
           <option key={model.id} value={model.id}>
-            {model.displayName} — streams — {llmPrice(model)}
+            {model.displayName}
+            {model.status === 'available' ? '' : ` (${model.status})`} — streams — {llmPrice(model)}
           </option>
         ))}
       </select>
+
+      {selected?.effort ? (
+        <>
+          <label htmlFor={`${slot}-effort`}>{label} reasoning effort</label>
+          <select
+            id={`${slot}-effort`}
+            data-testid={`${slot}-effort`}
+            value={
+              selected.effort.allowed.includes(choice?.effort ?? '')
+                ? choice?.effort
+                : selected.effort.default
+            }
+            onChange={(event) => choice && onChange({ ...choice, effort: event.target.value })}
+          >
+            {selected.effort.allowed.map((effort) => (
+              <option key={effort} value={effort}>
+                {effort}
+              </option>
+            ))}
+          </select>
+        </>
+      ) : null}
 
       <table data-testid={`${slot}-model-table`}>
         <caption>Models offered by this provider</caption>

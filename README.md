@@ -129,6 +129,18 @@ version derived it by Cartesian product, crediting every test of a task to every
 requirement that task traced, which let a requirement report full coverage with
 no test that would fail if it broke. List a test on a requirement only if it
 would fail when that requirement is broken.
+### Language-model catalog
+
+The Provider Setup screen discovers the OpenAI and Anthropic models available to the saved
+account without exposing API keys to the renderer. The last successful, schema-validated result
+is stored in `llm-catalog.json` under Electron `userData` and reused for 28 days. Stale catalogs
+refresh lazily; **Refresh models** bypasses the age check. A failed or empty refresh preserves the
+last known-good catalog, while an installation without a cache uses the shipped legacy choices.
+
+The providers' model-list responses do not include reliable text-streaming, reasoning, context,
+pricing, or retirement capabilities. A conservative main-process policy therefore admits only
+model families whose existing request adapters can serve. Anthropic Haiku remains available only
+when already selected. Unknown prices stay unavailable and make the cost estimate incomplete.
 
 ### Speech-to-text model catalog
 

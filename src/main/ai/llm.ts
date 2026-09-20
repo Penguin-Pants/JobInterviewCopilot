@@ -13,7 +13,6 @@
  * (`FR-076`, TC-096).
  */
 import type {
-  LlmModelDescriptor,
   ProviderChoice,
   ProviderDescriptor,
   ProviderError,
@@ -44,6 +43,7 @@ export interface GenerationRequest {
   chunks: RetrievedChunk[];
   choice: ProviderChoice;
   promptOverride?: GenerationMessages;
+  purpose?: 'suggestion' | 'classification';
 }
 
 /** The one adapter interface serving both providers (FR-070, ADR-009). */
@@ -111,7 +111,7 @@ export function clearLlmProviders(): void {
  */
 export function requireLlmProvider(
   choice: ProviderChoice,
-  registry: ProviderDescriptor<LlmModelDescriptor>[] = LLM_REGISTRY,
+  registry: ProviderDescriptor<{ id: string }>[] = LLM_REGISTRY,
 ): LlmProvider {
   // The model is checked first, exactly as `openSttSession` checks it. Settings
   // type `modelId` as a plain string, so a stale or hand-edited choice can name

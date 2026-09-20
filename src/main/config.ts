@@ -44,7 +44,7 @@ const ElectronStore = ((ElectronStoreImport as unknown as { default?: unknown })
 const MAX_CORRUPT_FILES = 3;
 
 /** Bump when the Settings shape changes, and add a step to MIGRATIONS. */
-export const CURRENT_SCHEMA_VERSION = 3;
+export const CURRENT_SCHEMA_VERSION = 4;
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -85,6 +85,9 @@ export const MIGRATIONS: Record<number, (input: UnknownRecord) => UnknownRecord>
       overlayWindow: { clickThrough: true, ...stored },
     };
   },
+  // 3 -> 4: choices may carry an optional, model-specific effort value.
+  // Existing selections are intentionally unchanged.
+  3: (input) => ({ ...input, schemaVersion: 4 }),
 };
 
 function clamp(value: number, min: number, max: number): number {

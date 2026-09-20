@@ -20,6 +20,7 @@ const ok = z.object({ ok: z.literal(true) });
 const providerChoice = z.object({
   providerId: z.string().min(1),
   modelId: z.string().min(1),
+  effort: z.string().min(1).optional(),
 });
 
 const credentialId = z.enum(['deepgram', 'openai', 'anthropic', 'elevenlabs']);
@@ -30,6 +31,33 @@ const streamState = z.enum(['idle', 'starting', 'running', 'error']);
 const validationResult = z.object({
   ok: z.boolean(),
   reason: z.string().optional(),
+});
+
+const llmModelDescriptor = z.object({
+  id: z.string().min(1),
+  displayName: z.string().min(1),
+  providerId: z.enum(['openai', 'anthropic']),
+  releasedAt: z.string().nullable(),
+  status: z.enum(['available', 'legacy', 'unavailable']),
+  streamingText: z.boolean(),
+  effort: z.object({ allowed: z.array(z.string()).min(1), default: z.string() }).nullable(),
+  pricing: z.discriminatedUnion('known', [
+    z.object({ known: z.literal(true), inputPerMTokUsd: z.number(), outputPerMTokUsd: z.number() }),
+    z.object({ known: z.literal(false) }),
+  ]),
+});
+
+const llmCatalogResult = z.object({
+  providers: z.array(
+    z.object({
+      providerId: z.enum(['openai', 'anthropic']),
+      displayName: z.string(),
+      models: z.array(llmModelDescriptor),
+      lastSuccessfulRefresh: z.string().nullable(),
+      state: z.enum(['ready', 'fallback', 'missing-key', 'error']),
+      message: z.string().optional(),
+    }),
+  ),
 });
 
 const sttCatalogModel = z.object({
@@ -69,7 +97,7 @@ const sttCatalog = z.object({
 });
 
 export const settingsSchema = z.object({
-  schemaVersion: z.literal(3),
+  schemaVersion: z.literal(4),
   activeProfileId: z.string(),
   providers: z.object({
     stt: z.object({ primary: providerChoice, backup: providerChoice.nullable() }),
@@ -246,6 +274,16 @@ export const invokeChannels = {
       anthropic: z.boolean(),
       elevenlabs: z.boolean(),
     }),
+  },
+  'llmCatalog:get': {
+    id: 'CH-130',
+    payload: z.void(),
+    response: llmCatalogResult,
+  },
+  'llmCatalog:refresh': {
+    id: 'CH-131',
+    payload: z.void(),
+    response: llmCatalogResult,
   },
   'catalog:stt': {
     id: 'CH-129',
@@ -673,6 +711,10 @@ export const pushChannels = {
   'notice:session': {
     id: 'CH-217',
     payload: z.object({ sessionId: z.string(), message: z.string() }),
+  },
+  'state:llmCatalog': {
+    id: 'CH-218',
+    payload: llmCatalogResult,
   },
 } as const;
 
