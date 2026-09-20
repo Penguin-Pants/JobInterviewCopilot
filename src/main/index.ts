@@ -35,6 +35,7 @@ import { RagEngine, SUPPORTED_EXTENSIONS } from './rag.js';
 import { installGlobalHandlers, useAppOwnedTempDir } from './resilience.js';
 import { SecretVaultStore } from './secrets.js';
 import { SessionNoticeHolder } from './session-notice.js';
+import { SttCatalogService } from './stt-catalog.js';
 import {
   SessionManager,
   SessionStartRefused,
@@ -80,6 +81,7 @@ let secrets: SecretVaultStore;
 let hotkeys: HotkeyManager;
 let router: IpcRouter;
 let llmCatalog: LlmCatalogService;
+let sttCatalog: SttCatalogService;
 
 let audioHost: ElectronAudioWorkerHost;
 let audio: AudioSupervisor;
@@ -257,6 +259,7 @@ async function bootstrap(): Promise<void> {
     onError: (message, detail) => getLogger().warn(message, detail),
     onUpdated: (catalog) => push(dashboardWindow?.webContents, 'state:llmCatalog', catalog),
   });
+  sttCatalog = new SttCatalogService({ dir: userData, keyFor: (id) => secrets.peek(id) });
 
   await app.whenReady();
   applyContentSecurityPolicy();
@@ -1253,12 +1256,21 @@ function registerIpcHandlers(): void {
   router.handle('secrets:status', () => secrets.status());
   router.handle('llmCatalog:get', () => llmCatalog.get());
   router.handle('llmCatalog:refresh', () => llmCatalog.refresh());
+  router.handle('catalog:stt', ({ force }) => sttCatalog.get(force));
   router.handle('secrets:set', async ({ provider, key }) => {
     const result = await secrets.set(provider, key, validateWithinDeadline);
     // A saved, validated key is the only thing that clears CONFIG_REQUIRED for
     // that credential (FR-026, ADR-024). Checked on the result, because a key
     // that failed validation was never saved and changes nothing.
     if (result.ok) {
+      try {
+        sttCatalog.invalidate(provider);
+      } catch (error) {
+        // The key is already safely stored. A cache-cleanup filesystem error
+        // must not report that save as failed; memory is invalidated and the
+        // next catalog request will refresh it for this process.
+        getLogger().warn('STT catalog cache invalidation could not be persisted', error);
+      }
       health.noteKeySaved(provider);
       if (findLlmProvider(provider)) {
         llmCatalog.invalidate(provider);

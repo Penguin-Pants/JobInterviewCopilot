@@ -53,8 +53,29 @@ export interface SttModelDescriptor {
   batchIntervalMs?: number;
   audio: { encoding: 'linear16'; sampleRate: 16000; channels: 1 };
   pricePerAudioMinuteUsd: number;
+  /** Runtime-catalog metadata. Omitted on the shipped compatibility entries. */
+  providerId?: string;
+  providerDisplayName?: string;
+  releasedAt?: string;
+  catalogStatus?: 'available' | 'legacy' | 'unavailable';
+  catalogSource?: 'account' | 'fallback';
+  priceKnown?: boolean;
   /** Dashboard badge text, for example the non-streaming penalty (FR-049). */
   badge?: string;
+}
+
+export interface SttCatalogProvider {
+  providerId: string;
+  displayName: string;
+  source: 'account' | 'fallback';
+  state: 'ready' | 'stale' | 'missing-key' | 'fallback' | 'error';
+  lastSuccessfulRefresh: string | null;
+  models: SttModelDescriptor[];
+  message?: string;
+}
+
+export interface SttCatalogSnapshot {
+  providers: SttCatalogProvider[];
 }
 
 /** An LLM model and its price (FR-071). */

@@ -23,6 +23,7 @@ import type {
   SecretStatus,
   Settings,
   SttModelDescriptor,
+  SttCatalogSnapshot,
 } from '../../../shared/types.js';
 import { call } from '../call.js';
 import type { ProvidersState } from '../state.js';
@@ -48,6 +49,7 @@ function modelsOf<M>(registry: ProviderDescriptor<M>[], providerId: string): M[]
 
 /** Price per audio minute, written so a fraction of a cent is still readable. */
 function sttPrice(model: SttModelDescriptor): string {
+  if (model.priceKnown === false) return 'Price unavailable';
   return `$${model.pricePerAudioMinuteUsd.toFixed(4)} per audio minute`;
 }
 
@@ -220,19 +222,19 @@ export function ProviderSetup({
   const [saved, setSaved] = useState(false);
   const [keys, setKeys] = useState<Record<string, string>>({});
   const [keyStates, setKeyStates] = useState<Record<string, KeyState>>({});
-  const [catalog, setCatalog] = useState<LlmCatalogProvider[] | null>(null);
-  const [catalogMessage, setCatalogMessage] = useState('Loading models…');
+  const [llmCatalog, setLlmCatalog] = useState<LlmCatalogProvider[] | null>(null);
+  const [llmCatalogMessage, setLlmCatalogMessage] = useState('Loading models…');
 
-  async function loadCatalog(force = false): Promise<void> {
-    setCatalogMessage(force ? 'Refreshing models…' : 'Loading models…');
+  async function loadLlmCatalog(force = false): Promise<void> {
+    setLlmCatalogMessage(force ? 'Refreshing models…' : 'Loading models…');
     const result = await call(force ? 'llmCatalog:refresh' : 'llmCatalog:get');
     if (!result.ok) {
-      setCatalogMessage(`Models could not be loaded. ${result.message}`);
+      setLlmCatalogMessage(`Models could not be loaded. ${result.message}`);
       return;
     }
-    setCatalog(result.value.providers);
+    setLlmCatalog(result.value.providers);
     const failures = result.value.providers.filter((provider) => provider.state !== 'ready');
-    setCatalogMessage(
+    setLlmCatalogMessage(
       failures.length === 0
         ? 'Models are up to date.'
         : failures
@@ -245,11 +247,11 @@ export function ProviderSetup({
   }
 
   useEffect(() => {
-    void loadCatalog();
+    void loadLlmCatalog();
     return window.copilot.on('state:llmCatalog', (result) => {
-      setCatalog(result.providers);
+      setLlmCatalog(result.providers);
       const failures = result.providers.filter((provider) => provider.state !== 'ready');
-      setCatalogMessage(
+      setLlmCatalogMessage(
         failures.length === 0
           ? 'Models are up to date.'
           : failures
@@ -262,6 +264,41 @@ export function ProviderSetup({
     });
   }, []);
 
+  const [sttCatalog, setSttCatalog] = useState<SttCatalogSnapshot | null>(null);
+  const [sttCatalogLoading, setSttCatalogLoading] = useState(true);
+  const [sttCatalogError, setSttCatalogError] = useState<string | null>(null);
+
+  async function loadSttCatalog(force = false): Promise<void> {
+    setSttCatalogLoading(true);
+    setSttCatalogError(null);
+    const result = await call('catalog:stt', { force });
+    if (result.ok) setSttCatalog(result.value);
+    else setSttCatalogError(result.message);
+    setSttCatalogLoading(false);
+  }
+  useEffect(() => {
+    void loadSttCatalog();
+  }, []);
+
+  const sttRegistry = useMemo<ProviderDescriptor<SttModelDescriptor>[]>(() => {
+    if (!sttCatalog) return STT_REGISTRY;
+    return STT_REGISTRY.map((provider) => {
+      const runtime = sttCatalog.providers.find((entry) => entry.providerId === provider.id);
+      const models = runtime?.models ? [...runtime.models] : [...provider.models];
+      for (const choice of [draft.stt.primary, draft.stt.backup]) {
+        if (
+          choice?.providerId === provider.id &&
+          !models.some((model) => model.id === choice.modelId)
+        ) {
+          const shipped = provider.models.find((model) => model.id === choice.modelId);
+          if (shipped)
+            models.push({ ...shipped, catalogStatus: 'unavailable', catalogSource: 'fallback' });
+        }
+      }
+      return { ...provider, models };
+    });
+  }, [sttCatalog, draft.stt]);
+
   // The main process owns the settings, so a change made anywhere else has to
   // land here or Save would write a stale draft back. Keyed on the *value*, not
   // on the object: `config:get` answers with a fresh object every time, so any
@@ -273,7 +310,7 @@ export function ProviderSetup({
   }, [storedProviders]);
 
   const sttConflict = backupConflict(draft.stt.primary, draft.stt.backup, (id) =>
-    providerName(STT_REGISTRY, id),
+    providerName(sttRegistry, id),
   );
   const llmConflict = backupConflict(draft.llm.primary, draft.llm.backup, (id) =>
     providerName(LLM_REGISTRY, id),
@@ -281,19 +318,19 @@ export function ProviderSetup({
 
   const sttPrimaryModel = useMemo(
     () =>
-      modelsOf(STT_REGISTRY, draft.stt.primary.providerId).find(
+      modelsOf(sttRegistry, draft.stt.primary.providerId).find(
         (m) => m.id === draft.stt.primary.modelId,
       ) ?? null,
-    [draft.stt.primary],
+    [draft.stt.primary, sttRegistry],
   );
   const sttBackupModel = useMemo(
     () =>
       draft.stt.backup
-        ? (modelsOf(STT_REGISTRY, draft.stt.backup.providerId).find(
+        ? (modelsOf(sttRegistry, draft.stt.backup.providerId).find(
             (m) => m.id === draft.stt.backup?.modelId,
           ) ?? null)
         : null,
-    [draft.stt.backup],
+    [draft.stt.backup, sttRegistry],
   );
 
   const consequences = [sttPrimaryModel, sttBackupModel]
@@ -406,16 +443,39 @@ export function ProviderSetup({
       ) : null}
 
       <h3>Speech to text</h3>
+      <button
+        type="button"
+        disabled={sttCatalogLoading || sessionActive}
+        onClick={() => void loadSttCatalog(true)}
+      >
+        {sttCatalogLoading ? 'Loading models…' : 'Refresh models'}
+      </button>
+      {sttCatalogError ? <p role="alert">{sttCatalogError}</p> : null}
+      {sttCatalog?.providers.map((provider) => (
+        <p
+          key={provider.providerId}
+          role="status"
+          data-testid={`catalog-state-${provider.providerId}`}
+        >
+          {provider.displayName}: {provider.state}
+          {provider.lastSuccessfulRefresh
+            ? ` — refreshed ${new Date(provider.lastSuccessfulRefresh).toLocaleString()}`
+            : ''}
+          {provider.message ? ` — ${provider.message}` : ''}
+        </p>
+      ))}
       <SttSlot
         slot="stt-primary"
         label="Primary"
         choice={draft.stt.primary}
+        registry={sttRegistry}
         onChange={(choice) => setSttChoice('primary', choice)}
       />
       <SttSlot
         slot="stt-backup"
         label="Backup"
         choice={draft.stt.backup}
+        registry={sttRegistry}
         optional
         onChange={(choice) => setSttChoice('backup', choice)}
       />
@@ -426,13 +486,17 @@ export function ProviderSetup({
       ) : null}
 
       <h3>Language model</h3>
-      <button type="button" data-testid="refresh-llm-models" onClick={() => void loadCatalog(true)}>
+      <button
+        type="button"
+        data-testid="refresh-llm-models"
+        onClick={() => void loadLlmCatalog(true)}
+      >
         Refresh models
       </button>
       <span role="status" data-testid="llm-catalog-state">
-        {catalogMessage}
+        {llmCatalogMessage}
       </span>
-      {catalog?.map((provider) =>
+      {llmCatalog?.map((provider) =>
         provider.lastSuccessfulRefresh ? (
           <p key={provider.providerId}>
             {provider.displayName} last refreshed{' '}
@@ -444,14 +508,14 @@ export function ProviderSetup({
         slot="llm-primary"
         label="Primary"
         choice={draft.llm.primary}
-        catalog={catalog}
+        catalog={llmCatalog}
         onChange={(choice) => setLlmChoice('primary', choice)}
       />
       <LlmSlot
         slot="llm-backup"
         label="Backup"
         choice={draft.llm.backup}
-        catalog={catalog}
+        catalog={llmCatalog}
         optional
         onChange={(choice) => setLlmChoice('backup', choice)}
       />
@@ -569,9 +633,12 @@ function SttSlot({
   choice,
   optional,
   onChange,
-}: SlotProps<ProviderChoice | null>): JSX.Element {
+  registry,
+}: SlotProps<ProviderChoice | null> & {
+  registry: ProviderDescriptor<SttModelDescriptor>[];
+}): JSX.Element {
   const providerId = choice?.providerId ?? '';
-  const models = providerId ? modelsOf(STT_REGISTRY, providerId) : [];
+  const models = providerId ? modelsOf(registry, providerId) : [];
   return (
     <div className="slot" data-testid={`slot-${slot}`}>
       <label htmlFor={`${slot}-provider`}>{label} provider</label>
@@ -582,12 +649,12 @@ function SttSlot({
         onChange={(e) => {
           const nextProvider = e.target.value;
           if (nextProvider === '') return onChange(null);
-          const first = modelsOf(STT_REGISTRY, nextProvider)[0];
+          const first = modelsOf(registry, nextProvider)[0];
           onChange(first ? { providerId: nextProvider, modelId: first.id } : null);
         }}
       >
         {optional ? <option value="">None</option> : null}
-        {STT_REGISTRY.map((provider) => (
+        {registry.map((provider) => (
           <option key={provider.id} value={provider.id}>
             {provider.displayName}
           </option>
@@ -602,10 +669,16 @@ function SttSlot({
         disabled={providerId === ''}
         onChange={(e) => onChange({ providerId, modelId: e.target.value })}
       >
+        {choice && !models.some((model) => model.id === choice.modelId) ? (
+          <option value={choice.modelId}>{choice.modelId} (unavailable)</option>
+        ) : null}
         {models.map((model) => (
           <option key={model.id} value={model.id}>
-            {model.displayName} — {model.streaming ? 'streams' : 'does not stream'} —{' '}
-            {sttPrice(model)}
+            {model.displayName}
+            {model.catalogStatus && model.catalogStatus !== 'available'
+              ? ` (${model.catalogStatus})`
+              : ''}{' '}
+            — {model.streaming ? 'streams' : 'does not stream'} — {sttPrice(model)}
           </option>
         ))}
       </select>

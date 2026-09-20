@@ -23,6 +23,7 @@ const ALLOWED_INVOKE: readonly InvokeChannel[] = [
   'secrets:status',
   'llmCatalog:get',
   'llmCatalog:refresh',
+  'catalog:stt',
   'profile:list',
   'profile:create',
   'profile:delete',

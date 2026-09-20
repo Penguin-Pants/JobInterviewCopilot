@@ -139,3 +139,6 @@ that admits its edges:
 
 None of these is a gap the pipeline can close. They are the reason section 6
 exists and the reason a release is gated on a human having run it.
+
+- [ ] Verify Provider Setup reports account, fallback, missing-key, stale, and partial provider results without exposing credentials.
+- [ ] Verify `stt-catalog.json` contains descriptors and timestamps only and survives an offline forced refresh.
