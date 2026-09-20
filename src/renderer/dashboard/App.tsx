@@ -314,7 +314,6 @@ export function Dashboard(): JSX.Element {
 
         <button
           type="button"
-          className="primary-button"
           data-testid="start-session"
           disabled={starting || data.session.active}
           onClick={() => void startSession()}
@@ -323,6 +322,7 @@ export function Dashboard(): JSX.Element {
         </button>
         <button
           type="button"
+          className="secondary-button"
           data-testid="stop-session"
           disabled={stopping || !data.session.active}
           onClick={() => void stopSession()}

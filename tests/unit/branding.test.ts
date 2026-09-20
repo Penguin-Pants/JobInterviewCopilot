@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 describe('approved Interview Copilot identity', () => {
@@ -9,6 +9,9 @@ describe('approved Interview Copilot identity', () => {
     expect(builder).toContain('appId: com.interviewcopilot.app');
     expect(builder).toContain('productName: Interview Copilot');
     expect(builder).toContain('icon: branding/app-icon.ico');
+    expect(builder).toContain('installerIcon: branding/app-icon.ico');
+    expect(builder).toContain('uninstallerIcon: branding/app-icon.ico');
+    expect(existsSync('branding/app-icon.ico')).toBe(true);
     expect(tokens).toContain('--brand-primary: #3b82f6');
     expect(tokens).not.toMatch(/--accent\s*:/);
   });

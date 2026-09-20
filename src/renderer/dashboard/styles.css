@@ -226,13 +226,10 @@ textarea {
 }
 
 button {
-  appearance: none;
-  background: var(--surface);
-  border: 1px solid var(--border);
+  background: var(--accent);
+  border: 1px solid transparent;
   border-radius: var(--radius-control);
-  /* `App.tsx` computes this against the chosen accent, so button text stays
-     readable however light or dark a user picks (--accent is editable). */
-  color: var(--text);
+  color: var(--accent-foreground, #ffffff);
   cursor: pointer;
   font: inherit;
   margin: 0.2rem 0.4rem 0.2rem 0;
@@ -248,11 +245,10 @@ button:hover:not(:disabled) {
   border-color: var(--accent);
 }
 
-button[type='submit'],
-button.primary-button {
-  background: var(--accent);
-  border-color: transparent;
-  color: var(--accent-foreground, #ffffff);
+button.secondary-button {
+  background: var(--surface);
+  border-color: var(--border);
+  color: var(--text);
 }
 
 button:disabled {

@@ -33,6 +33,8 @@ win:
         - x64
   artifactName: ${productName}-${version}-x64.${ext}
 nsis:
+  installerIcon: branding/app-icon.ico
+  uninstallerIcon: branding/app-icon.ico
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
