@@ -40,7 +40,11 @@ const cacheSchema = z.object({
   schemaVersion: z.literal(1),
   providers: z.record(
     z.string(),
-    z.object({ refreshedAt: z.string().datetime(), models: z.array(modelSchema).min(1) }),
+    z.object({
+      refreshedAt: z.string().datetime(),
+      credentialVersion: z.string().uuid().optional(),
+      models: z.array(modelSchema).min(1),
+    }),
   ),
 });
 type Cache = z.infer<typeof cacheSchema>;
@@ -49,6 +53,7 @@ export type CatalogFetch = typeof fetch;
 export interface SttCatalogOptions {
   dir: string;
   keyFor: (id: CredentialId) => string | undefined;
+  credentialVersionFor?: (id: CredentialId) => string | undefined;
   fetch?: CatalogFetch;
   now?: () => number;
 }
@@ -157,8 +162,10 @@ export class SttCatalogService {
         'This provider does not expose a safe account-availability catalog for this realtime path.',
       );
     }
+    const credentialVersion = this.options.credentialVersionFor?.(descriptor.credentialId);
+    const versionMatches = cached?.credentialVersion === credentialVersion;
     const age = cached ? this.now() - Date.parse(cached.refreshedAt) : Number.POSITIVE_INFINITY;
-    const fresh = cached && age >= 0 && age < STT_CATALOG_MAX_AGE_MS;
+    const fresh = cached && versionMatches && age >= 0 && age < STT_CATALOG_MAX_AGE_MS;
     if (fresh && !force) return this.result(providerId, cached, 'ready');
     try {
       const generation = this.generations.get(providerId) ?? 0;
@@ -175,6 +182,7 @@ export class SttCatalogService {
         throw new Error('No compatible speech-to-text models were returned.');
       const next = {
         refreshedAt: new Date(this.now()).toISOString(),
+        ...(credentialVersion ? { credentialVersion } : {}),
         models: sortCatalogModels(models),
       };
       // Do not publish the replacement in memory until the atomic disk write
@@ -187,7 +195,10 @@ export class SttCatalogService {
       return this.result(providerId, next, 'ready');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Model discovery failed.';
-      return this.result(providerId, cached, cached ? 'stale' : 'fallback', message);
+      const current = this.cache.providers[providerId];
+      const currentVersion = this.options.credentialVersionFor?.(descriptor.credentialId);
+      const usable = current?.credentialVersion === currentVersion ? current : undefined;
+      return this.result(providerId, usable, usable ? 'stale' : 'fallback', message);
     }
   }
   private result(

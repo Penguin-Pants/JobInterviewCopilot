@@ -179,6 +179,8 @@ export interface SecretVault {
   openaiApiKey?: string;
   anthropicApiKey?: string;
   elevenlabsApiKey?: string;
+  /** Random rotation markers; encrypted with the keys and never sent over IPC. */
+  credentialVersions?: Partial<Record<CredentialId, string>>;
 }
 
 /** Which credentials are present. The only secret-shaped thing a renderer sees. */

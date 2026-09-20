@@ -410,7 +410,9 @@ export function ProviderSetup({
     // about what happened, whichever way the check went.
     if (result.value.ok) {
       setKeys((k) => ({ ...k, [credentialId]: '' }));
-      await loadSttCatalog(true);
+      if (STT_REGISTRY.some((provider) => provider.credentialId === credentialId)) {
+        await loadSttCatalog(true);
+      }
     }
     await onSecretsChanged();
   }

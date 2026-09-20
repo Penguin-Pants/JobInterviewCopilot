@@ -153,6 +153,15 @@ describe('TC-024 validate before save', () => {
     expect(vault.status().elevenlabs).toBe(true);
   });
 
+  it('rotates an opaque credential version whenever a key is replaced', async () => {
+    const vault = new SecretVaultStore({ dir: tmp(), safeStorage: fakeSafeStorage() });
+    await vault.set('openai', SAMPLE_KEY, alwaysValid);
+    const first = vault.version('openai');
+    await vault.set('openai', `${SAMPLE_KEY}replacement`, alwaysValid);
+    expect(first).toBeTruthy();
+    expect(vault.version('openai')).not.toBe(first);
+  });
+
   it('clear removes one credential and leaves the others', async () => {
     const vault = new SecretVaultStore({ dir: tmp(), safeStorage: fakeSafeStorage() });
     await vault.set('openai', SAMPLE_KEY, alwaysValid);

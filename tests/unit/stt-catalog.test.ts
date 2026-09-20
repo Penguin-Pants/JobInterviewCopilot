@@ -205,4 +205,54 @@ describe('STT runtime catalog', () => {
       vi.useRealTimers();
     }
   });
+
+  it('returns the newest cache when an older overlapping refresh fails', async () => {
+    let rejectOld!: (reason: Error) => void;
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(response({ data: [{ id: 'whisper-1' }] }))
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((_resolve, reject) => {
+            rejectOld = reject;
+          }),
+      )
+      .mockResolvedValueOnce(response({ data: [{ id: 'gpt-4o-transcribe' }] }));
+    const catalog = new SttCatalogService({ dir: dir(), keyFor: () => 'key', fetch: fetcher });
+    await catalog.get(true);
+    const old = catalog.get(true);
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+    await catalog.get(true);
+    rejectOld(new Error('offline'));
+    const result = await old;
+    expect(result.providers.find((p) => p.providerId === 'openai')?.models[0]?.id).toBe(
+      'gpt-4o-transcribe',
+    );
+  });
+
+  it('does not trust an old-account cache after restart', async () => {
+    const root = dir();
+    let version = '11111111-1111-4111-8111-111111111111';
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(response({ data: [{ id: 'whisper-1' }] }))
+      .mockResolvedValueOnce(response({ data: [{ id: 'gpt-4o-transcribe' }] }));
+    await new SttCatalogService({
+      dir: root,
+      keyFor: () => 'key-a',
+      credentialVersionFor: () => version,
+      fetch: fetcher,
+    }).get();
+    version = '22222222-2222-4222-8222-222222222222';
+    const result = await new SttCatalogService({
+      dir: root,
+      keyFor: () => 'key-b',
+      credentialVersionFor: () => version,
+      fetch: fetcher,
+    }).get();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(result.providers.find((p) => p.providerId === 'openai')?.models[0]?.id).toBe(
+      'gpt-4o-transcribe',
+    );
+  });
 });
