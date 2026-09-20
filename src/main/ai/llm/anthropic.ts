@@ -7,6 +7,7 @@
  */
 import type { ValidationResult } from '../../../shared/types.js';
 import { providerError } from '../stt.js';
+import { findLlmModel } from '../../../shared/registry/llm.js';
 import { buildMessages, type GenerationRequest, type LlmChunk, type LlmProvider } from '../llm.js';
 import {
   classifyStatus,
@@ -98,10 +99,19 @@ async function* stream(
   }
 
   const messages = buildMessages(req);
+  const descriptor = findLlmModel(req.choice);
+  const effort = descriptor?.effort?.allowed.includes(req.choice.effort ?? '')
+    ? req.choice.effort
+    : descriptor?.effort?.default;
+  const classification = req.purpose === 'classification';
   const body = JSON.stringify({
     model: req.choice.modelId,
     max_tokens: messages.maxTokens,
-    temperature: messages.temperature,
+    ...(descriptor?.effort && !classification
+      ? { thinking: { type: 'adaptive' }, output_config: { effort } }
+      : {
+          temperature: messages.temperature,
+        }),
     system: messages.system,
     messages: [{ role: 'user', content: messages.user }],
     stream: true,

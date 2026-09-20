@@ -2231,7 +2231,16 @@ Carried forward from product discovery. Do not add without a new decision.
 - No hard cost cutoff. The threshold produces a warning only. (`FR-103`)
 - No per-application audio capture. Loopback takes all system audio. (ADR-021)
 - No transcript encryption at rest. Transcripts are plaintext JSON and the Dashboard says so. (OQ-001)
+### ADR-050 — Account-aware LLM catalogs are cached policy output
 
-### ADR-038 — Conservative account-aware STT catalog
+OpenAI and Anthropic remain fixed provider identities, while their selectable suggestion models
+come from main-process discovery. Provider responses are validated and filtered by one conservative
+compatibility policy, then atomically cached in `userData/llm-catalog.json` for 28 days. Credential
+replacement invalidates that provider's cache. Discovery failure never replaces known-good data;
+saved missing models remain visible and are not silently rewritten. The shipped price table remains
+authoritative, so newly discovered models have unknown rather than invented prices. Model-specific
+effort is normalized in settings and translated only by the matching adapter.
+
+### ADR-051 — Conservative account-aware STT catalog
 
 Use authenticated discovery only when the provider response safely represents account-visible identifiers, and intersect incomplete provider metadata with one verified compatibility policy. Never classify by model-name prefix. Cache last-known-good results for 28 days; use explicitly labelled shipped fallback metadata where an endpoint cannot establish realtime STT entitlement.

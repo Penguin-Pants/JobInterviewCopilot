@@ -20,6 +20,7 @@ import {
 } from './audio-host.js';
 import { ProviderHealthRegistry } from './ai/health.js';
 import { registerAllLlmProviders } from './ai/llm/index.js';
+import { LlmCatalogService } from './ai/llm/catalog.js';
 import { registerAllSttProviders } from './ai/stt/index.js';
 import { TriggerMachine, type TriggerConfig } from './ai/trigger.js';
 import { validateCredential } from './ai/validate.js';
@@ -79,6 +80,7 @@ let config: ConfigStore;
 let secrets: SecretVaultStore;
 let hotkeys: HotkeyManager;
 let router: IpcRouter;
+let llmCatalog: LlmCatalogService;
 let sttCatalog: SttCatalogService;
 
 let audioHost: ElectronAudioWorkerHost;
@@ -247,6 +249,16 @@ async function bootstrap(): Promise<void> {
     onCorrupt: (path, reason) => getLogger().warn('settings quarantined', { path, reason }),
   });
   secrets = new SecretVaultStore({ dir: userData, safeStorage });
+  llmCatalog = new LlmCatalogService({
+    dir: userData,
+    keyFor: (provider) => secrets.peek(provider),
+    choices: () => {
+      const llm = config.get().providers.llm;
+      return [llm.primary, llm.backup];
+    },
+    onError: (message, detail) => getLogger().warn(message, detail),
+    onUpdated: (catalog) => push(dashboardWindow?.webContents, 'state:llmCatalog', catalog),
+  });
   sttCatalog = new SttCatalogService({ dir: userData, keyFor: (id) => secrets.peek(id) });
 
   await app.whenReady();
@@ -1242,6 +1254,8 @@ function registerIpcHandlers(): void {
   });
 
   router.handle('secrets:status', () => secrets.status());
+  router.handle('llmCatalog:get', () => llmCatalog.get());
+  router.handle('llmCatalog:refresh', () => llmCatalog.refresh());
   router.handle('catalog:stt', ({ force }) => sttCatalog.get(force));
   router.handle('secrets:set', async ({ provider, key }) => {
     const result = await secrets.set(provider, key, validateWithinDeadline);
@@ -1258,6 +1272,10 @@ function registerIpcHandlers(): void {
         getLogger().warn('STT catalog cache invalidation could not be persisted', error);
       }
       health.noteKeySaved(provider);
+      if (findLlmProvider(provider)) {
+        llmCatalog.invalidate(provider);
+        void llmCatalog.refresh();
+      }
     }
     return result;
   });
