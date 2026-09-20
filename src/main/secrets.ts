@@ -48,7 +48,7 @@ export class EncryptionUnavailableError extends Error {
   constructor() {
     super(
       'Windows credential encryption is unavailable, so API keys cannot be stored. ' +
-        'Interview CoPilot will not fall back to storing keys in plain text (FR-022).',
+        'Interview Copilot will not fall back to storing keys in plain text (FR-022).',
     );
     this.name = 'EncryptionUnavailableError';
   }

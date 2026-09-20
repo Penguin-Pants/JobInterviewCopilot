@@ -1,5 +1,5 @@
 appId: com.interviewcopilot.app
-productName: Interview CoPilot
+productName: Interview Copilot
 directories:
   output: release
   buildResources: build
@@ -26,6 +26,7 @@ asarUnpack:
   - '**/node_modules/chokidar/**'
   - '**/node_modules/readdirp/**'
 win:
+  icon: branding/app-icon.ico
   target:
     - target: nsis
       arch:

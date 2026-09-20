@@ -7,7 +7,7 @@ import type { Settings } from './types.js';
  */
 
 export const DEFAULT_CONSENT_REMINDER_TEXT =
-  'Interview CoPilot is running and will show you private cues during this session. ' +
+  'Interview Copilot is running and will show you private cues during this session. ' +
   'Telling your interviewer that you use an accessibility aid is your call and your ' +
   'responsibility. A text transcript of this session is saved on this computer as an ' +
   'unencrypted local file and is kept until you delete it. No audio is ever saved.';
