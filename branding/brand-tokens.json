@@ -1,0 +1,29 @@
+{
+  "name": "Interview Copilot",
+  "concept": "Primary & Outline / Co-pilot Seat",
+  "colors": {
+    "brand_primary": "#3B82F6",
+    "brand_accent": "#60A5FA",
+    "brand_text_dark": "#F4F6FA",
+    "brand_muted_dark": "#A1A1AA",
+    "brand_surface_dark": "#1F2937",
+    "brand_background_dark": "#0B0F17",
+    "brand_border_dark": "#334155",
+    "brand_text_light": "#111827",
+    "brand_muted_light": "#5F6673",
+    "brand_surface_light": "#FFFFFF",
+    "brand_background_light": "#F7F8FA",
+    "brand_border_light": "#D7DCE3"
+  },
+  "radii": {
+    "control": 8,
+    "card": 12,
+    "feature": 16
+  },
+  "motion_ms": {
+    "fast": 120,
+    "standard": 180,
+    "entrance": 260
+  },
+  "font_stack": "system-ui, \"Segoe UI Variable\", \"Segoe UI\", sans-serif"
+}

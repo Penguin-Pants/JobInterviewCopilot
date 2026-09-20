@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="160" viewBox="0 0 760 160" role="img" aria-label="Interview Copilot">
+  <rect width="760" height="160" rx="26" fill="#0B0F17"/>
+  <g transform="translate(28,30) scale(1)">
+    
+    <circle cx="29" cy="29" r="8.5" fill="#F4F6FA"/>
+    <rect x="16" y="42" width="27" height="30" rx="9" fill="#F4F6FA"/>
+    <circle cx="68" cy="29" r="8.5" fill="none" stroke="#3B82F6" stroke-width="7.0" />
+    <rect x="53" y="42" width="28" height="30" rx="9" fill="none" stroke="#3B82F6" stroke-width="7.0" />
+    
+  </g>
+  <text x="150" y="99" fill="#F4F6FA" font-family="Segoe UI, Arial, sans-serif" font-size="54" font-weight="600">Interview</text>
+  <text x="385" y="99" fill="#3B82F6" font-family="Segoe UI, Arial, sans-serif" font-size="54" font-weight="600">Copilot</text>
+</svg>
