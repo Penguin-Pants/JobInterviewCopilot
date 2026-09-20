@@ -2231,3 +2231,7 @@ Carried forward from product discovery. Do not add without a new decision.
 - No hard cost cutoff. The threshold produces a warning only. (`FR-103`)
 - No per-application audio capture. Loopback takes all system audio. (ADR-021)
 - No transcript encryption at rest. Transcripts are plaintext JSON and the Dashboard says so. (OQ-001)
+
+### ADR-038 — Conservative account-aware STT catalog
+
+Use authenticated discovery only when the provider response safely represents account-visible identifiers, and intersect incomplete provider metadata with one verified compatibility policy. Never classify by model-name prefix. Cache last-known-good results for 28 days; use explicitly labelled shipped fallback metadata where an endpoint cannot establish realtime STT entitlement.

@@ -9,7 +9,7 @@ so a requirement could report coverage with no test that would fail if it
 broke. The script exits non-zero on any gap, so CI fails when the documents
 drift.
 
-Coverage: 113 requirements, 32 tasks, 158 automated test cases, 15 manual checks.
+Coverage: 116 requirements, 33 tasks, 165 automated test cases, 15 manual checks.
 
 ## Requirement to task to test
 
@@ -110,6 +110,9 @@ Coverage: 113 requirements, 32 tasks, 158 automated test cases, 15 manual checks
 | FR-113 | TASK-061 | TC-170, TC-187 |
 | FR-114 | TASK-062 | TC-172, TC-173, TC-179, TC-189, TC-190 |
 | FR-115 | TASK-064 | TC-174, TC-175, TC-176, TC-177, TC-186 |
+| FR-116 | TASK-053 | TC-192, TC-198 |
+| FR-117 | TASK-053 | TC-194, TC-195, TC-196, TC-197, TC-198 |
+| FR-118 | TASK-053 | TC-192, TC-193, TC-195 |
 | NFR-001 | TASK-012, TASK-050 | TC-133, MW-06, MW-13 |
 | NFR-002 | TASK-011, TASK-050 | TC-042, TC-137 |
 | NFR-003 | TASK-004 | TC-022, TC-023, TC-139 |
@@ -165,3 +168,4 @@ Coverage: 113 requirements, 32 tasks, 158 automated test cases, 15 manual checks
 | TASK-062 | Stale-suggestion discard | FR-114 | TC-172, TC-173, TC-179, TC-189, TC-190 |
 | TASK-063 | Single-card overlay | FR-091 | TC-111, TC-191 |
 | TASK-064 | Card hold buffer | FR-115 | TC-174, TC-175, TC-176, TC-177, TC-186 |
+| TASK-053 | Runtime STT catalog | FR-116, FR-117, FR-118 | TC-192, TC-193, TC-194, TC-195, TC-196, TC-197, TC-198 |

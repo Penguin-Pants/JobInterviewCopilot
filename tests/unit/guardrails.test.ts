@@ -855,6 +855,9 @@ describe('TC-151 no provider id outside the registry and its adapters', () => {
     'src/shared/ipc.ts',
     'src/shared/defaults.ts',
     'src/main/secrets.ts',
+    // Runtime discovery is the one centralized provider-specific policy
+    // boundary; renderers and session machinery still cannot branch on ids.
+    'src/main/stt-catalog.ts',
   ];
 
   for (const id of PROVIDER_IDS) {

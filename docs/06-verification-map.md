@@ -133,3 +133,7 @@ is broken. A test that merely runs nearby code does not count.
 | NFR-016 | TC-146 |
 | NFR-017 | TC-150, MW-11 |
 | NFR-018 | TC-167, TC-169 |
+
+| FR-116 | TC-192, TC-198 |
+| FR-117 | TC-194, TC-195, TC-196, TC-197, TC-198 |
+| FR-118 | TC-192, TC-193, TC-195 |

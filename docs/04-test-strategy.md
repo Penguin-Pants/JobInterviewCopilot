@@ -359,3 +359,15 @@ is `docs/07-release-checklist.md`.
 | Real acrylic rendering | `backgroundMaterial` needs real Windows 11 compositing | TC-142 covers the window lifecycle, MW-01 and MW-07 cover the look |
 | Interviewer-only audio isolation | Impossible with WASAPI loopback. Not a v1 goal | ADR-021, MW-12 |
 | Installer on a clean machine | No clean-VM CI stage in v1 | TASK-051 acceptance criteria |
+
+## Runtime STT catalog
+
+Transport tests inject `fetch`; no live provider is contacted. Coverage includes authentication, conservative filtering, fallback limitations, missing keys, deterministic sorting, fresh and exactly-28-day cache behavior, forced refresh, malformed/network preservation, IPC validation, and preload allowlisting.
+
+| TC-192 | U | Account filtering and authentication | OpenAI sends a bearer credential only in main and unrelated or unknown models are excluded |
+| TC-193 | U | Fallback lifecycle semantics | Deepgram and ElevenLabs fallback entries remain available rather than being falsely labelled legacy |
+| TC-194 | U | Cache time boundaries | Fresh cache is reused, exactly 28 days is stale, and a future timestamp is stale |
+| TC-195 | U | Cache policy revalidation | Cached capabilities, names, and prices are rebuilt from the current compatibility policy |
+| TC-196 | U | Credential replacement race | A response started with an old credential cannot repopulate the invalidated cache |
+| TC-197 | U | Discovery deadline | A stalled provider request aborts and returns fallback or last-known-good data |
+| TC-198 | U | Failure preservation and ordering | Malformed, empty, network-failed, and superseded UI requests cannot replace newer usable state |
