@@ -1,0 +1,49 @@
+/* Fixed identity tokens. The runtime --accent is intentionally not defined here. */
+:root {
+  --brand-primary: #3b82f6;
+  --brand-highlight: #60a5fa;
+  --brand-bg: #f7f8fa;
+  --brand-surface: #ffffff;
+  --brand-text: #111827;
+  --brand-muted: #5f6673;
+  --brand-border: #d7dce3;
+  --radius-small: 6px;
+  --radius-control: 8px;
+  --radius-card: 12px;
+  --radius-feature: 16px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --motion-fast: 120ms;
+  --motion-standard: 180ms;
+  --font-ui: system-ui, 'Segoe UI Variable', 'Segoe UI', sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --brand-bg: #0b0f17;
+    --brand-surface: #1f2937;
+    --brand-text: #f4f6fa;
+    --brand-muted: #a1a1aa;
+    --brand-border: #334155;
+  }
+}
+
+:root[data-theme='dark'] {
+  --brand-bg: #0b0f17;
+  --brand-surface: #1f2937;
+  --brand-text: #f4f6fa;
+  --brand-muted: #a1a1aa;
+  --brand-border: #334155;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0ms;
+    --motion-standard: 0ms;
+  }
+}

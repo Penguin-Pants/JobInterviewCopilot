@@ -58,6 +58,20 @@ const TABS: TabDef[] = [
   { id: 'preferences', label: 'Preferences' },
 ];
 
+const brandIconUrl = new URL('../assets/logo-primary.svg', import.meta.url).href;
+
+function BrandLockup(): JSX.Element {
+  return (
+    <div className="brand-lockup">
+      <img src={brandIconUrl} alt="" width="44" height="44" />
+      <div>
+        <h1>Interview Copilot</h1>
+        <p>You lead. Copilot supports.</p>
+      </div>
+    </div>
+  );
+}
+
 /** What each refusal means in a sentence the user can act on (TC-104). */
 const REFUSALS: Record<string, string> = {
   'session-active': 'A session is already running. Stop it before starting another.',
@@ -240,7 +254,7 @@ export function Dashboard(): JSX.Element {
     // life of the window with nothing said and nothing to press.
     return (
       <main data-testid="dashboard">
-        <h1>Interview CoPilot</h1>
+        <BrandLockup />
         {data.loadError ? (
           <>
             <p role="alert" data-testid="dashboard-load-error">
@@ -266,7 +280,7 @@ export function Dashboard(): JSX.Element {
   return (
     <main data-testid="dashboard">
       <header data-testid="dashboard-header">
-        <h1>Interview CoPilot</h1>
+        <BrandLockup />
 
         {data.loadError ? (
           <p role="alert" data-testid="dashboard-load-error">
@@ -308,6 +322,7 @@ export function Dashboard(): JSX.Element {
         </button>
         <button
           type="button"
+          className="secondary-button"
           data-testid="stop-session"
           disabled={stopping || !data.session.active}
           onClick={() => void stopSession()}

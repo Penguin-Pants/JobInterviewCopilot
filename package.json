@@ -4,7 +4,7 @@
   "description": "Real-time glanceable interview cues from your own notes. Windows desktop accessibility aid.",
   "private": true,
   "license": "MIT",
-  "author": "Interview CoPilot",
+  "author": "Interview Copilot",
   "main": "out/main/index.js",
   "engines": {
     "node": ">=20.11"
