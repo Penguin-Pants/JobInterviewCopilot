@@ -259,7 +259,11 @@ async function bootstrap(): Promise<void> {
     onError: (message, detail) => getLogger().warn(message, detail),
     onUpdated: (catalog) => push(dashboardWindow?.webContents, 'state:llmCatalog', catalog),
   });
-  sttCatalog = new SttCatalogService({ dir: userData, keyFor: (id) => secrets.peek(id) });
+  sttCatalog = new SttCatalogService({
+    dir: userData,
+    keyFor: (id) => secrets.peek(id),
+    credentialVersionFor: (id) => secrets.version(id),
+  });
 
   await app.whenReady();
   applyContentSecurityPolicy();

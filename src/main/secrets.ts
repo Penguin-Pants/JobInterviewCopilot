@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { redact } from './logger.js';
 import type { CredentialId, SecretStatus, SecretVault, ValidationResult } from '../shared/types.js';
@@ -22,7 +23,8 @@ export const CREDENTIAL_IDS: readonly CredentialId[] = [
   'elevenlabs',
 ] as const;
 
-const VAULT_FIELD: Record<CredentialId, keyof SecretVault> = {
+type SecretKeyField = Exclude<keyof SecretVault, 'credentialVersions'>;
+const VAULT_FIELD: Record<CredentialId, SecretKeyField> = {
   deepgram: 'deepgramApiKey',
   openai: 'openaiApiKey',
   anthropic: 'anthropicApiKey',
@@ -147,6 +149,7 @@ export class SecretVaultStore {
 
     const vault = this.read();
     vault[VAULT_FIELD[credentialId]] = key;
+    vault.credentialVersions = { ...vault.credentialVersions, [credentialId]: randomUUID() };
     this.write(vault);
     return { ok: true };
   }
@@ -163,10 +166,20 @@ export class SecretVaultStore {
     }
   }
 
+  /** Opaque rotation marker used to reject catalogs written for an older key. */
+  version(credentialId: CredentialId): string | undefined {
+    try {
+      return this.read().credentialVersions?.[credentialId];
+    } catch {
+      return undefined;
+    }
+  }
+
   /** Remove one credential. Used when a user clears a key. */
   clear(credentialId: CredentialId): void {
     const vault = this.read();
     delete vault[VAULT_FIELD[credentialId]];
+    if (vault.credentialVersions) delete vault.credentialVersions[credentialId];
     this.write(vault);
   }
 }

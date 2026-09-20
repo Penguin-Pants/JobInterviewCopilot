@@ -5,7 +5,7 @@
  * No provider and no model is named in this file, so adding one is a registry
  * edit rather than a UI edit (FR-037, ADR-022, TC-057).
  */
-import { useEffect, useMemo, useState, type JSX } from 'react';
+import { useEffect, useMemo, useRef, useState, type JSX } from 'react';
 import { LLM_REGISTRY } from '../../../shared/registry/llm.js';
 import {
   backupConflict,
@@ -267,11 +267,14 @@ export function ProviderSetup({
   const [sttCatalog, setSttCatalog] = useState<SttCatalogSnapshot | null>(null);
   const [sttCatalogLoading, setSttCatalogLoading] = useState(true);
   const [sttCatalogError, setSttCatalogError] = useState<string | null>(null);
+  const sttCatalogRequest = useRef(0);
 
   async function loadSttCatalog(force = false): Promise<void> {
+    const request = ++sttCatalogRequest.current;
     setSttCatalogLoading(true);
     setSttCatalogError(null);
     const result = await call('catalog:stt', { force });
+    if (request !== sttCatalogRequest.current) return;
     if (result.ok) setSttCatalog(result.value);
     else setSttCatalogError(result.message);
     setSttCatalogLoading(false);
@@ -405,7 +408,12 @@ export function ProviderSetup({
     }));
     // Only a validated key is saved (FR-026), so the stored status is the truth
     // about what happened, whichever way the check went.
-    if (result.value.ok) setKeys((k) => ({ ...k, [credentialId]: '' }));
+    if (result.value.ok) {
+      setKeys((k) => ({ ...k, [credentialId]: '' }));
+      if (STT_REGISTRY.some((provider) => provider.credentialId === credentialId)) {
+        await loadSttCatalog(true);
+      }
+    }
     await onSecretsChanged();
   }
 

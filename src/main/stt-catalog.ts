@@ -10,6 +10,7 @@ import type {
 } from '../shared/types.js';
 
 export const STT_CATALOG_MAX_AGE_MS = 28 * 24 * 60 * 60 * 1000;
+export const STT_CATALOG_REQUEST_TIMEOUT_MS = 10_000;
 const PROVIDERS = ['openai', 'deepgram', 'elevenlabs'] as const;
 type SttProviderId = (typeof PROVIDERS)[number];
 
@@ -39,7 +40,11 @@ const cacheSchema = z.object({
   schemaVersion: z.literal(1),
   providers: z.record(
     z.string(),
-    z.object({ refreshedAt: z.string().datetime(), models: z.array(modelSchema).min(1) }),
+    z.object({
+      refreshedAt: z.string().datetime(),
+      credentialVersion: z.string().uuid().optional(),
+      models: z.array(modelSchema).min(1),
+    }),
   ),
 });
 type Cache = z.infer<typeof cacheSchema>;
@@ -48,6 +53,7 @@ export type CatalogFetch = typeof fetch;
 export interface SttCatalogOptions {
   dir: string;
   keyFor: (id: CredentialId) => string | undefined;
+  credentialVersionFor?: (id: CredentialId) => string | undefined;
   fetch?: CatalogFetch;
   now?: () => number;
 }
@@ -76,7 +82,7 @@ function fallback(providerId: SttProviderId): SttModelDescriptor[] {
     audio: { ...m.audio },
     providerId,
     providerDisplayName: provider.displayName,
-    catalogStatus: 'legacy',
+    catalogStatus: 'available',
     catalogSource: 'fallback',
     priceKnown: true,
   }));
@@ -87,6 +93,7 @@ export class SttCatalogService {
   private readonly fetcher: CatalogFetch;
   private readonly now: () => number;
   private cache: Cache;
+  private readonly generations = new Map<SttProviderId, number>();
   constructor(private readonly options: SttCatalogOptions) {
     mkdirSync(options.dir, { recursive: true });
     this.file = join(options.dir, 'stt-catalog.json');
@@ -97,7 +104,29 @@ export class SttCatalogService {
   private read(): Cache {
     if (!existsSync(this.file)) return { schemaVersion: 1, providers: {} };
     try {
-      return cacheSchema.parse(JSON.parse(readFileSync(this.file, 'utf8')));
+      const parsed = cacheSchema.parse(JSON.parse(readFileSync(this.file, 'utf8')));
+      for (const providerId of PROVIDERS) {
+        const entry = parsed.providers[providerId];
+        if (!entry) continue;
+        const models = entry.models.flatMap((cached) => {
+          const current = compatibleModel(providerId, cached.id);
+          return current
+            ? [
+                {
+                  ...current,
+                  providerId,
+                  releasedAt: cached.releasedAt,
+                  catalogStatus: 'available' as const,
+                  catalogSource: 'account' as const,
+                  priceKnown: true,
+                },
+              ]
+            : [];
+        });
+        if (models.length === 0) delete parsed.providers[providerId];
+        else entry.models = sortCatalogModels(models);
+      }
+      return parsed;
     } catch {
       return { schemaVersion: 1, providers: {} };
     }
@@ -109,8 +138,10 @@ export class SttCatalogService {
   }
   invalidate(credentialId: CredentialId): void {
     if (!PROVIDERS.includes(credentialId as SttProviderId)) return;
+    const providerId = credentialId as SttProviderId;
+    this.generations.set(providerId, (this.generations.get(providerId) ?? 0) + 1);
     const next = structuredClone(this.cache);
-    delete next.providers[credentialId];
+    delete next.providers[providerId];
     this.cache = next;
     this.persist(next);
   }
@@ -131,14 +162,27 @@ export class SttCatalogService {
         'This provider does not expose a safe account-availability catalog for this realtime path.',
       );
     }
-    const fresh = cached && this.now() - Date.parse(cached.refreshedAt) < STT_CATALOG_MAX_AGE_MS;
+    const credentialVersion = this.options.credentialVersionFor?.(descriptor.credentialId);
+    const versionMatches = cached?.credentialVersion === credentialVersion;
+    const age = cached ? this.now() - Date.parse(cached.refreshedAt) : Number.POSITIVE_INFINITY;
+    const fresh = cached && versionMatches && age >= 0 && age < STT_CATALOG_MAX_AGE_MS;
     if (fresh && !force) return this.result(providerId, cached, 'ready');
     try {
+      const generation = this.generations.get(providerId) ?? 0;
       const models = await this.discover(providerId, key);
+      if ((this.generations.get(providerId) ?? 0) !== generation) {
+        return this.result(
+          providerId,
+          this.cache.providers[providerId],
+          'stale',
+          'The credential changed during refresh. Refresh again to use the saved key.',
+        );
+      }
       if (models.length === 0)
         throw new Error('No compatible speech-to-text models were returned.');
       const next = {
         refreshedAt: new Date(this.now()).toISOString(),
+        ...(credentialVersion ? { credentialVersion } : {}),
         models: sortCatalogModels(models),
       };
       // Do not publish the replacement in memory until the atomic disk write
@@ -151,7 +195,10 @@ export class SttCatalogService {
       return this.result(providerId, next, 'ready');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Model discovery failed.';
-      return this.result(providerId, cached, cached ? 'stale' : 'fallback', message);
+      const current = this.cache.providers[providerId];
+      const currentVersion = this.options.credentialVersionFor?.(descriptor.credentialId);
+      const usable = current?.credentialVersion === currentVersion ? current : undefined;
+      return this.result(providerId, usable, usable ? 'stale' : 'fallback', message);
     }
   }
   private result(
@@ -175,13 +222,22 @@ export class SttCatalogService {
     // Deepgram has project-scoped model metadata, but it is not an account-entitlement list.
     // ElevenLabs' general models endpoint does not identify realtime STT capability. Returning
     // shipped policy is safer than guessing from names and is explicitly labelled fallback.
-    const response = await this.fetcher('https://api.openai.com/v1/models', {
-      headers: { Authorization: `Bearer ${key}` },
-    });
-    if (!response.ok) throw new Error(`OpenAI model discovery failed (${response.status}).`);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), STT_CATALOG_REQUEST_TIMEOUT_MS);
+    let body: unknown;
+    try {
+      const response = await this.fetcher('https://api.openai.com/v1/models', {
+        headers: { Authorization: `Bearer ${key}` },
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`OpenAI model discovery failed (${response.status}).`);
+      body = await response.json();
+    } finally {
+      clearTimeout(timeout);
+    }
     const parsed = z
       .object({ data: z.array(z.object({ id: z.string(), created: z.number().optional() })) })
-      .safeParse(await response.json());
+      .safeParse(body);
     if (!parsed.success) throw new Error('OpenAI returned a malformed model catalog.');
     return parsed.data.data.flatMap((item) => {
       const known = compatibleModel('openai', item.id);

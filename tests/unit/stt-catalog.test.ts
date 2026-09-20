@@ -1,9 +1,10 @@
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   STT_CATALOG_MAX_AGE_MS,
+  STT_CATALOG_REQUEST_TIMEOUT_MS,
   SttCatalogService,
   compatibleModel,
   sortCatalogModels,
@@ -29,9 +30,10 @@ describe('STT runtime catalog', () => {
     );
     const catalog = new SttCatalogService({ dir: dir(), keyFor: () => 'secret', fetch: fetcher });
     const result = await catalog.get();
-    expect(fetcher).toHaveBeenCalledWith('https://api.openai.com/v1/models', {
-      headers: { Authorization: 'Bearer secret' },
-    });
+    expect(fetcher).toHaveBeenCalledWith(
+      'https://api.openai.com/v1/models',
+      expect.objectContaining({ headers: { Authorization: 'Bearer secret' } }),
+    );
     expect(
       result.providers.find((p) => p.providerId === 'openai')?.models.map((m) => m.id),
     ).toEqual(['gpt-4o-transcribe']);
@@ -47,6 +49,9 @@ describe('STT runtime catalog', () => {
     }).get();
     expect(result.providers.find((p) => p.providerId === 'deepgram')?.state).toBe('fallback');
     expect(result.providers.find((p) => p.providerId === 'elevenlabs')?.source).toBe('fallback');
+    expect(
+      result.providers.find((p) => p.providerId === 'deepgram')?.models[0]?.catalogStatus,
+    ).toBe('available');
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
@@ -106,5 +111,148 @@ describe('STT runtime catalog', () => {
     a.catalogStatus = 'legacy';
     b.catalogStatus = 'available';
     expect(sortCatalogModels([a, b]).map((m) => m.id)).toEqual(['gpt-4o-transcribe', 'whisper-1']);
+  });
+
+  it('does not treat a future cache timestamp as fresh', async () => {
+    let now = Date.parse('2026-01-01T00:00:00.000Z');
+    const fetcher = vi.fn(async () => response({ data: [{ id: 'whisper-1' }] }));
+    const root = dir();
+    const catalog = new SttCatalogService({
+      dir: root,
+      keyFor: () => 'key',
+      fetch: fetcher,
+      now: () => now,
+    });
+    await catalog.get();
+    now -= 1;
+    await catalog.get();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it('rebuilds cached capabilities from the current compatibility policy', async () => {
+    const root = dir();
+    writeFileSync(
+      join(root, 'stt-catalog.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        providers: {
+          openai: {
+            refreshedAt: '2026-01-01T00:00:00.000Z',
+            models: [
+              {
+                ...compatibleModel('openai', 'whisper-1'),
+                displayName: 'stale',
+                streaming: true,
+                pricePerAudioMinuteUsd: 999,
+              },
+            ],
+          },
+        },
+      }),
+    );
+    const result = await new SttCatalogService({
+      dir: root,
+      keyFor: () => 'key',
+      now: () => Date.parse('2026-01-02T00:00:00.000Z'),
+    }).get();
+    const model = result.providers.find((p) => p.providerId === 'openai')?.models[0];
+    expect(model).toMatchObject({
+      displayName: 'Whisper (batched)',
+      streaming: false,
+      pricePerAudioMinuteUsd: 0.006,
+    });
+  });
+
+  it('does not publish a response started with a replaced credential', async () => {
+    let finish!: (value: Response) => void;
+    const fetcher = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const root = dir();
+    const catalog = new SttCatalogService({ dir: root, keyFor: () => 'key', fetch: fetcher });
+    const pending = catalog.get(true);
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalled());
+    catalog.invalidate('openai');
+    finish(response({ data: [{ id: 'whisper-1' }] }));
+    const result = await pending;
+    expect(result.providers.find((p) => p.providerId === 'openai')?.state).toBe('stale');
+    expect(
+      JSON.parse(readFileSync(join(root, 'stt-catalog.json'), 'utf8')).providers.openai,
+    ).toBeUndefined();
+  });
+
+  it('bounds a stalled discovery request and returns fallback data', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetcher = vi.fn(
+        (_url: string | URL | Request, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+          }),
+      );
+      const pending = new SttCatalogService({
+        dir: dir(),
+        keyFor: () => 'key',
+        fetch: fetcher as typeof fetch,
+      }).get(true);
+      await vi.advanceTimersByTimeAsync(STT_CATALOG_REQUEST_TIMEOUT_MS);
+      const result = await pending;
+      expect(result.providers.find((p) => p.providerId === 'openai')?.state).toBe('fallback');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('returns the newest cache when an older overlapping refresh fails', async () => {
+    let rejectOld!: (reason: Error) => void;
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(response({ data: [{ id: 'whisper-1' }] }))
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((_resolve, reject) => {
+            rejectOld = reject;
+          }),
+      )
+      .mockResolvedValueOnce(response({ data: [{ id: 'gpt-4o-transcribe' }] }));
+    const catalog = new SttCatalogService({ dir: dir(), keyFor: () => 'key', fetch: fetcher });
+    await catalog.get(true);
+    const old = catalog.get(true);
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+    await catalog.get(true);
+    rejectOld(new Error('offline'));
+    const result = await old;
+    expect(result.providers.find((p) => p.providerId === 'openai')?.models[0]?.id).toBe(
+      'gpt-4o-transcribe',
+    );
+  });
+
+  it('does not trust an old-account cache after restart', async () => {
+    const root = dir();
+    let version = '11111111-1111-4111-8111-111111111111';
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(response({ data: [{ id: 'whisper-1' }] }))
+      .mockResolvedValueOnce(response({ data: [{ id: 'gpt-4o-transcribe' }] }));
+    await new SttCatalogService({
+      dir: root,
+      keyFor: () => 'key-a',
+      credentialVersionFor: () => version,
+      fetch: fetcher,
+    }).get();
+    version = '22222222-2222-4222-8222-222222222222';
+    const result = await new SttCatalogService({
+      dir: root,
+      keyFor: () => 'key-b',
+      credentialVersionFor: () => version,
+      fetch: fetcher,
+    }).get();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(result.providers.find((p) => p.providerId === 'openai')?.models[0]?.id).toBe(
+      'gpt-4o-transcribe',
+    );
   });
 });

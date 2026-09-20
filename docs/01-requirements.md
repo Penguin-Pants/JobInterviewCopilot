@@ -716,6 +716,8 @@ copyleft runtime dependency.
 
 ## Runtime STT catalog
 
-- **FR-110:** Main-process-only STT discovery returns normalized, provider-aware model descriptors without credentials.
-- **FR-111:** A schema-validated last-known-good STT catalog is cached separately for 28 days and refreshed lazily or manually.
-- **FR-112:** Unknown models are excluded unless the centralized transport compatibility policy verifies them; fallback metadata is identified as fallback.
+**FR-116** Main-process-only STT discovery returns normalized, provider-aware model descriptors without credentials.
+
+**FR-117** A schema-validated last-known-good STT catalog is cached separately for 28 days and refreshed lazily or manually. Future timestamps are stale, requests have a deadline, credential replacement invalidates in-flight work, and cached descriptors are revalidated against the current compatibility policy.
+
+**FR-118** Unknown models are excluded unless the centralized transport compatibility policy verifies them. Fallback identifies metadata provenance and does not imply that a current model is legacy.
