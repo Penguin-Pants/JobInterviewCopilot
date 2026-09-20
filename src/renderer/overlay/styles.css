@@ -1,4 +1,5 @@
 @import 'tailwindcss';
+@import '../brand-tokens.css';
 
 /*
  * Overlay styling (FR-090 to FR-094, NFR-007, NFR-010, TASK-043).
@@ -19,7 +20,7 @@ body {
   margin: 0;
   background: transparent;
   overflow: hidden;
-  font-family: system-ui, 'Segoe UI', sans-serif;
+  font-family: var(--font-ui);
 }
 
 /*

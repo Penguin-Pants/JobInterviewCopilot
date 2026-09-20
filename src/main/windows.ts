@@ -175,7 +175,7 @@ export async function createDashboardWindow(
     minHeight: 620,
     show: false,
     resizable: true,
-    backgroundColor: settings.theme.mode === 'dark' ? '#0b0b0f' : '#fafafa',
+    backgroundColor: settings.theme.mode === 'dark' ? '#0b0f17' : '#f7f8fa',
     webPreferences: hardenedWebPreferences(preloadPath('dashboard')),
   });
 
