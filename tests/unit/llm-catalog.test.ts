@@ -10,6 +10,7 @@ import {
   anthropicCompatibility,
   openAiCompatibility,
 } from '../../src/main/ai/llm/catalog.js';
+import { llmCatalogStatus } from '../../src/renderer/dashboard/sections/ProviderSetup.js';
 
 function response(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200 });
@@ -145,6 +146,61 @@ describe('runtime LLM catalog', () => {
     expect(
       result.providers.find((provider) => provider.providerId === 'openai')?.models,
     ).toContainEqual(expect.objectContaining({ id: 'saved-model', status: 'unavailable' }));
+  });
+
+  it('refreshes only providers with saved keys and does not report missing providers as errors', async () => {
+    const fetcher = vi.fn(async (_input: string | URL | Request) =>
+      response({ object: 'list', data: [{ id: 'gpt-5-mini', object: 'model' }] }),
+    );
+    const service = new LlmCatalogService({
+      dir: mkdtempSync(join(tmpdir(), 'llm-catalog-')),
+      fetch: fetcher as typeof fetch,
+      keyFor: (provider) => (provider === 'openai' ? 'open-key' : undefined),
+    });
+
+    const result = await service.refresh();
+
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(String(fetcher.mock.calls[0]?.[0])).toContain('api.openai.com');
+    expect(result.providers.find((provider) => provider.providerId === 'openai')?.state).toBe(
+      'ready',
+    );
+    expect(result.providers.find((provider) => provider.providerId === 'anthropic')?.state).toBe(
+      'missing-key',
+    );
+    expect(llmCatalogStatus(result.providers)).toBe('Models are up to date.');
+  });
+
+  it('refreshes Anthropic without contacting OpenAI when only the Anthropic key is saved', async () => {
+    const fetcher = vi.fn(async (_input: string | URL | Request) =>
+      response({
+        data: [
+          {
+            id: 'claude-sonnet-4-6',
+            display_name: 'Claude Sonnet 4.6',
+            created_at: '2026-02-05T00:00:00.000Z',
+          },
+        ],
+        has_more: false,
+      }),
+    );
+    const service = new LlmCatalogService({
+      dir: mkdtempSync(join(tmpdir(), 'llm-catalog-')),
+      fetch: fetcher as typeof fetch,
+      keyFor: (provider) => (provider === 'anthropic' ? 'anthropic-key' : undefined),
+    });
+
+    const result = await service.refresh();
+
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(String(fetcher.mock.calls[0]?.[0])).toContain('api.anthropic.com');
+    expect(result.providers.find((provider) => provider.providerId === 'openai')?.state).toBe(
+      'missing-key',
+    );
+    expect(result.providers.find((provider) => provider.providerId === 'anthropic')?.state).toBe(
+      'ready',
+    );
+    expect(llmCatalogStatus(result.providers)).toBe('Models are up to date.');
   });
 
   it('bounds requests and publishes completed lazy refreshes', async () => {

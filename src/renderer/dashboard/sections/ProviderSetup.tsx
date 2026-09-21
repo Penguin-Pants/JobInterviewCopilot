@@ -39,6 +39,19 @@ interface Draft {
 type KeyState =
   { kind: 'idle' } | { kind: 'checking' } | { kind: 'pass' } | { kind: 'fail'; reason: string };
 
+export function llmCatalogStatus(providers: LlmCatalogProvider[]): string {
+  const configured = providers.filter((provider) => provider.state !== 'missing-key');
+  if (configured.length === 0) return 'Add an API key to load models.';
+  const failures = configured.filter((provider) => provider.state !== 'ready');
+  if (failures.length === 0) return 'Models are up to date.';
+  return failures
+    .map(
+      (provider) =>
+        `${provider.displayName}: ${provider.message ?? (provider.state === 'fallback' ? 'using fallback models' : provider.state)}`,
+    )
+    .join(' ');
+}
+
 function providerName<M>(registry: ProviderDescriptor<M>[], providerId: string): string {
   return registry.find((p) => p.id === providerId)?.displayName ?? providerId;
 }
@@ -233,34 +246,14 @@ export function ProviderSetup({
       return;
     }
     setLlmCatalog(result.value.providers);
-    const failures = result.value.providers.filter((provider) => provider.state !== 'ready');
-    setLlmCatalogMessage(
-      failures.length === 0
-        ? 'Models are up to date.'
-        : failures
-            .map(
-              (provider) =>
-                `${provider.displayName}: ${provider.message ?? (provider.state === 'fallback' ? 'using fallback models' : provider.state)}`,
-            )
-            .join(' '),
-    );
+    setLlmCatalogMessage(llmCatalogStatus(result.value.providers));
   }
 
   useEffect(() => {
     void loadLlmCatalog();
     return window.copilot.on('state:llmCatalog', (result) => {
       setLlmCatalog(result.providers);
-      const failures = result.providers.filter((provider) => provider.state !== 'ready');
-      setLlmCatalogMessage(
-        failures.length === 0
-          ? 'Models are up to date.'
-          : failures
-              .map(
-                (provider) =>
-                  `${provider.displayName}: ${provider.message ?? (provider.state === 'fallback' ? 'using fallback models' : provider.state)}`,
-              )
-              .join(' '),
-      );
+      setLlmCatalogMessage(llmCatalogStatus(result.providers));
     });
   }, []);
 
