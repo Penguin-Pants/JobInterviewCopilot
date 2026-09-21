@@ -10,6 +10,7 @@ import {
   anthropicCompatibility,
   openAiCompatibility,
 } from '../../src/main/ai/llm/catalog.js';
+import { llmCatalogStatus } from '../../src/renderer/dashboard/sections/ProviderSetup.js';
 
 function response(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200 });
@@ -23,6 +24,24 @@ describe('runtime LLM catalog', () => {
       allowed: ['minimal', 'low', 'medium', 'high'],
       default: 'medium',
     });
+    expect(openAiCompatibility({ id: 'gpt-5.4' })).toEqual({
+      allowed: ['minimal', 'low', 'medium', 'high'],
+      default: 'medium',
+    });
+    expect(openAiCompatibility({ id: 'gpt-5.4-mini' })).toEqual({
+      allowed: ['minimal', 'low', 'medium', 'high'],
+      default: 'medium',
+    });
+    expect(openAiCompatibility({ id: 'gpt-5.5-2026-09-15' })).toEqual({
+      allowed: ['minimal', 'low', 'medium', 'high'],
+      default: 'medium',
+    });
+    for (const id of ['gpt-6-luna', 'gpt-6-terra', 'gpt-6-sol', 'gpt-12-orbit']) {
+      expect(openAiCompatibility({ id })).toEqual({
+        allowed: ['minimal', 'low', 'medium', 'high'],
+        default: 'medium',
+      });
+    }
     for (const id of [
       'text-embedding-3-small',
       'gpt-4o-transcribe',
@@ -33,14 +52,20 @@ describe('runtime LLM catalog', () => {
     ]) {
       expect(openAiCompatibility({ id })).toBe(false);
     }
-    expect(openAiCompatibility({ id: 'gpt-99-new' })).toBe(false);
+    expect(openAiCompatibility({ id: 'gpt-99-new' })).toEqual({
+      allowed: ['minimal', 'low', 'medium', 'high'],
+      default: 'medium',
+    });
     expect(openAiCompatibility({ id: 'gpt-5-codex' })).toBe(false);
     expect(openAiCompatibility({ id: 'gpt-5-pro' })).toBe(false);
+    expect(openAiCompatibility({ id: 'gpt-5.4-pro' })).toBe(false);
     expect(anthropicCompatibility('claude-haiku-4-5-20251001')).toBe(false);
-    expect(anthropicCompatibility('claude-sonnet-4-6')).toEqual({
-      allowed: ['low', 'medium', 'high'],
-      default: 'high',
-    });
+    expect(anthropicCompatibility('claude-sonnet-4-6')).toBe(false);
+    expect(anthropicCompatibility('claude-opus-4-7')).toBe(false);
+    expect(anthropicCompatibility('claude-opus-4-8')).toBeNull();
+    expect(anthropicCompatibility('claude-opus-4.9-20270101')).toBeNull();
+    expect(anthropicCompatibility('claude-sonnet-5-20270101')).toBeNull();
+    expect(anthropicCompatibility('claude-sonnet-6-latest')).toBeNull();
   });
 
   it('authenticates, follows Anthropic pagination, sorts, and writes an atomic cache', async () => {
@@ -63,8 +88,8 @@ describe('runtime LLM catalog', () => {
         ? response({
             data: [
               {
-                id: 'claude-opus-4-6',
-                display_name: 'Claude Opus 4.6',
+                id: 'claude-opus-4-8',
+                display_name: 'Claude Opus 4.8',
                 created_at: '2026-02-05T00:00:00.000Z',
               },
             ],
@@ -73,8 +98,8 @@ describe('runtime LLM catalog', () => {
         : response({
             data: [
               {
-                id: 'claude-sonnet-4-5-20250929',
-                display_name: 'Claude Sonnet 4.5',
+                id: 'claude-sonnet-5-20260929',
+                display_name: 'Claude Sonnet 5',
                 created_at: '2025-09-29T00:00:00.000Z',
               },
             ],
@@ -94,7 +119,7 @@ describe('runtime LLM catalog', () => {
     ).toEqual(['gpt-4o-mini']);
     expect(
       catalog.providers.find((p) => p.providerId === 'anthropic')?.models.map((m) => m.id),
-    ).toEqual(['claude-opus-4-6', 'claude-sonnet-4-5-20250929']);
+    ).toEqual(['claude-opus-4-8', 'claude-sonnet-5-20260929']);
     expect(fetcher).toHaveBeenCalledTimes(3);
     expect(JSON.parse(readFileSync(join(dir, 'llm-catalog.json'), 'utf8')).schemaVersion).toBe(1);
   });
@@ -109,8 +134,8 @@ describe('runtime LLM catalog', () => {
         : response({
             data: [
               {
-                id: 'claude-opus-4-5-20251101',
-                display_name: 'Claude Opus 4.5',
+                id: 'claude-opus-4-8-20261101',
+                display_name: 'Claude Opus 4.8',
                 created_at: '2025-11-01T00:00:00.000Z',
               },
             ],
@@ -147,6 +172,64 @@ describe('runtime LLM catalog', () => {
     ).toContainEqual(expect.objectContaining({ id: 'saved-model', status: 'unavailable' }));
   });
 
+  it('refreshes only providers with saved keys and does not report missing providers as errors', async () => {
+    const fetcher = vi.fn(async (_input: string | URL | Request) =>
+      response({ object: 'list', data: [{ id: 'gpt-5.4-mini', object: 'model' }] }),
+    );
+    const service = new LlmCatalogService({
+      dir: mkdtempSync(join(tmpdir(), 'llm-catalog-')),
+      fetch: fetcher as typeof fetch,
+      keyFor: (provider) => (provider === 'openai' ? 'open-key' : undefined),
+    });
+
+    const result = await service.refresh();
+
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(String(fetcher.mock.calls[0]?.[0])).toContain('api.openai.com');
+    expect(result.providers.find((provider) => provider.providerId === 'openai')?.state).toBe(
+      'ready',
+    );
+    expect(
+      result.providers.find((provider) => provider.providerId === 'openai')?.models[0]?.id,
+    ).toBe('gpt-5.4-mini');
+    expect(result.providers.find((provider) => provider.providerId === 'anthropic')?.state).toBe(
+      'missing-key',
+    );
+    expect(llmCatalogStatus(result.providers)).toBe('Models are up to date.');
+  });
+
+  it('refreshes Anthropic without contacting OpenAI when only the Anthropic key is saved', async () => {
+    const fetcher = vi.fn(async (_input: string | URL | Request) =>
+      response({
+        data: [
+          {
+            id: 'claude-sonnet-5-20260929',
+            display_name: 'Claude Sonnet 5',
+            created_at: '2026-02-05T00:00:00.000Z',
+          },
+        ],
+        has_more: false,
+      }),
+    );
+    const service = new LlmCatalogService({
+      dir: mkdtempSync(join(tmpdir(), 'llm-catalog-')),
+      fetch: fetcher as typeof fetch,
+      keyFor: (provider) => (provider === 'anthropic' ? 'anthropic-key' : undefined),
+    });
+
+    const result = await service.refresh();
+
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(String(fetcher.mock.calls[0]?.[0])).toContain('api.anthropic.com');
+    expect(result.providers.find((provider) => provider.providerId === 'openai')?.state).toBe(
+      'missing-key',
+    );
+    expect(result.providers.find((provider) => provider.providerId === 'anthropic')?.state).toBe(
+      'ready',
+    );
+    expect(llmCatalogStatus(result.providers)).toBe('Models are up to date.');
+  });
+
   it('bounds requests and publishes completed lazy refreshes', async () => {
     const updated = vi.fn();
     const hangingFetch = vi.fn(
@@ -180,8 +263,8 @@ describe('runtime LLM catalog', () => {
           : response({
               data: [
                 {
-                  id: 'claude-sonnet-4-6',
-                  display_name: 'Claude Sonnet 4.6',
+                  id: 'claude-sonnet-5-20260929',
+                  display_name: 'Claude Sonnet 5',
                   created_at: '2026-02-05T00:00:00.000Z',
                 },
               ],

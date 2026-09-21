@@ -89,10 +89,11 @@ export function openAiCompatibility(model: OpenAiModel): LlmModelDescriptor['eff
     )
   )
     return false;
-  // The Models API has no endpoint/capability field. Admit only the GPT-5
-  // variants documented for Chat Completions; notably, Codex and Pro are
-  // Responses-only and must never reach this app's Chat Completions adapter.
-  if (/^gpt-5(?:-(?:mini|nano))?(?:-\d{4}-\d{2}-\d{2})?$/u.test(id))
+  // The Models API has no capability field. Keep known endpoint-specific
+  // variants out, then admit every present and future GPT generation from 5.
+  if (/(?:^|-)(?:codex|pro)(?:-|$)/u.test(id)) return false;
+  const generation = /^gpt-(\d+)(?:\.\d+)?(?:-|$)/u.exec(id);
+  if (generation && Number(generation[1]) >= 5)
     return { allowed: ['minimal', 'low', 'medium', 'high'], default: 'medium' };
   if (/^gpt-(?:4o|4\.1)(?:[.-]|$)/u.test(id)) return null;
   return false;
@@ -100,14 +101,13 @@ export function openAiCompatibility(model: OpenAiModel): LlmModelDescriptor['eff
 
 export function anthropicCompatibility(id: string): LlmModelDescriptor['effort'] | false {
   const lower = id.toLowerCase();
-  if (!lower.startsWith('claude-') || lower.includes('haiku')) return false;
-  if (!/(?:sonnet|opus)/u.test(lower)) return false;
-  if (/claude-opus-4-6/u.test(lower))
-    return { allowed: ['low', 'medium', 'high', 'max'], default: 'high' };
-  if (/claude-sonnet-4-6/u.test(lower))
-    return { allowed: ['low', 'medium', 'high'], default: 'high' };
-  if (/claude-(?:sonnet|opus)-4-(?:[0-5])(?:-|$)/u.test(lower)) return null;
-  return false;
+  const match = /^claude-(sonnet|opus)-(\d+)(?:[.-](\d{1,2})(?:-|$))?/u.exec(lower);
+  if (!match) return false;
+  const family = match[1];
+  const major = Number(match[2]);
+  const minor = Number(match[3] ?? 0);
+  if (family === 'sonnet' ? major < 5 : major < 4 || (major === 4 && minor < 8)) return false;
+  return null;
 }
 
 function pricing(providerId: CatalogProviderId, id: string): LlmModelDescriptor['pricing'] {
@@ -163,7 +163,7 @@ export class LlmCatalogService {
       (p) => this.isStale(p) && this.options.keyFor(p),
     );
     if (stale && !this.refreshing) {
-      this.refreshing = this.refreshAll().finally(() => {
+      this.refreshing = this.refreshConfiguredProviders().finally(() => {
         this.refreshing = null;
       });
     }
@@ -172,7 +172,7 @@ export class LlmCatalogService {
 
   async refresh(): Promise<LlmCatalogResult> {
     if (!this.refreshing)
-      this.refreshing = this.refreshAll().finally(() => {
+      this.refreshing = this.refreshConfiguredProviders().finally(() => {
         this.refreshing = null;
       });
     await this.refreshing;
@@ -184,7 +184,7 @@ export class LlmCatalogService {
     return !stamp || (this.options.now?.() ?? Date.now()) - Date.parse(stamp) >= CATALOG_MAX_AGE_MS;
   }
 
-  private async refreshAll(): Promise<void> {
+  private async refreshConfiguredProviders(): Promise<void> {
     await Promise.all(
       (['openai', 'anthropic'] as const).map(async (provider) => {
         const key = this.options.keyFor(provider);
