@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -24,6 +24,26 @@ describe('runtime LLM catalog', () => {
       allowed: ['minimal', 'low', 'medium', 'high'],
       default: 'medium',
     });
+    expect(openAiCompatibility({ id: 'gpt-5.4' })).toEqual({
+      allowed: ['none', 'low', 'medium', 'high'],
+      default: 'medium',
+    });
+    expect(openAiCompatibility({ id: 'gpt-5.4-mini' })).toEqual({
+      allowed: ['none', 'low', 'medium', 'high'],
+      default: 'medium',
+    });
+    expect(openAiCompatibility({ id: 'gpt-5.5-2026-09-15' })).toEqual({
+      allowed: ['none', 'low', 'medium', 'high'],
+      default: 'medium',
+    });
+    expect(openAiCompatibility({ id: 'gpt-5-chat-latest' })).toBeNull();
+    expect(openAiCompatibility({ id: 'gpt-5.4-chat-latest' })).toBeNull();
+    for (const id of ['gpt-6-luna', 'gpt-6-terra', 'gpt-6-sol', 'gpt-12-orbit']) {
+      expect(openAiCompatibility({ id })).toEqual({
+        allowed: ['none', 'low', 'medium', 'high'],
+        default: 'medium',
+      });
+    }
     for (const id of [
       'text-embedding-3-small',
       'gpt-4o-transcribe',
@@ -34,14 +54,20 @@ describe('runtime LLM catalog', () => {
     ]) {
       expect(openAiCompatibility({ id })).toBe(false);
     }
-    expect(openAiCompatibility({ id: 'gpt-99-new' })).toBe(false);
+    expect(openAiCompatibility({ id: 'gpt-99-new' })).toEqual({
+      allowed: ['none', 'low', 'medium', 'high'],
+      default: 'medium',
+    });
     expect(openAiCompatibility({ id: 'gpt-5-codex' })).toBe(false);
     expect(openAiCompatibility({ id: 'gpt-5-pro' })).toBe(false);
+    expect(openAiCompatibility({ id: 'gpt-5.4-pro' })).toBe(false);
     expect(anthropicCompatibility('claude-haiku-4-5-20251001')).toBe(false);
-    expect(anthropicCompatibility('claude-sonnet-4-6')).toEqual({
-      allowed: ['low', 'medium', 'high'],
-      default: 'high',
-    });
+    expect(anthropicCompatibility('claude-sonnet-4-6')).toBe(false);
+    expect(anthropicCompatibility('claude-opus-4-7')).toBe(false);
+    expect(anthropicCompatibility('claude-opus-4-8')).toBeNull();
+    expect(anthropicCompatibility('claude-opus-4.9-20270101')).toBeNull();
+    expect(anthropicCompatibility('claude-sonnet-5-20270101')).toBeNull();
+    expect(anthropicCompatibility('claude-sonnet-6-latest')).toBeNull();
   });
 
   it('authenticates, follows Anthropic pagination, sorts, and writes an atomic cache', async () => {
@@ -64,8 +90,8 @@ describe('runtime LLM catalog', () => {
         ? response({
             data: [
               {
-                id: 'claude-opus-4-6',
-                display_name: 'Claude Opus 4.6',
+                id: 'claude-opus-4-8',
+                display_name: 'Claude Opus 4.8',
                 created_at: '2026-02-05T00:00:00.000Z',
               },
             ],
@@ -74,8 +100,8 @@ describe('runtime LLM catalog', () => {
         : response({
             data: [
               {
-                id: 'claude-sonnet-4-5-20250929',
-                display_name: 'Claude Sonnet 4.5',
+                id: 'claude-sonnet-5-20260929',
+                display_name: 'Claude Sonnet 5',
                 created_at: '2025-09-29T00:00:00.000Z',
               },
             ],
@@ -95,9 +121,9 @@ describe('runtime LLM catalog', () => {
     ).toEqual(['gpt-4o-mini']);
     expect(
       catalog.providers.find((p) => p.providerId === 'anthropic')?.models.map((m) => m.id),
-    ).toEqual(['claude-opus-4-6', 'claude-sonnet-4-5-20250929']);
+    ).toEqual(['claude-opus-4-8', 'claude-sonnet-5-20260929']);
     expect(fetcher).toHaveBeenCalledTimes(3);
-    expect(JSON.parse(readFileSync(join(dir, 'llm-catalog.json'), 'utf8')).schemaVersion).toBe(1);
+    expect(JSON.parse(readFileSync(join(dir, 'llm-catalog.json'), 'utf8')).schemaVersion).toBe(2);
   });
 
   it('keeps the last known good catalog when refresh fails', async () => {
@@ -110,8 +136,8 @@ describe('runtime LLM catalog', () => {
         : response({
             data: [
               {
-                id: 'claude-opus-4-5-20251101',
-                display_name: 'Claude Opus 4.5',
+                id: 'claude-opus-4-8-20261101',
+                display_name: 'Claude Opus 4.8',
                 created_at: '2025-11-01T00:00:00.000Z',
               },
             ],
@@ -148,9 +174,76 @@ describe('runtime LLM catalog', () => {
     ).toContainEqual(expect.objectContaining({ id: 'saved-model', status: 'unavailable' }));
   });
 
+  it('revalidates cached models against the current compatibility policy', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'llm-catalog-'));
+    writeFileSync(
+      join(dir, 'llm-catalog.json'),
+      JSON.stringify({
+        schemaVersion: 2,
+        providers: {
+          anthropic: {
+            lastSuccessfulRefresh: new Date().toISOString(),
+            models: [
+              {
+                id: 'claude-sonnet-4-6',
+                displayName: 'Claude Sonnet 4.6',
+                providerId: 'anthropic',
+                releasedAt: null,
+                status: 'available',
+                streamingText: true,
+                effort: null,
+                pricing: { known: false },
+              },
+            ],
+          },
+        },
+      }),
+    );
+
+    const service = new LlmCatalogService({ dir, keyFor: () => undefined });
+
+    expect(service.get().providers.find((provider) => provider.providerId === 'anthropic')).toEqual(
+      expect.objectContaining({ state: 'missing-key' }),
+    );
+    expect(findLlmModel({ providerId: 'anthropic', modelId: 'claude-sonnet-4-6' })).toBeNull();
+  });
+
+  it('invalidates catalogs written before the compatibility policy expanded', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'llm-catalog-'));
+    writeFileSync(
+      join(dir, 'llm-catalog.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        providers: {
+          openai: {
+            lastSuccessfulRefresh: new Date().toISOString(),
+            models: [
+              {
+                id: 'gpt-4.1',
+                displayName: 'gpt-4.1',
+                providerId: 'openai',
+                releasedAt: null,
+                status: 'available',
+                streamingText: true,
+                effort: null,
+                pricing: { known: false },
+              },
+            ],
+          },
+        },
+      }),
+    );
+
+    const service = new LlmCatalogService({ dir, keyFor: () => undefined });
+    const openai = service.get().providers.find((provider) => provider.providerId === 'openai');
+
+    expect(openai?.lastSuccessfulRefresh).toBeNull();
+    expect(openai?.models.some((model) => model.id === 'gpt-4.1')).toBe(false);
+  });
+
   it('refreshes only providers with saved keys and does not report missing providers as errors', async () => {
     const fetcher = vi.fn(async (_input: string | URL | Request) =>
-      response({ object: 'list', data: [{ id: 'gpt-5-mini', object: 'model' }] }),
+      response({ object: 'list', data: [{ id: 'gpt-5.4-mini', object: 'model' }] }),
     );
     const service = new LlmCatalogService({
       dir: mkdtempSync(join(tmpdir(), 'llm-catalog-')),
@@ -165,6 +258,9 @@ describe('runtime LLM catalog', () => {
     expect(result.providers.find((provider) => provider.providerId === 'openai')?.state).toBe(
       'ready',
     );
+    expect(
+      result.providers.find((provider) => provider.providerId === 'openai')?.models[0]?.id,
+    ).toBe('gpt-5.4-mini');
     expect(result.providers.find((provider) => provider.providerId === 'anthropic')?.state).toBe(
       'missing-key',
     );
@@ -176,8 +272,8 @@ describe('runtime LLM catalog', () => {
       response({
         data: [
           {
-            id: 'claude-sonnet-4-6',
-            display_name: 'Claude Sonnet 4.6',
+            id: 'claude-sonnet-5-20260929',
+            display_name: 'Claude Sonnet 5',
             created_at: '2026-02-05T00:00:00.000Z',
           },
         ],
@@ -236,8 +332,8 @@ describe('runtime LLM catalog', () => {
           : response({
               data: [
                 {
-                  id: 'claude-sonnet-4-6',
-                  display_name: 'Claude Sonnet 4.6',
+                  id: 'claude-sonnet-5-20260929',
+                  display_name: 'Claude Sonnet 5',
                   created_at: '2026-02-05T00:00:00.000Z',
                 },
               ],

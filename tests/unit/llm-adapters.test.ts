@@ -91,6 +91,28 @@ describe('model-specific effort payloads', () => {
     expect(transport.requests[0]?.body).not.toHaveProperty('temperature');
   });
 
+  it('uses none for classification when a newer OpenAI model does not allow minimal', async () => {
+    registerRuntimeLlmModels('openai', [
+      {
+        id: 'gpt-5.1',
+        displayName: 'gpt-5.1',
+        providerId: 'openai',
+        releasedAt: null,
+        status: 'available',
+        streamingText: true,
+        effort: { allowed: ['none', 'low', 'medium', 'high'], default: 'medium' },
+        pricing: { known: false },
+      },
+    ]);
+    const transport = scriptedTransport({ chunks: openAiScript(['ACTIONABLE']) });
+    const provider = createOpenAiLlmProvider({ keyFor: () => 'key', post: transport.post });
+    const req = request('openai', 'gpt-5.1');
+    req.purpose = 'classification';
+    await drain(provider.generate(req, neverAbort()));
+
+    expect(transport.requests[0]?.body).toMatchObject({ reasoning_effort: 'none' });
+  });
+
   it('omits Anthropic thinking and effort for classification', async () => {
     registerRuntimeLlmModels('anthropic', [
       {
