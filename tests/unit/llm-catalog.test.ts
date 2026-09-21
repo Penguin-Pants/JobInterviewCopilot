@@ -36,6 +36,8 @@ describe('runtime LLM catalog', () => {
       allowed: ['none', 'low', 'medium', 'high'],
       default: 'medium',
     });
+    expect(openAiCompatibility({ id: 'gpt-5-chat-latest' })).toBeNull();
+    expect(openAiCompatibility({ id: 'gpt-5.4-chat-latest' })).toBeNull();
     for (const id of ['gpt-6-luna', 'gpt-6-terra', 'gpt-6-sol', 'gpt-12-orbit']) {
       expect(openAiCompatibility({ id })).toEqual({
         allowed: ['none', 'low', 'medium', 'high'],
@@ -121,7 +123,7 @@ describe('runtime LLM catalog', () => {
       catalog.providers.find((p) => p.providerId === 'anthropic')?.models.map((m) => m.id),
     ).toEqual(['claude-opus-4-8', 'claude-sonnet-5-20260929']);
     expect(fetcher).toHaveBeenCalledTimes(3);
-    expect(JSON.parse(readFileSync(join(dir, 'llm-catalog.json'), 'utf8')).schemaVersion).toBe(1);
+    expect(JSON.parse(readFileSync(join(dir, 'llm-catalog.json'), 'utf8')).schemaVersion).toBe(2);
   });
 
   it('keeps the last known good catalog when refresh fails', async () => {
@@ -177,7 +179,7 @@ describe('runtime LLM catalog', () => {
     writeFileSync(
       join(dir, 'llm-catalog.json'),
       JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: 2,
         providers: {
           anthropic: {
             lastSuccessfulRefresh: new Date().toISOString(),
@@ -204,6 +206,39 @@ describe('runtime LLM catalog', () => {
       expect.objectContaining({ state: 'missing-key' }),
     );
     expect(findLlmModel({ providerId: 'anthropic', modelId: 'claude-sonnet-4-6' })).toBeNull();
+  });
+
+  it('invalidates catalogs written before the compatibility policy expanded', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'llm-catalog-'));
+    writeFileSync(
+      join(dir, 'llm-catalog.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        providers: {
+          openai: {
+            lastSuccessfulRefresh: new Date().toISOString(),
+            models: [
+              {
+                id: 'gpt-4.1',
+                displayName: 'gpt-4.1',
+                providerId: 'openai',
+                releasedAt: null,
+                status: 'available',
+                streamingText: true,
+                effort: null,
+                pricing: { known: false },
+              },
+            ],
+          },
+        },
+      }),
+    );
+
+    const service = new LlmCatalogService({ dir, keyFor: () => undefined });
+    const openai = service.get().providers.find((provider) => provider.providerId === 'openai');
+
+    expect(openai?.lastSuccessfulRefresh).toBeNull();
+    expect(openai?.models.some((model) => model.id === 'gpt-4.1')).toBe(false);
   });
 
   it('refreshes only providers with saved keys and does not report missing providers as errors', async () => {

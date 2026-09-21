@@ -15,6 +15,7 @@ export const CATALOG_REQUEST_TIMEOUT_MS = 10_000;
 const OPENAI_MODELS_URL = 'https://api.openai.com/v1/models';
 const ANTHROPIC_MODELS_URL = 'https://api.anthropic.com/v1/models?limit=100';
 const ANTHROPIC_VERSION = '2023-06-01';
+const CATALOG_SCHEMA_VERSION = 2;
 
 type CatalogProviderId = 'openai' | 'anthropic';
 
@@ -32,7 +33,7 @@ const modelSchema = z.object({
   ]),
 });
 const cacheSchema = z.object({
-  schemaVersion: z.literal(1),
+  schemaVersion: z.literal(CATALOG_SCHEMA_VERSION),
   providers: z.object({
     openai: z
       .object({ models: z.array(modelSchema).min(1), lastSuccessfulRefresh: z.string().datetime() })
@@ -43,7 +44,7 @@ const cacheSchema = z.object({
   }),
 });
 interface Cache {
-  schemaVersion: 1;
+  schemaVersion: typeof CATALOG_SCHEMA_VERSION;
   providers: Partial<
     Record<CatalogProviderId, { models: LlmModelDescriptor[]; lastSuccessfulRefresh: string }>
   >;
@@ -92,6 +93,7 @@ export function openAiCompatibility(model: OpenAiModel): LlmModelDescriptor['eff
   // The Models API has no capability field. Keep known endpoint-specific
   // variants out, then admit every present and future GPT generation from 5.
   if (/(?:^|-)(?:codex|pro)(?:-|$)/u.test(id)) return false;
+  if (/-chat-latest$/u.test(id)) return null;
   const generation = /^gpt-(\d+)(?:\.(\d+))?(?:-|$)/u.exec(id);
   if (generation && Number(generation[1]) >= 5) {
     const modernEffort = Number(generation[1]) > 5 || Number(generation[2] ?? 0) >= 1;
@@ -329,7 +331,7 @@ export class LlmCatalogService {
   }
 
   private read(): Cache {
-    if (!existsSync(this.file)) return { schemaVersion: 1, providers: {} };
+    if (!existsSync(this.file)) return { schemaVersion: CATALOG_SCHEMA_VERSION, providers: {} };
     try {
       const cache = cacheSchema.parse(JSON.parse(readFileSync(this.file, 'utf8'))) as Cache;
       for (const provider of ['openai', 'anthropic'] as const) {
@@ -358,7 +360,7 @@ export class LlmCatalogService {
       return cache;
     } catch (err) {
       this.options.onError?.('ignored an invalid LLM catalog cache', err);
-      return { schemaVersion: 1, providers: {} };
+      return { schemaVersion: CATALOG_SCHEMA_VERSION, providers: {} };
     }
   }
   private write(): void {
