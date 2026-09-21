@@ -29,5 +29,4 @@ describe('approved Interview Copilot identity', () => {
       expect(icon).toContain('aria-label="Interview Copilot icon"');
     }
   });
-
 });
