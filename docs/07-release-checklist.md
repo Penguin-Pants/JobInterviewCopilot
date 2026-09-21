@@ -18,7 +18,7 @@ One command, from a clean checkout, on Windows:
 npm ci && npm run package
 ```
 
-It writes `release/Interview CoPilot-<version>-x64.exe`, an x64 NSIS installer,
+It writes `release/Interview Copilot-<version>-x64.exe`, an x64 NSIS installer,
 and `release/win-unpacked/`, the same app before packaging. That is the whole of
 `NFR-013`'s "reproducible from a clean checkout with one documented command".
 

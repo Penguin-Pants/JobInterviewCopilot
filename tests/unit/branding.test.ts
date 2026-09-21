@@ -16,6 +16,13 @@ describe('approved Interview Copilot identity', () => {
     expect(tokens).not.toMatch(/--accent\s*:/);
   });
 
+  it('keeps the release checklist aligned with the packaged artifact name', () => {
+    const releaseChecklist = readFileSync('docs/07-release-checklist.md', 'utf8');
+
+    expect(releaseChecklist).toContain('release/Interview Copilot-<version>-x64.exe');
+    expect(releaseChecklist).not.toContain('release/Interview CoPilot-<version>-x64.exe');
+  });
+
   it('ships the approved optical assets used at small sizes', () => {
     for (const size of [16, 24, 32]) {
       const icon = readFileSync(`src/renderer/assets/icon-${size}.svg`, 'utf8');
