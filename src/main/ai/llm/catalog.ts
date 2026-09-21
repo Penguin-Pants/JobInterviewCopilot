@@ -92,9 +92,16 @@ export function openAiCompatibility(model: OpenAiModel): LlmModelDescriptor['eff
   // The Models API has no capability field. Keep known endpoint-specific
   // variants out, then admit every present and future GPT generation from 5.
   if (/(?:^|-)(?:codex|pro)(?:-|$)/u.test(id)) return false;
-  const generation = /^gpt-(\d+)(?:\.\d+)?(?:-|$)/u.exec(id);
-  if (generation && Number(generation[1]) >= 5)
-    return { allowed: ['minimal', 'low', 'medium', 'high'], default: 'medium' };
+  const generation = /^gpt-(\d+)(?:\.(\d+))?(?:-|$)/u.exec(id);
+  if (generation && Number(generation[1]) >= 5) {
+    const modernEffort = Number(generation[1]) > 5 || Number(generation[2] ?? 0) >= 1;
+    return {
+      allowed: modernEffort
+        ? ['none', 'low', 'medium', 'high']
+        : ['minimal', 'low', 'medium', 'high'],
+      default: 'medium',
+    };
+  }
   if (/^gpt-(?:4o|4\.1)(?:[.-]|$)/u.test(id)) return null;
   return false;
 }
@@ -324,7 +331,31 @@ export class LlmCatalogService {
   private read(): Cache {
     if (!existsSync(this.file)) return { schemaVersion: 1, providers: {} };
     try {
-      return cacheSchema.parse(JSON.parse(readFileSync(this.file, 'utf8'))) as Cache;
+      const cache = cacheSchema.parse(JSON.parse(readFileSync(this.file, 'utf8'))) as Cache;
+      for (const provider of ['openai', 'anthropic'] as const) {
+        const saved = cache.providers[provider];
+        if (!saved) continue;
+        const models = saved.models.flatMap((model) => {
+          const effort =
+            provider === 'openai'
+              ? openAiCompatibility({ id: model.id })
+              : anthropicCompatibility(model.id);
+          return effort === false
+            ? []
+            : [
+                {
+                  ...model,
+                  providerId: provider,
+                  status: 'available' as const,
+                  effort,
+                  pricing: pricing(provider, model.id),
+                },
+              ];
+        });
+        if (models.length === 0) delete cache.providers[provider];
+        else saved.models = sortModels(models);
+      }
+      return cache;
     } catch (err) {
       this.options.onError?.('ignored an invalid LLM catalog cache', err);
       return { schemaVersion: 1, providers: {} };

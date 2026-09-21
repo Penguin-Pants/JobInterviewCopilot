@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -25,20 +25,20 @@ describe('runtime LLM catalog', () => {
       default: 'medium',
     });
     expect(openAiCompatibility({ id: 'gpt-5.4' })).toEqual({
-      allowed: ['minimal', 'low', 'medium', 'high'],
+      allowed: ['none', 'low', 'medium', 'high'],
       default: 'medium',
     });
     expect(openAiCompatibility({ id: 'gpt-5.4-mini' })).toEqual({
-      allowed: ['minimal', 'low', 'medium', 'high'],
+      allowed: ['none', 'low', 'medium', 'high'],
       default: 'medium',
     });
     expect(openAiCompatibility({ id: 'gpt-5.5-2026-09-15' })).toEqual({
-      allowed: ['minimal', 'low', 'medium', 'high'],
+      allowed: ['none', 'low', 'medium', 'high'],
       default: 'medium',
     });
     for (const id of ['gpt-6-luna', 'gpt-6-terra', 'gpt-6-sol', 'gpt-12-orbit']) {
       expect(openAiCompatibility({ id })).toEqual({
-        allowed: ['minimal', 'low', 'medium', 'high'],
+        allowed: ['none', 'low', 'medium', 'high'],
         default: 'medium',
       });
     }
@@ -53,7 +53,7 @@ describe('runtime LLM catalog', () => {
       expect(openAiCompatibility({ id })).toBe(false);
     }
     expect(openAiCompatibility({ id: 'gpt-99-new' })).toEqual({
-      allowed: ['minimal', 'low', 'medium', 'high'],
+      allowed: ['none', 'low', 'medium', 'high'],
       default: 'medium',
     });
     expect(openAiCompatibility({ id: 'gpt-5-codex' })).toBe(false);
@@ -170,6 +170,40 @@ describe('runtime LLM catalog', () => {
     expect(
       result.providers.find((provider) => provider.providerId === 'openai')?.models,
     ).toContainEqual(expect.objectContaining({ id: 'saved-model', status: 'unavailable' }));
+  });
+
+  it('revalidates cached models against the current compatibility policy', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'llm-catalog-'));
+    writeFileSync(
+      join(dir, 'llm-catalog.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        providers: {
+          anthropic: {
+            lastSuccessfulRefresh: new Date().toISOString(),
+            models: [
+              {
+                id: 'claude-sonnet-4-6',
+                displayName: 'Claude Sonnet 4.6',
+                providerId: 'anthropic',
+                releasedAt: null,
+                status: 'available',
+                streamingText: true,
+                effort: null,
+                pricing: { known: false },
+              },
+            ],
+          },
+        },
+      }),
+    );
+
+    const service = new LlmCatalogService({ dir, keyFor: () => undefined });
+
+    expect(service.get().providers.find((provider) => provider.providerId === 'anthropic')).toEqual(
+      expect.objectContaining({ state: 'missing-key' }),
+    );
+    expect(findLlmModel({ providerId: 'anthropic', modelId: 'claude-sonnet-4-6' })).toBeNull();
   });
 
   it('refreshes only providers with saved keys and does not report missing providers as errors', async () => {
