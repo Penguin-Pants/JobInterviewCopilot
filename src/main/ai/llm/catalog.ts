@@ -163,7 +163,7 @@ export class LlmCatalogService {
       (p) => this.isStale(p) && this.options.keyFor(p),
     );
     if (stale && !this.refreshing) {
-      this.refreshing = this.refreshAll().finally(() => {
+      this.refreshing = this.refreshConfiguredProviders().finally(() => {
         this.refreshing = null;
       });
     }
@@ -172,7 +172,7 @@ export class LlmCatalogService {
 
   async refresh(): Promise<LlmCatalogResult> {
     if (!this.refreshing)
-      this.refreshing = this.refreshAll().finally(() => {
+      this.refreshing = this.refreshConfiguredProviders().finally(() => {
         this.refreshing = null;
       });
     await this.refreshing;
@@ -184,7 +184,7 @@ export class LlmCatalogService {
     return !stamp || (this.options.now?.() ?? Date.now()) - Date.parse(stamp) >= CATALOG_MAX_AGE_MS;
   }
 
-  private async refreshAll(): Promise<void> {
+  private async refreshConfiguredProviders(): Promise<void> {
     await Promise.all(
       (['openai', 'anthropic'] as const).map(async (provider) => {
         const key = this.options.keyFor(provider);
