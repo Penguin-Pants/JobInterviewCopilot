@@ -6,7 +6,7 @@
  * and cannot change while a session runs, so the switch control is disabled for
  * the whole of one (ADR-013).
  */
-import { useCallback, useEffect, useState, type DragEvent, type JSX } from 'react';
+import { useCallback, useEffect, useState, type DragEvent, type FormEvent, type JSX } from 'react';
 import { KB_CEILING } from '../../../shared/defaults.js';
 import type { DocType, DocumentRecord, Profile } from '../../../shared/types.js';
 import { call } from '../call.js';
@@ -220,7 +220,12 @@ export function CompanyProfiles({
         </p>
       ) : null}
 
-      <div>
+      <form
+        onSubmit={(event: FormEvent<HTMLFormElement>) => {
+          event.preventDefault();
+          void create();
+        }}
+      >
         <label htmlFor="new-profile-name">New profile name</label>
         <input
           id="new-profile-name"
@@ -228,15 +233,10 @@ export function CompanyProfiles({
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
         />
-        <button
-          type="button"
-          data-testid="create-profile"
-          disabled={creating}
-          onClick={() => void create()}
-        >
+        <button type="submit" data-testid="create-profile" disabled={creating}>
           Create profile
         </button>
-      </div>
+      </form>
 
       {error ? (
         <p role="alert" data-testid="profile-error">
