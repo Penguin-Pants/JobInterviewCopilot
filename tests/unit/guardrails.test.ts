@@ -1,4 +1,4 @@
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -17,7 +17,16 @@ function lintFixture(relPath: string, source: string): string {
   mkdirSync(dirname(absolute), { recursive: true });
   writeFileSync(absolute, source, 'utf8');
   try {
-    execSync(`npx eslint ${relPath} --format json`, { encoding: 'utf8', stdio: 'pipe' });
+    execFileSync(
+      process.execPath,
+      [
+        join(process.cwd(), 'node_modules', 'eslint', 'bin', 'eslint.js'),
+        relPath,
+        '--format',
+        'json',
+      ],
+      { encoding: 'utf8', stdio: 'pipe' },
+    );
     return '';
   } catch (err) {
     const e = err as { stdout?: string };
