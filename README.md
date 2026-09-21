@@ -1,4 +1,4 @@
-# Interview CoPilot
+# Interview Copilot
 
 A native Windows desktop app that gives a job candidate real-time, glanceable
 cues during a live video interview, drawn from their own resume, company
@@ -86,7 +86,7 @@ One command, from a clean checkout, on Windows:
 npm ci && npm run package
 ```
 
-It writes `release/Interview CoPilot-<version>-x64.exe`, an x64 NSIS installer,
+It writes `release/Interview Copilot-<version>-x64.exe`, an x64 NSIS installer,
 and `release/win-unpacked/` beside it. That is the whole of `NFR-013`: the build
 is reproducible from a clean checkout with one documented command.
 

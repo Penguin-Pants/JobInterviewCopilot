@@ -83,7 +83,7 @@ function fakeRelease(shape: PackageShape = {}): string {
     }
   }
 
-  const name = shape.installerName ?? `Interview CoPilot-${VERSION}-x64.exe`;
+  const name = shape.installerName ?? `Interview Copilot-${VERSION}-x64.exe`;
   writeFileSync(join(release, name), 'x'.repeat(shape.installerBytes ?? 2_000_000));
   return release;
 }
@@ -149,7 +149,7 @@ describe('TC-165 the packaged app is checked, not assumed', () => {
   it('fails when no installer carries the package version and x64', () => {
     // NFR-011 is x64 only, and a release record cites the installer by name.
     const { code, output } = run(CHECK_PACKAGED, [
-      fakeRelease({ installerName: 'Interview CoPilot-ia32.exe' }),
+      fakeRelease({ installerName: 'Interview Copilot-ia32.exe' }),
     ]);
     expect(code).toBe(1);
     expect(output).toContain('No installer matching');
