@@ -30,5 +30,4 @@ describe('approved Interview Copilot identity', () => {
     }
   });
 
-
 });
