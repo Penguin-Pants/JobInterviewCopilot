@@ -94,6 +94,18 @@ describe('TC-031 corrupt settings recovery', () => {
     writeFileSync(join(dir, 'settings.json'), JSON.stringify(defaultSettings()));
     expect(quarantineIfCorrupt(dir)).toBeNull();
   });
+
+  it('migrates a version 6 reserved prompt name instead of quarantining the file', () => {
+    const dir = tmp();
+    const settings = {
+      ...defaultSettings(),
+      schemaVersion: 6,
+      customPrompts: [{ id: 'one', name: 'Default prompt', systemPrompt: 'Keep this.' }],
+    };
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify(settings));
+
+    expect(quarantineIfCorrupt(dir)).toBeNull();
+  });
 });
 
 /** TC-032: the migration chain runs from a fake version 0. */
@@ -167,6 +179,22 @@ describe('TC-032 migration chain', () => {
     const migrated = migrate({ schemaVersion: 5 });
     expect(migrated.customPrompts).toEqual([]);
     expect(migrated.profilePromptIds).toEqual({});
+  });
+
+  it('renames a version 6 custom prompt that uses the newly reserved name', () => {
+    const migrated = migrate({
+      schemaVersion: 6,
+      customPrompts: [
+        { id: 'one', name: ' DEFAULT PROMPT ', systemPrompt: 'First' },
+        { id: 'two', name: 'Default prompt (custom)', systemPrompt: 'Second' },
+      ],
+    });
+
+    expect(migrated.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
+    expect(migrated.customPrompts).toEqual([
+      { id: 'one', name: 'Default prompt (custom 2)', systemPrompt: 'First' },
+      { id: 'two', name: 'Default prompt (custom)', systemPrompt: 'Second' },
+    ]);
   });
 });
 

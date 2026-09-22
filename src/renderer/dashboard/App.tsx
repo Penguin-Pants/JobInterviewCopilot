@@ -206,6 +206,9 @@ export function Dashboard(): JSX.Element {
   const [stopping, setStopping] = useState(false);
   const [activeTab, setActiveTab] = useState<TabId>('profiles');
   const [promptDirty, setPromptDirty] = useState(false);
+  // Bumped to remount the prompt editor, which is how a confirmed discard
+  // actually drops the draft rather than leaving it behind the hidden tab.
+  const [promptEditorKey, setPromptEditorKey] = useState(0);
   const content = useRef<HTMLDivElement | null>(null);
 
   // All panels share this one scrolling element, so its scroll position
@@ -386,6 +389,9 @@ export function Dashboard(): JSX.Element {
               !window.confirm('Discard the unsaved prompt changes?')
             )
               return;
+            if (activeTab === 'prompts' && id !== 'prompts' && promptDirty) {
+              setPromptEditorKey((value) => value + 1);
+            }
             setActiveTab(id);
           }}
         />
@@ -416,6 +422,7 @@ export function Dashboard(): JSX.Element {
             hidden={activeTab !== 'prompts'}
           >
             <Prompts
+              key={promptEditorKey}
               settings={data.settings}
               profiles={data.profiles}
               activeProfileId={data.settings.activeProfileId}

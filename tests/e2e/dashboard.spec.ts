@@ -138,6 +138,41 @@ test('custom prompts can be saved and selected for a company profile', async () 
   );
 });
 
+test('prompt drafts are discarded deliberately, duplicated intact, and cannot use the default name', async () => {
+  await openTab('prompts');
+  await dashboard.click('[data-testid="prompt-create"]');
+  await dashboard.fill('[data-testid="prompt-name"]', 'Unsaved name');
+  await dashboard.fill('[data-testid="prompt-text"]', 'Unsaved text');
+
+  dashboard.once('dialog', (dialog) => dialog.accept());
+  await openTab('history');
+  await openTab('prompts');
+  await expect(dashboard.locator('[data-testid="prompt-preset"]')).toHaveValue('default');
+  await expect(dashboard.locator('[data-testid="prompt-text"]')).toContainText(
+    'You are a live interview memory aid',
+  );
+
+  await dashboard.selectOption('[data-testid="prompt-preset"]', { label: 'Custom prompt' });
+  await dashboard.fill('[data-testid="prompt-name"]', 'Draft prompt');
+  await dashboard.fill('[data-testid="prompt-text"]', 'Preserve this draft in the duplicate.');
+  await dashboard.click('[data-testid="prompt-duplicate"]');
+  await expect(dashboard.locator('[data-testid="prompt-name"]')).toHaveValue(
+    'Copy of Draft prompt',
+  );
+  await expect(dashboard.locator('[data-testid="prompt-text"]')).toHaveValue(
+    'Preserve this draft in the duplicate.',
+  );
+
+  await dashboard.fill('[data-testid="prompt-name"]', ' default PROMPT ');
+  await dashboard.click('[data-testid="prompt-save"]');
+  await expect(dashboard.locator('[data-testid="prompt-error"]')).toContainText(
+    'reserved for the shipped prompt',
+  );
+  await dashboard.fill('[data-testid="prompt-name"]', 'Saved duplicate');
+  await dashboard.click('[data-testid="prompt-save"]');
+  await expect(dashboard.locator('[data-testid="prompt-status"]')).toContainText('Prompt saved');
+});
+
 /* ------------------------------------------------------------------ *
  * TC-121  provider constraints
  * ------------------------------------------------------------------ */

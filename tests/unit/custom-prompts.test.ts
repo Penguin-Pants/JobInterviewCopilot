@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { defaultSettings } from '../../src/shared/defaults.js';
 import {
   DEFAULT_PROMPT_ID,
+  DEFAULT_PROMPT_NAME,
   SHIPPED_SYSTEM_PROMPT,
   promptForProfile,
   promptName,
@@ -14,7 +15,7 @@ describe('custom suggestion prompts', () => {
     expect(promptForProfile(settings, 'profile-1')).toBe(SHIPPED_SYSTEM_PROMPT);
     settings.profilePromptIds['profile-1'] = 'missing';
     expect(promptForProfile(settings, 'profile-1')).toBe(SHIPPED_SYSTEM_PROMPT);
-    expect(promptName(settings, 'profile-1')).toBe('Default prompt');
+    expect(promptName(settings, 'profile-1')).toBe(DEFAULT_PROMPT_NAME);
   });
 
   it('resolves a profile selection from the shared library', () => {
@@ -51,5 +52,13 @@ describe('custom suggestion prompts', () => {
       systemPrompt: 'text',
     }));
     expect(settingsSchema.safeParse(tooMany).success).toBe(false);
+  });
+
+  it('reserves the shipped prompt name regardless of case or whitespace', () => {
+    const settings = defaultSettings();
+    settings.customPrompts = [
+      { id: 'one', name: ' DEFAULT PROMPT ', systemPrompt: 'Use concise facts.' },
+    ];
+    expect(settingsSchema.safeParse(settings).success).toBe(false);
   });
 });

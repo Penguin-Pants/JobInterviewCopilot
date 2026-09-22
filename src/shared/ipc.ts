@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { SETTINGS_LIMITS } from './defaults.js';
 import {
   DEFAULT_PROMPT_ID,
+  DEFAULT_PROMPT_NAME,
   MAX_CUSTOM_PROMPTS,
   MAX_PROMPT_NAME_CHARS,
   MAX_SYSTEM_PROMPT_CHARS,
@@ -122,7 +123,7 @@ const customPrompt = z.object({
 });
 
 export const settingsSchema = z.object({
-  schemaVersion: z.literal(6),
+  schemaVersion: z.literal(7),
   activeProfileId: z.string(),
   providers: z.object({
     stt: z.object({ primary: providerChoice, backup: providerChoice.nullable() }),
@@ -151,6 +152,13 @@ export const settingsSchema = z.object({
             code: 'custom',
             path: [index, 'name'],
             message: 'Prompt names must be unique.',
+          });
+        // The shipped prompt already owns this label in every picker.
+        if (name === DEFAULT_PROMPT_NAME.toLocaleLowerCase())
+          context.addIssue({
+            code: 'custom',
+            path: [index, 'name'],
+            message: `${DEFAULT_PROMPT_NAME} is reserved for the shipped prompt.`,
           });
         ids.add(prompt.id);
         names.add(name);
@@ -338,6 +346,11 @@ export const invokeChannels = {
     id: 'CH-131',
     payload: z.void(),
     response: llmCatalogResult,
+  },
+  'dashboard:setPromptDirty': {
+    id: 'CH-132',
+    payload: z.object({ dirty: z.boolean() }),
+    response: ok,
   },
   'catalog:stt': {
     id: 'CH-129',
