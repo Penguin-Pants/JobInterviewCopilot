@@ -258,6 +258,31 @@ describe('TC-080 one turn end fires exactly one generation', () => {
   });
 });
 
+describe('session prompt binding', () => {
+  it('captures the profile prompt at start and keeps it for the whole session', async () => {
+    vi.useFakeTimers();
+    const h = harness(userData, {
+      settings: {
+        customPrompts: [
+          { id: 'acme', name: 'Acme prompt', systemPrompt: 'Use the saved Acme prompt.' },
+        ],
+        profilePromptIds: { [PROFILE.id]: 'acme' },
+      },
+    });
+    h.gate.noteReady();
+    await startSession(h);
+    h.settings.customPrompts[0]!.systemPrompt = 'A later edit must wait.';
+
+    speak(h, 'Walk me through a difficult project');
+    await vi.advanceTimersByTimeAsync(GAP);
+    await h.live.whenSettled();
+
+    const body = h.llmTransport.requests[0]?.body as { system: string };
+    expect(body.system).toBe('Use the saved Acme prompt.');
+    await stopSession(h);
+  });
+});
+
 describe('TC-086 a new turn end during GENERATING', () => {
   it('aborts the request the adapter sent before the replacement starts', async () => {
     vi.useFakeTimers();

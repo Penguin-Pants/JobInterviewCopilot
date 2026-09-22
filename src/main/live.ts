@@ -46,6 +46,7 @@ import type { CostMeter } from './cost.js';
 import type { GatedMessage } from './overlay-gate.js';
 import type { RetrievedChunk } from './rag.js';
 import type { SessionManager } from './session.js';
+import { promptForProfile } from '../shared/prompts.js';
 
 /** How many knowledge-base chunks one suggestion is built from (`FR-072`). */
 export const RETRIEVAL_K = 3;
@@ -151,6 +152,7 @@ export class LiveSessionLoop {
 
   private readonly streams = new Map<TranscriptSource, OpenStream>();
   private profileId: string | null = null;
+  private systemPrompt: string | null = null;
   private sttChoice: ProviderChoice | null = null;
 
   /**
@@ -252,6 +254,7 @@ export class LiveSessionLoop {
   async start(profileId: string): Promise<void> {
     if (this.isRunning) throw new Error('the live session loop is already running');
     this.profileId = profileId;
+    this.systemPrompt = promptForProfile(this.options.settings(), profileId);
     // Held before it is awaited, so a `stop` arriving during the bring-up has
     // something to wait for rather than a gap it can slip through.
     this.starting = this.bringUp();
@@ -295,6 +298,7 @@ export class LiveSessionLoop {
     if (starting) await starting;
 
     this.profileId = null;
+    this.systemPrompt = null;
 
     this.options.trigger.stop();
     await Promise.all([this.settleGeneration(), this.settleClassification()]);
@@ -317,6 +321,7 @@ export class LiveSessionLoop {
    */
   dispose(): void {
     this.profileId = null;
+    this.systemPrompt = null;
     this.starting = null;
     this.options.trigger.stop();
     void this.closeStreams();
@@ -718,6 +723,7 @@ export class LiveSessionLoop {
             candidateContext: turn.candidateContext,
             chunks,
             choice: bound.choice,
+            systemPrompt: this.systemPrompt ?? undefined,
           },
           turn.signal,
           {

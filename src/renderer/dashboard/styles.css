@@ -225,6 +225,15 @@ textarea {
   width: 100%;
 }
 
+.prompt-editor > label {
+  display: block;
+  margin-top: var(--space-3);
+}
+
+.prompt-editor > input {
+  width: min(100%, 32rem);
+}
+
 button {
   background: var(--accent);
   border: 1px solid transparent;

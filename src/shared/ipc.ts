@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { SETTINGS_LIMITS } from './defaults.js';
+import { MAX_CUSTOM_PROMPTS, MAX_PROMPT_NAME_CHARS, MAX_SYSTEM_PROMPT_CHARS } from './prompts.js';
 
 /**
  * The IPC contract. Mirrors `docs/02-architecture.md` section 4.
@@ -96,8 +97,20 @@ const sttCatalog = z.object({
   ),
 });
 
+const customPrompt = z.object({
+  id: z.string().min(1).max(100),
+  name: z
+    .string()
+    .max(MAX_PROMPT_NAME_CHARS)
+    .refine((value) => value.trim().length > 0, 'Prompt name cannot be blank.'),
+  systemPrompt: z
+    .string()
+    .max(MAX_SYSTEM_PROMPT_CHARS)
+    .refine((value) => value.trim().length > 0, 'System prompt cannot be blank.'),
+});
+
 export const settingsSchema = z.object({
-  schemaVersion: z.literal(5),
+  schemaVersion: z.literal(6),
   activeProfileId: z.string(),
   providers: z.object({
     stt: z.object({ primary: providerChoice, backup: providerChoice.nullable() }),
@@ -107,6 +120,31 @@ export const settingsSchema = z.object({
     openai: z.string().nullable(),
     anthropic: z.string().nullable(),
   }),
+  customPrompts: z
+    .array(customPrompt)
+    .max(MAX_CUSTOM_PROMPTS)
+    .superRefine((prompts, context) => {
+      const ids = new Set<string>();
+      const names = new Set<string>();
+      for (const [index, prompt] of prompts.entries()) {
+        const name = prompt.name.trim().toLocaleLowerCase();
+        if (ids.has(prompt.id))
+          context.addIssue({
+            code: 'custom',
+            path: [index, 'id'],
+            message: 'Prompt ids must be unique.',
+          });
+        if (names.has(name))
+          context.addIssue({
+            code: 'custom',
+            path: [index, 'name'],
+            message: 'Prompt names must be unique.',
+          });
+        ids.add(prompt.id);
+        names.add(name);
+      }
+    }),
+  profilePromptIds: z.record(z.string(), z.string()),
   theme: z.object({
     mode: z.enum(['light', 'dark', 'system']),
     accent: z.string().regex(/^#[0-9a-fA-F]{6}$/),
