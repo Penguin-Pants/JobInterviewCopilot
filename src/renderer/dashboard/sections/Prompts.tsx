@@ -48,11 +48,18 @@ export function Prompts({
     setName(DEFAULT_PROMPT_NAME);
     setText(SHIPPED_SYSTEM_PROMPT);
   }, [selected, selectedId]);
-  // Main owns the close confirmation: a renderer `beforeunload` cannot raise a
-  // dialog in Electron, so it could only refuse the close silently (CH-132).
   useEffect(() => {
+    const preventUnload = (event: BeforeUnloadEvent): void => {
+      if (!dirty) return;
+      // Electron forwards this refusal to main's `will-prevent-unload` handler,
+      // which owns the native confirmation for reloads (CH-132).
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', preventUnload);
     void call('dashboard:setPromptDirty', { dirty });
     return () => {
+      window.removeEventListener('beforeunload', preventUnload);
       void call('dashboard:setPromptDirty', { dirty: false });
     };
   }, [dirty]);

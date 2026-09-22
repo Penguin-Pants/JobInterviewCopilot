@@ -167,8 +167,8 @@ async function profilesReadyWithin(ms: number): Promise<void> {
 
 let dashboardWindow: BrowserWindow | null = null;
 // The prompt editor reports its draft state over `CH-132`. A renderer
-// `beforeunload` cannot raise a dialog in Electron, so the confirmation that
-// protects an unsaved prompt has to live here.
+// Renderer unload prevention is surfaced here, where Electron can show the
+// native confirmation that protects an unsaved prompt.
 let dashboardPromptDirty = false;
 let allowDirtyDashboardClose = false;
 let dashboardClosePromptOpen = false;
@@ -697,6 +697,29 @@ function wireDashboardWindow(): void {
     // beside it, which is the silent failure CH-217 exists to end (NFR-008).
     const notice = sessionNotices.noticeFor(sessions.current?.id);
     if (notice) push(dashboardWindow?.webContents, 'notice:session', notice);
+  });
+  dashboardWindow.webContents.on('will-prevent-unload', (event) => {
+    const window = dashboardWindow;
+    if (!window || window.isDestroyed()) return;
+    // A confirmed window close retries through beforeunload. Let that retry,
+    // and any defensive clean-state refusal, finish without another prompt.
+    if (allowDirtyDashboardClose || !dashboardPromptDirty) {
+      event.preventDefault();
+      return;
+    }
+    const response = dialog.showMessageBoxSync(window, {
+      type: 'warning',
+      buttons: ['Keep editing', 'Discard changes'],
+      defaultId: 0,
+      cancelId: 0,
+      title: 'Unsaved prompt changes',
+      message: 'Reload the Dashboard and discard your unsaved prompt changes?',
+    });
+    if (response !== 1) return;
+    dashboardPromptDirty = false;
+    // For `will-prevent-unload`, preventing the Electron event allows the
+    // renderer's requested reload to continue.
+    event.preventDefault();
   });
   dashboardWindow.on('close', (event) => {
     if (!dashboardPromptDirty || allowDirtyDashboardClose) return;
