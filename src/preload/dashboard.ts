@@ -42,6 +42,7 @@ const ALLOWED_INVOKE: readonly InvokeChannel[] = [
   'hotkey:rebind',
   'overlay:setInteractive',
   'overlay:reset',
+  'dashboard:setPromptDirty',
 ];
 
 /** Push channels the Dashboard may receive. Anything else is refused. */

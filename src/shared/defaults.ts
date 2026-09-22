@@ -54,7 +54,7 @@ export const SETTINGS_LIMITS = {
 
 export function defaultSettings(): Settings {
   return {
-    schemaVersion: 6,
+    schemaVersion: 7,
     activeProfileId: '',
     providers: {
       stt: { primary: { providerId: 'deepgram', modelId: 'nova-3' }, backup: null },

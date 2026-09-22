@@ -561,6 +561,16 @@ describe('TASK-040 session wiring', () => {
     expect(onLoad).toContain("'state:providers'");
   });
 
+  it('routes dirty renderer reloads through a main-process confirmation', () => {
+    const renderer = readFileSync('src/renderer/dashboard/sections/Prompts.tsx', 'utf8');
+    const main = source();
+
+    expect(renderer).toContain("window.addEventListener('beforeunload', preventUnload)");
+    expect(renderer).toContain("window.removeEventListener('beforeunload', preventUnload)");
+    expect(main).toContain("webContents.on('will-prevent-unload'");
+    expect(main).toContain('dialog.showMessageBoxSync');
+  });
+
   /**
    * TASK-042. Recovery compacts an orphan transcript after the Dashboard has
    * already listed that profile's history, and changes neither the profile list

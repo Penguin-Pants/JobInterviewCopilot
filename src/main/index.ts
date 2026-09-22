@@ -166,6 +166,12 @@ async function profilesReadyWithin(ms: number): Promise<void> {
 }
 
 let dashboardWindow: BrowserWindow | null = null;
+// The prompt editor reports its draft state over `CH-132`. A renderer
+// Renderer unload prevention is surfaced here, where Electron can show the
+// native confirmation that protects an unsaved prompt.
+let dashboardPromptDirty = false;
+let allowDirtyDashboardClose = false;
+let dashboardClosePromptOpen = false;
 let overlayWindow: BrowserWindow | null = null;
 let overlayInteractive = false;
 
@@ -662,6 +668,9 @@ function applyContentSecurityPolicy(): void {
  */
 function wireDashboardWindow(): void {
   if (!dashboardWindow) return;
+  dashboardPromptDirty = false;
+  allowDirtyDashboardClose = false;
+  dashboardClosePromptOpen = false;
   /**
    * Replay the one-shot state to every Dashboard that loads (TASK-042).
    *
@@ -689,7 +698,60 @@ function wireDashboardWindow(): void {
     const notice = sessionNotices.noticeFor(sessions.current?.id);
     if (notice) push(dashboardWindow?.webContents, 'notice:session', notice);
   });
+  dashboardWindow.webContents.on('will-prevent-unload', (event) => {
+    const window = dashboardWindow;
+    if (!window || window.isDestroyed()) return;
+    // A confirmed window close retries through beforeunload. Let that retry,
+    // and any defensive clean-state refusal, finish without another prompt.
+    if (allowDirtyDashboardClose || !dashboardPromptDirty) {
+      event.preventDefault();
+      return;
+    }
+    const response = dialog.showMessageBoxSync(window, {
+      type: 'warning',
+      buttons: ['Keep editing', 'Discard changes'],
+      defaultId: 0,
+      cancelId: 0,
+      title: 'Unsaved prompt changes',
+      message: 'Reload the Dashboard and discard your unsaved prompt changes?',
+    });
+    if (response !== 1) return;
+    dashboardPromptDirty = false;
+    // For `will-prevent-unload`, preventing the Electron event allows the
+    // renderer's requested reload to continue.
+    event.preventDefault();
+  });
+  dashboardWindow.on('close', (event) => {
+    if (!dashboardPromptDirty || allowDirtyDashboardClose) return;
+    event.preventDefault();
+    // A second close while the dialog is up must not stack a second dialog.
+    if (dashboardClosePromptOpen) return;
+    const window = dashboardWindow;
+    if (!window || window.isDestroyed()) return;
+    dashboardClosePromptOpen = true;
+    void dialog
+      .showMessageBox(window, {
+        type: 'warning',
+        buttons: ['Keep editing', 'Discard changes'],
+        defaultId: 0,
+        cancelId: 0,
+        title: 'Unsaved prompt changes',
+        message: 'Close the Dashboard and discard your unsaved prompt changes?',
+      })
+      .then(({ response }) => {
+        // The window can be replaced or destroyed while the dialog is open.
+        if (response !== 1 || dashboardWindow !== window || window.isDestroyed()) return;
+        allowDirtyDashboardClose = true;
+        window.close();
+      })
+      .finally(() => {
+        dashboardClosePromptOpen = false;
+      });
+  });
   dashboardWindow.on('closed', () => {
+    dashboardPromptDirty = false;
+    allowDirtyDashboardClose = false;
+    dashboardClosePromptOpen = false;
     dashboardWindow = null;
   });
 }
@@ -1229,6 +1291,10 @@ async function validateWithinDeadline(
 
 function registerIpcHandlers(): void {
   router.handle('config:get', () => config.get());
+  router.handle('dashboard:setPromptDirty', ({ dirty }) => {
+    dashboardPromptDirty = dirty;
+    return { ok: true as const };
+  });
   router.handle('config:set', async (patch) => {
     const before = config.get();
     // `activeProfileId` is a plain string in the settings schema, so a Dashboard

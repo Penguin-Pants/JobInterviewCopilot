@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type JSX } from 'react';
 import {
   DEFAULT_PROMPT_ID,
+  DEFAULT_PROMPT_NAME,
   MAX_CUSTOM_PROMPTS,
   MAX_PROMPT_NAME_CHARS,
   MAX_SYSTEM_PROMPT_CHARS,
@@ -26,7 +27,7 @@ export function Prompts({
 }: PromptsProps): JSX.Element {
   const [selectedId, setSelectedId] = useState(DEFAULT_PROMPT_ID);
   const selected = settings.customPrompts.find((prompt) => prompt.id === selectedId) ?? null;
-  const [name, setName] = useState('Default prompt');
+  const [name, setName] = useState(DEFAULT_PROMPT_NAME);
   const [text, setText] = useState(SHIPPED_SYSTEM_PROMPT);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
@@ -37,23 +38,30 @@ export function Prompts({
 
   const dirty = selected
     ? name !== selected.name || text !== selected.systemPrompt
-    : name !== 'Default prompt' || text !== SHIPPED_SYSTEM_PROMPT;
+    : name !== DEFAULT_PROMPT_NAME || text !== SHIPPED_SYSTEM_PROMPT;
 
   useEffect(() => onDirtyChange(dirty), [dirty, onDirtyChange]);
   useEffect(() => () => onDirtyChange(false), [onDirtyChange]);
   useEffect(() => {
     if (selectedId === DEFAULT_PROMPT_ID || selected) return;
     setSelectedId(DEFAULT_PROMPT_ID);
-    setName('Default prompt');
+    setName(DEFAULT_PROMPT_NAME);
     setText(SHIPPED_SYSTEM_PROMPT);
   }, [selected, selectedId]);
   useEffect(() => {
-    const warn = (event: BeforeUnloadEvent): void => {
+    const preventUnload = (event: BeforeUnloadEvent): void => {
       if (!dirty) return;
+      // Electron forwards this refusal to main's `will-prevent-unload` handler,
+      // which owns the native confirmation for reloads (CH-132).
       event.preventDefault();
+      event.returnValue = '';
     };
-    window.addEventListener('beforeunload', warn);
-    return () => window.removeEventListener('beforeunload', warn);
+    window.addEventListener('beforeunload', preventUnload);
+    void call('dashboard:setPromptDirty', { dirty });
+    return () => {
+      window.removeEventListener('beforeunload', preventUnload);
+      void call('dashboard:setPromptDirty', { dirty: false });
+    };
   }, [dirty]);
 
   const affectedProfiles = useMemo(
@@ -66,7 +74,7 @@ export function Prompts({
     if (dirty && !window.confirm('Discard the unsaved prompt changes?')) return;
     const prompt = settings.customPrompts.find((item) => item.id === id);
     setSelectedId(prompt?.id ?? DEFAULT_PROMPT_ID);
-    setName(prompt?.name ?? 'Default prompt');
+    setName(prompt?.name ?? DEFAULT_PROMPT_NAME);
     setText(prompt?.systemPrompt ?? SHIPPED_SYSTEM_PROMPT);
     setError(null);
     setStatus(null);
@@ -75,6 +83,8 @@ export function Prompts({
   function validate(): string | null {
     const trimmedName = name.trim();
     if (!trimmedName) return 'Give the prompt a name.';
+    if (trimmedName.toLocaleLowerCase() === DEFAULT_PROMPT_NAME.toLocaleLowerCase())
+      return `${DEFAULT_PROMPT_NAME} is reserved for the shipped prompt.`;
     if (trimmedName.length > MAX_PROMPT_NAME_CHARS)
       return `The name must be ${MAX_PROMPT_NAME_CHARS} characters or fewer.`;
     if (!text.trim()) return 'The system prompt cannot be blank.';
@@ -156,15 +166,20 @@ export function Prompts({
 
   async function duplicate(): Promise<void> {
     if (busy || !selected || settings.customPrompts.length >= MAX_CUSTOM_PROMPTS) return;
+    setError(null);
+    const problem = validate();
+    if (problem) return setError(problem);
     const id = crypto.randomUUID();
-    const base = `Copy of ${selected.name}`.slice(0, MAX_PROMPT_NAME_CHARS - 3);
+    // The copy carries the draft, not the last saved text, so duplicating is
+    // never a silent way to lose the edit on screen.
+    const base = `Copy of ${name.trim()}`.slice(0, MAX_PROMPT_NAME_CHARS - 3);
     let nextName = base;
     let suffix = 2;
     const existing = new Set(
       settings.customPrompts.map((prompt) => prompt.name.toLocaleLowerCase()),
     );
     while (existing.has(nextName.toLocaleLowerCase())) nextName = `${base} ${suffix++}`;
-    const prompt = { id, name: nextName, systemPrompt: selected.systemPrompt };
+    const prompt = { id, name: nextName, systemPrompt: text };
     if (await write([...settings.customPrompts, prompt])) {
       setSelectedId(id);
       setName(prompt.name);
@@ -199,7 +214,7 @@ export function Prompts({
       )
     ) {
       setSelectedId(DEFAULT_PROMPT_ID);
-      setName('Default prompt');
+      setName(DEFAULT_PROMPT_NAME);
       setText(SHIPPED_SYSTEM_PROMPT);
       setStatus('Prompt deleted. Affected profiles now use Default prompt.');
     }
@@ -220,7 +235,7 @@ export function Prompts({
         value={selectedId}
         onChange={(event) => load(event.target.value)}
       >
-        <option value={DEFAULT_PROMPT_ID}>Default prompt</option>
+        <option value={DEFAULT_PROMPT_ID}>{DEFAULT_PROMPT_NAME}</option>
         {settings.customPrompts.map((prompt) => (
           <option key={prompt.id} value={prompt.id}>
             {prompt.name}
@@ -324,9 +339,9 @@ export function Prompts({
         <p>
           Currently selected:{' '}
           {activeSelection === DEFAULT_PROMPT_ID
-            ? 'Default prompt'
+            ? DEFAULT_PROMPT_NAME
             : (settings.customPrompts.find((prompt) => prompt.id === activeSelection)?.name ??
-              'Default prompt')}
+              DEFAULT_PROMPT_NAME)}
           .
         </p>
       ) : null}

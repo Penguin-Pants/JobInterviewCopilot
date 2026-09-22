@@ -13,6 +13,7 @@ type StoreShape = Record<string, unknown>;
 type ElectronStoreInstance = InstanceType<typeof ElectronStoreImport<StoreShape>>;
 import { defaultSettings, SETTINGS_LIMITS } from '../shared/defaults.js';
 import { settingsSchema } from '../shared/ipc.js';
+import { DEFAULT_PROMPT_NAME } from '../shared/prompts.js';
 import type { Settings } from '../shared/types.js';
 
 /**
@@ -44,7 +45,7 @@ const ElectronStore = ((ElectronStoreImport as unknown as { default?: unknown })
 const MAX_CORRUPT_FILES = 3;
 
 /** Bump when the Settings shape changes, and add a step to MIGRATIONS. */
-export const CURRENT_SCHEMA_VERSION = 6;
+export const CURRENT_SCHEMA_VERSION = 7;
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -101,6 +102,38 @@ export const MIGRATIONS: Record<number, (input: UnknownRecord) => UnknownRecord>
     customPrompts: [],
     profilePromptIds: {},
   }),
+  // 6 -> 7: reserve the shipped prompt's display name without discarding an
+  // existing custom prompt that used the previously valid name.
+  6: (input) => {
+    if (!Array.isArray(input.customPrompts)) return { ...input, schemaVersion: 7 };
+
+    const names = new Set(
+      input.customPrompts.flatMap((prompt) =>
+        isPlainObject(prompt) && typeof prompt.name === 'string'
+          ? [prompt.name.trim().toLocaleLowerCase()]
+          : [],
+      ),
+    );
+    let suffix = 1;
+    const customPrompts = input.customPrompts.map((prompt) => {
+      if (
+        !isPlainObject(prompt) ||
+        typeof prompt.name !== 'string' ||
+        prompt.name.trim().toLocaleLowerCase() !== DEFAULT_PROMPT_NAME.toLocaleLowerCase()
+      ) {
+        return prompt;
+      }
+
+      let name = `${DEFAULT_PROMPT_NAME} (custom)`;
+      while (names.has(name.toLocaleLowerCase())) {
+        suffix += 1;
+        name = `${DEFAULT_PROMPT_NAME} (custom ${String(suffix)})`;
+      }
+      names.add(name.toLocaleLowerCase());
+      return { ...prompt, name };
+    });
+    return { ...input, schemaVersion: 7, customPrompts };
+  },
 };
 
 function clamp(value: number, min: number, max: number): number {

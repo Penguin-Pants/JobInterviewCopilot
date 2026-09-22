@@ -1,6 +1,8 @@
 import type { Settings } from './types.js';
 
 export const DEFAULT_PROMPT_ID = 'default';
+/** The one label for the shipped prompt. Reserved: no custom preset may take it. */
+export const DEFAULT_PROMPT_NAME = 'Default prompt';
 export const MAX_CUSTOM_PROMPTS = 5;
 export const MAX_PROMPT_NAME_CHARS = 80;
 export const MAX_SYSTEM_PROMPT_CHARS = 12_000;
@@ -56,6 +58,6 @@ export function promptForProfile(settings: Settings, profileId: string): string 
 
 export function promptName(settings: Settings, profileId: string): string {
   const id = settings.profilePromptIds[profileId] ?? DEFAULT_PROMPT_ID;
-  if (id === DEFAULT_PROMPT_ID) return 'Default prompt';
-  return settings.customPrompts.find((prompt) => prompt.id === id)?.name ?? 'Default prompt';
+  if (id === DEFAULT_PROMPT_ID) return DEFAULT_PROMPT_NAME;
+  return settings.customPrompts.find((prompt) => prompt.id === id)?.name ?? DEFAULT_PROMPT_NAME;
 }

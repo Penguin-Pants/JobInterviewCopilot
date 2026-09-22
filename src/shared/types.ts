@@ -114,7 +114,7 @@ export interface CustomPrompt {
 
 /** Non-secret settings, persisted by electron-store (FR-020). */
 export interface Settings {
-  schemaVersion: 6;
+  schemaVersion: 7;
   activeProfileId: string;
   providers: {
     stt: { primary: ProviderChoice; backup: ProviderChoice | null };
