@@ -68,6 +68,11 @@ export function modelsFromCutoff(
  * retired ID back. Normalizing to `null` keeps what is shown, what is stored
  * and what is applied in agreement. The input is returned unchanged when
  * nothing is stale, so this is safe to call on every render.
+ *
+ * Only a `ready` provider says a model is gone. A failed refresh answers with
+ * the shipped fallback models, which list far fewer models than the provider
+ * has, so clearing on that would throw away a good preference over a network
+ * blip. Those states keep the cutoff, and the picker labels it instead.
  */
 export function normalizedCutoffs(
   cutoffs: Settings['llmModelCutoffs'],
@@ -76,6 +81,7 @@ export function normalizedCutoffs(
   const next = { ...cutoffs };
   let stale = false;
   for (const provider of providers) {
+    if (provider.state !== 'ready') continue;
     const key = provider.providerId as keyof Settings['llmModelCutoffs'];
     const cutoff = next[key];
     if (cutoff && !provider.models.some((model) => model.id === cutoff)) {
@@ -84,6 +90,16 @@ export function normalizedCutoffs(
     }
   }
   return stale ? next : cutoffs;
+}
+
+/**
+ * A cutoff the catalog cannot confirm stays selectable, labeled, so the picker
+ * never sits on a value none of its options carry while the preference is held
+ * for the next successful refresh.
+ */
+function cutoffOption(cutoff: string | null, models: LlmModelDescriptor[]): JSX.Element | null {
+  if (!cutoff || models.some((model) => model.id === cutoff)) return null;
+  return <option value={cutoff}>{cutoff} and newer (unavailable)</option>;
 }
 
 /**
@@ -606,6 +622,7 @@ export function ProviderSetup({
             }}
           >
             <option value="">All available models</option>
+            {cutoffOption(effectiveCutoffs[provider.providerId] ?? null, provider.models)}
             {provider.models.map((model) => (
               <option key={model.id} value={model.id}>
                 {model.displayName} and newer

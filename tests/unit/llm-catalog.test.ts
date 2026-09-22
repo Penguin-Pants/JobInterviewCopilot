@@ -422,6 +422,22 @@ describe('model display cutoff', () => {
     });
   });
 
+  it('keeps the cutoff when the catalog is not authoritative', () => {
+    const cutoffs = { openai: 'gpt-5.9', anthropic: null };
+    for (const state of ['error', 'fallback', 'missing-key'] as const) {
+      const providers = [
+        {
+          providerId: 'openai' as const,
+          displayName: 'OpenAI',
+          models,
+          lastSuccessfulRefresh: null,
+          state,
+        },
+      ];
+      expect(normalizedCutoffs(cutoffs, providers)).toBe(cutoffs);
+    }
+  });
+
   it('returns the saved cutoffs unchanged when every one is still listed', () => {
     const providers = [
       {
