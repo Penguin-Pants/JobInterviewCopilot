@@ -44,7 +44,7 @@ const ElectronStore = ((ElectronStoreImport as unknown as { default?: unknown })
 const MAX_CORRUPT_FILES = 3;
 
 /** Bump when the Settings shape changes, and add a step to MIGRATIONS. */
-export const CURRENT_SCHEMA_VERSION = 5;
+export const CURRENT_SCHEMA_VERSION = 6;
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -94,6 +94,13 @@ export const MIGRATIONS: Record<number, (input: UnknownRecord) => UnknownRecord>
     schemaVersion: 5,
     llmModelCutoffs: { openai: null, anthropic: null },
   }),
+  // 5 -> 6: editable suggestion prompts. Existing profiles keep the shipped default.
+  5: (input) => ({
+    ...input,
+    schemaVersion: 6,
+    customPrompts: [],
+    profilePromptIds: {},
+  }),
 };
 
 function clamp(value: number, min: number, max: number): number {
@@ -107,8 +114,13 @@ function clamp(value: number, min: number, max: number): number {
  */
 export function clampSettings(settings: Settings): Settings {
   const limits = SETTINGS_LIMITS;
+  const promptIds = new Set(settings.customPrompts.map((prompt) => prompt.id));
+  const profilePromptIds = Object.fromEntries(
+    Object.entries(settings.profilePromptIds).filter(([, id]) => promptIds.has(id)),
+  );
   return {
     ...settings,
+    profilePromptIds,
     theme: {
       ...settings.theme,
       overlayOpacity: clamp(
@@ -348,6 +360,12 @@ export class ConfigStore {
   /** Merge a partial update, validate it, clamp it and persist it. */
   set(patch: Partial<Settings>): Settings {
     const merged = deepMerge(this.get(), patch) as Settings;
+    // This map is a complete collection, not an object patch. Replacing it is
+    // what makes removing a profile's explicit selection persist; recursively
+    // merging would silently put every omitted key back.
+    if (patch.profilePromptIds !== undefined) {
+      merged.profilePromptIds = structuredClone(patch.profilePromptIds);
+    }
     assertBackupDiffersFromPrimary(merged);
     const validated = settingsSchema.parse(clampSettings(merged)) as Settings;
     this.store.store = validated as unknown as StoreShape;

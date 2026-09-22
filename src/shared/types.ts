@@ -106,15 +106,25 @@ export interface LlmCatalogResult {
 export type ThemeMode = 'light' | 'dark' | 'system';
 export type OverlayTranslucency = 'acrylic' | 'opacity';
 
+export interface CustomPrompt {
+  id: string;
+  name: string;
+  systemPrompt: string;
+}
+
 /** Non-secret settings, persisted by electron-store (FR-020). */
 export interface Settings {
-  schemaVersion: 5;
+  schemaVersion: 6;
   activeProfileId: string;
   providers: {
     stt: { primary: ProviderChoice; backup: ProviderChoice | null };
     llm: { primary: ProviderChoice; backup: ProviderChoice | null };
   };
   llmModelCutoffs: Record<'openai' | 'anthropic', string | null>;
+  /** Shared suggestion-prompt library. The shipped default is not duplicated here. */
+  customPrompts: CustomPrompt[];
+  /** Missing entries select the shipped default. */
+  profilePromptIds: Record<string, string>;
   theme: {
     mode: ThemeMode;
     accent: string;

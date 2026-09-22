@@ -17,6 +17,7 @@ import {
   SYSTEM_PROMPT,
   buildUserMessage,
 } from '../../src/main/ai/prompt.js';
+import { buildMessages } from '../../src/main/ai/llm.js';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const architecture = readFileSync(join(repoRoot, 'docs', '02-architecture.md'), 'utf8');
@@ -138,5 +139,21 @@ describe('TC-091 user message template', () => {
 describe('generation parameters', () => {
   it('are the section 6 values (TC-092 asserts the adapters send them)', () => {
     expect(GENERATION_PARAMS).toEqual({ maxTokens: 200, temperature: 0.3 });
+  });
+});
+
+describe('custom suggestion prompt', () => {
+  it('replaces only the suggestion system message', () => {
+    const messages = buildMessages({
+      generationId: 'g1',
+      question: 'What did you improve?',
+      candidateContext: '',
+      chunks: [],
+      choice: { providerId: 'anthropic', modelId: 'model' },
+      systemPrompt: 'Focus on measurable outcomes.',
+    });
+    expect(messages.system).toBe('Focus on measurable outcomes.');
+    expect(messages.user).toContain('What did you improve?');
+    expect(messages.maxTokens).toBe(GENERATION_PARAMS.maxTokens);
   });
 });

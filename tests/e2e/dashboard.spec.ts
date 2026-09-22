@@ -51,9 +51,10 @@ async function openTab(id: string): Promise<void> {
  * TC-120  every section FR-087 names is on screen, one tab at a time
  * ------------------------------------------------------------------ */
 
-test('TC-120 all six sections render behind their own tab, with the privacy and consent statements', async () => {
+test('TC-120 all Dashboard sections render behind their own tab, with the privacy and consent statements', async () => {
   const TAB_SECTIONS: [string, string[]][] = [
     ['profiles', ['section-company-profiles']],
+    ['prompts', ['section-prompts']],
     ['history', ['section-session-history']],
     ['providers', ['section-provider-setup']],
     ['usage', ['section-cost-and-usage']],
@@ -109,6 +110,67 @@ test('TC-120 all six sections render behind their own tab, with the privacy and 
   await expect(dashboard.locator('[data-testid="header-active-profile"]')).toContainText(
     'Active profile:',
   );
+});
+
+test('custom prompts can be saved and selected for a company profile', async () => {
+  await openTab('prompts');
+  await expect(dashboard.locator('[data-testid="prompt-text"]')).toContainText(
+    'You are a live interview memory aid',
+  );
+
+  await dashboard.click('[data-testid="prompt-create"]');
+  await dashboard.fill('[data-testid="prompt-name"]', 'Company-focused');
+  await dashboard.fill(
+    '[data-testid="prompt-text"]',
+    'Focus on the company values and measured results.',
+  );
+  await dashboard.click('[data-testid="prompt-save"]');
+  await dashboard.click('[data-testid="prompt-use-for-profile"]');
+  await expect(dashboard.locator('[data-testid="prompt-status"]')).toContainText(
+    'selected for the active profile',
+  );
+
+  await openTab('profiles');
+  const profileId = await firstProfileId();
+  await expect(dashboard.locator(`[data-testid="profile-prompt-${profileId}"]`)).toHaveValue(/.+/);
+  await expect(dashboard.locator(`[data-testid="profile-${profileId}"]`)).toContainText(
+    'Using Company-focused',
+  );
+});
+
+test('prompt drafts are discarded deliberately, duplicated intact, and cannot use the default name', async () => {
+  await openTab('prompts');
+  await dashboard.click('[data-testid="prompt-create"]');
+  await dashboard.fill('[data-testid="prompt-name"]', 'Unsaved name');
+  await dashboard.fill('[data-testid="prompt-text"]', 'Unsaved text');
+
+  dashboard.once('dialog', (dialog) => dialog.accept());
+  await openTab('history');
+  await openTab('prompts');
+  await expect(dashboard.locator('[data-testid="prompt-preset"]')).toHaveValue('default');
+  await expect(dashboard.locator('[data-testid="prompt-text"]')).toContainText(
+    'You are a live interview memory aid',
+  );
+
+  await dashboard.selectOption('[data-testid="prompt-preset"]', { label: 'Custom prompt' });
+  await dashboard.fill('[data-testid="prompt-name"]', 'Draft prompt');
+  await dashboard.fill('[data-testid="prompt-text"]', 'Preserve this draft in the duplicate.');
+  await dashboard.click('[data-testid="prompt-duplicate"]');
+  await expect(dashboard.locator('[data-testid="prompt-name"]')).toHaveValue(
+    'Copy of Draft prompt',
+  );
+  await expect(dashboard.locator('[data-testid="prompt-text"]')).toHaveValue(
+    'Preserve this draft in the duplicate.',
+  );
+
+  await dashboard.fill('[data-testid="prompt-name"]', ' default PROMPT ');
+  await dashboard.click('[data-testid="prompt-save"]');
+  await expect(dashboard.locator('[data-testid="prompt-error"]')).toContainText(
+    'reserved for the shipped prompt',
+  );
+  await dashboard.fill('[data-testid="prompt-name"]', 'Saved duplicate');
+  await dashboard.click('[data-testid="prompt-save"]');
+  await expect(dashboard.locator('[data-testid="prompt-status"]')).toContainText('Prompt saved');
 });
 
 /* ------------------------------------------------------------------ *
@@ -312,7 +374,7 @@ test('TC-124 every interactive element is reachable by Tab and operable by Enter
    * `offsetParent === null` is what a `hidden` ancestor (a tab panel that is
    * not the active one) produces, so this also catches an element whose own
    * attributes look fine but whose panel is closed. `tabIndex === -1` is what
-   * the sidebar's five inactive tab buttons carry on purpose (a roving
+   * the sidebar's inactive tab buttons carry on purpose (a roving
    * tabindex): they are reached by Up/Down, not by Tab, which is asserted
    * separately below, so excluding them here is not a lowered bar, it is the
    * bar this pattern is supposed to have.
@@ -349,7 +411,15 @@ test('TC-124 every interactive element is reachable by Tab and operable by Enter
   // Each tab in turn: with one panel visible at a time, Tab's whole path is
   // checked once per tab (header and sidebar included, since neither is ever
   // hidden) rather than once for what used to be the whole page.
-  for (const tab of ['profiles', 'history', 'providers', 'usage', 'overlay', 'preferences']) {
+  for (const tab of [
+    'profiles',
+    'prompts',
+    'history',
+    'providers',
+    'usage',
+    'overlay',
+    'preferences',
+  ]) {
     await openTab(tab);
     const marks = await markReachableControls();
     expect(marks.length, `${tab}: no reachable controls were marked`).toBeGreaterThan(0);
@@ -360,17 +430,17 @@ test('TC-124 every interactive element is reachable by Tab and operable by Enter
   // Tab stop, and Up/Down move between tabs and activate immediately.
   await openTab('profiles');
   const profilesTab = dashboard.locator('[data-testid="tab-profiles"]');
-  const historyTab = dashboard.locator('[data-testid="tab-history"]');
+  const promptsTab = dashboard.locator('[data-testid="tab-prompts"]');
   await profilesTab.focus();
   await dashboard.keyboard.press('ArrowDown');
-  await expect(historyTab).toHaveAttribute('aria-selected', 'true');
-  await expect(dashboard.locator('[data-testid="section-session-history"]')).toBeVisible();
+  await expect(promptsTab).toHaveAttribute('aria-selected', 'true');
+  await expect(dashboard.locator('[data-testid="section-prompts"]')).toBeVisible();
   // The sidebar moves focus to the newly selected tab from a
   // `requestAnimationFrame`, one frame after the handler returns, because the
   // button it moves to is not in the tab order until the re-render lands. That
   // deferred focus is part of the pattern under test, so it is asserted rather
   // than waited out: the next key can only be aimed once it has arrived.
-  await expect(historyTab).toBeFocused();
+  await expect(promptsTab).toBeFocused();
   await dashboard.keyboard.press('ArrowUp');
   await expect(profilesTab).toHaveAttribute('aria-selected', 'true');
   await expect(profilesTab).toBeFocused();

@@ -31,6 +31,8 @@ describe('TC-030 defaults', () => {
       modelId: 'claude-haiku-4-5-20251001',
     });
     expect(s.llmModelCutoffs).toEqual({ openai: null, anthropic: null });
+    expect(s.customPrompts).toEqual([]);
+    expect(s.profilePromptIds).toEqual({});
     expect(s.theme.mode).toBe('system');
     expect(s.theme.accent).toBe('#6366F1');
     expect(s.theme.overlayOpacity).toBe(0.85);
@@ -159,6 +161,12 @@ describe('TC-032 migration chain', () => {
   it('shows every language model by default when upgrading a version 4 file', () => {
     const migrated = migrate({ schemaVersion: 4 });
     expect(migrated.llmModelCutoffs).toEqual({ openai: null, anthropic: null });
+  });
+
+  it('keeps existing profiles on the shipped prompt when upgrading a version 5 file', () => {
+    const migrated = migrate({ schemaVersion: 5 });
+    expect(migrated.customPrompts).toEqual([]);
+    expect(migrated.profilePromptIds).toEqual({});
   });
 });
 

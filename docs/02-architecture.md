@@ -95,7 +95,7 @@ logs/
 
 ```ts
 interface Settings {
-  schemaVersion: 3;
+  schemaVersion: 6;
   activeProfileId: string;
   providers: {
     stt: {
@@ -108,6 +108,8 @@ interface Settings {
       backup: ProviderChoice | null;
     };
   };
+  customPrompts: Array<{ id: string; name: string; systemPrompt: string }>;
+  profilePromptIds: Record<string, string>; // missing = shipped default
   theme: {
     mode: 'light' | 'dark' | 'system';
     accent: string;                        // hex, '#6366F1'
@@ -1269,6 +1271,7 @@ payload is rejected and logged, never passed through.
 | CH-119 | `overlay:savePosition` | `{ x, y, displayId }` | `{ ok: true }` |
 | CH-120 | `consent:dismiss` | none | `{ ok: true }` |
 | CH-121 | `overlay:reset` | none | `{ ok: true, x, y, displayId }` |
+| CH-132 | `dashboard:setPromptDirty` | `{ dirty }` | `{ ok: true }` |
 | CH-122 | `overlay:ready` | none | `{ ok: true }` |
 | CH-123 | `doc:retry` | `{ docId, profileId }` | `DocumentRecord` |
 | CH-124 | `model:ensure` | none | `ModelDownloadState` |
@@ -1751,7 +1754,10 @@ deliberate, cheapest first:
 
 ## 6. Prompt specification (`FR-072`, `FR-073`)
 
-System prompt, fixed, not user-editable in v1:
+The shipped default system prompt is below. It is always available and cannot
+be modified or deleted. A profile may instead select one of up to five custom
+system prompts. The selection and exact saved text are captured at session
+start and used by both primary and backup models for that session:
 
 ```
 You are a live interview memory aid for a candidate who has consented to
