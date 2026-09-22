@@ -422,6 +422,34 @@ describe('model display cutoff', () => {
     });
   });
 
+  it('clears a cutoff the catalog knows only as the saved selection', () => {
+    // `LlmCatalogService.result()` appends the saved model as an `unavailable`
+    // entry, which is not the catalog listing it.
+    const retired: LlmModelDescriptor = {
+      id: 'gpt-5.0',
+      displayName: 'gpt-5.0',
+      providerId: 'openai',
+      releasedAt: null,
+      status: 'unavailable',
+      streamingText: true,
+      effort: null,
+      pricing: { known: false },
+    };
+    const providers = [
+      {
+        providerId: 'openai' as const,
+        displayName: 'OpenAI',
+        models: [...models, retired],
+        lastSuccessfulRefresh: null,
+        state: 'ready' as const,
+      },
+    ];
+    expect(normalizedCutoffs({ openai: 'gpt-5.0', anthropic: null }, providers)).toEqual({
+      openai: null,
+      anthropic: null,
+    });
+  });
+
   it('keeps the cutoff when the catalog is not authoritative', () => {
     const cutoffs = { openai: 'gpt-5.9', anthropic: null };
     for (const state of ['error', 'fallback', 'missing-key'] as const) {

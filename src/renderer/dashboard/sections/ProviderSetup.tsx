@@ -84,7 +84,7 @@ export function normalizedCutoffs(
     if (provider.state !== 'ready') continue;
     const key = provider.providerId as keyof Settings['llmModelCutoffs'];
     const cutoff = next[key];
-    if (cutoff && !provider.models.some((model) => model.id === cutoff)) {
+    if (cutoff && !catalogLists(provider.models, cutoff)) {
       next[key] = null;
       stale = true;
     }
@@ -93,12 +93,22 @@ export function normalizedCutoffs(
 }
 
 /**
+ * A model the catalog knows only because it is the saved selection is not the
+ * catalog listing it: `LlmCatalogService.result()` appends that ID as an
+ * `unavailable` entry even for a `ready` provider, so a cutoff is confirmed by
+ * the real models alone.
+ */
+function catalogLists(models: LlmModelDescriptor[], modelId: string): boolean {
+  return models.some((model) => model.id === modelId && model.status !== 'unavailable');
+}
+
+/**
  * A cutoff the catalog cannot confirm stays selectable, labeled, so the picker
  * never sits on a value none of its options carry while the preference is held
  * for the next successful refresh.
  */
 function cutoffOption(cutoff: string | null, models: LlmModelDescriptor[]): JSX.Element | null {
-  if (!cutoff || models.some((model) => model.id === cutoff)) return null;
+  if (!cutoff || catalogLists(models, cutoff)) return null;
   return <option value={cutoff}>{cutoff} and newer (unavailable)</option>;
 }
 
