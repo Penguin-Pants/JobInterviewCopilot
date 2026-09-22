@@ -7,26 +7,17 @@
  * answers is the provider's, not the prompt's.
  */
 import type { RetrievedChunk } from '../rag.js';
+import { SHIPPED_SYSTEM_PROMPT } from '../../shared/prompts.js';
 
 /**
- * The fixed system prompt, not user-editable in v1 (FR-073).
+ * The shipped default system prompt (FR-073).
  *
  * `TC-090` reads section 6 of the architecture document and compares byte for
  * byte, so this constant cannot drift from the specification without failing
  * the build. Keep the line breaks exactly as they are: they are part of what is
  * compared.
  */
-export const SYSTEM_PROMPT = `You are a live interview memory aid for a candidate who has consented to
-using this tool. Answer with 3 to 5 very short bullets. Each bullet is at
-most 12 words. Use keywords, concrete facts from the candidate's notes,
-or STAR-method reminders (Situation, Task, Action, Result).
-
-Never write a paragraph. Never write a sentence the candidate could read
-aloud verbatim. You are producing cues, not a script.
-
-If the notes do not cover the question, say so in one bullet and give
-structural cues instead of invented facts. Never invent an employer,
-a date, a metric or a project that is not in the notes.`;
+export const SYSTEM_PROMPT = SHIPPED_SYSTEM_PROMPT;
 
 /**
  * Generation parameters, identical for both providers (FR-070, FR-072, TC-092).

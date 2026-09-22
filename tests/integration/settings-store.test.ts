@@ -63,6 +63,17 @@ describe('TC-031 settings store recovery through electron-store', () => {
       anthropic: null,
     });
   });
+
+  it('removes a profile prompt selection instead of merging the omitted key back', () => {
+    const dir = tmp();
+    const store = new ConfigStore({ dir });
+    store.set({
+      customPrompts: [{ id: 'one', name: 'One', systemPrompt: 'Use concise facts.' }],
+      profilePromptIds: { first: 'one', second: 'one' },
+    });
+    store.set({ profilePromptIds: { second: 'one' } });
+    expect(new ConfigStore({ dir }).get().profilePromptIds).toEqual({ second: 'one' });
+  });
 });
 
 /**

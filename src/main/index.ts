@@ -1659,6 +1659,12 @@ function registerIpcHandlers(): void {
       throw new Error('A session is running in this profile. Stop it before deleting the profile.');
     }
     await rag.deleteProfile(id);
+    const currentSettings = config.get();
+    if (currentSettings.profilePromptIds[id] !== undefined) {
+      const profilePromptIds = { ...currentSettings.profilePromptIds };
+      delete profilePromptIds[id];
+      config.set({ profilePromptIds });
+    }
     if (config.get().activeProfileId === id) await ensureActiveProfile();
     return { ok: true as const };
   });

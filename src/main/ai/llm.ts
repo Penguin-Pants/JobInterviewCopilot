@@ -42,6 +42,8 @@ export interface GenerationRequest {
   /** Up to 3, from `RagEngine.query` (FR-072). */
   chunks: RetrievedChunk[];
   choice: ProviderChoice;
+  /** Saved suggestion prompt captured when the session started. */
+  systemPrompt?: string;
   promptOverride?: GenerationMessages;
   purpose?: 'suggestion' | 'classification';
 }
@@ -70,7 +72,7 @@ export interface GenerationMessages {
 export function buildMessages(req: GenerationRequest): GenerationMessages {
   if (req.promptOverride) return req.promptOverride;
   return {
-    system: SYSTEM_PROMPT,
+    system: req.systemPrompt ?? SYSTEM_PROMPT,
     user: buildUserMessage({
       question: req.question,
       candidateContext: req.candidateContext,

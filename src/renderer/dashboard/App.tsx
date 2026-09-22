@@ -1,7 +1,7 @@
 /**
  * The Dashboard (CMP-13, TASK-042).
  *
- * `FR-087`'s six sections, plus the Overlay and appearance section that holds
+ * `FR-087`'s sections, plus the prompt editor and Overlay and appearance,
  * the settings `FR-029` requires and Reset Overlay (`FR-009`), are tabs behind
  * a sidebar rather than one long scrolling page, so no tab requires scrolling
  * the window to reach another. Hotkeys and Consent Reminder share one
@@ -38,11 +38,12 @@ import { CostAndUsage } from './sections/CostAndUsage.js';
 import { Hotkeys } from './sections/Hotkeys.js';
 import { OverlayAppearance } from './sections/OverlayAppearance.js';
 import { ProviderSetup } from './sections/ProviderSetup.js';
+import { Prompts } from './sections/Prompts.js';
 import { SessionHistory } from './sections/SessionHistory.js';
 import { useDashboardData } from './state.js';
 import type { StreamState } from '../../shared/types.js';
 
-type TabId = 'profiles' | 'history' | 'providers' | 'usage' | 'overlay' | 'preferences';
+type TabId = 'profiles' | 'prompts' | 'history' | 'providers' | 'usage' | 'overlay' | 'preferences';
 
 interface TabDef {
   id: TabId;
@@ -51,6 +52,7 @@ interface TabDef {
 
 const TABS: TabDef[] = [
   { id: 'profiles', label: 'Company Profiles' },
+  { id: 'prompts', label: 'Prompts' },
   { id: 'history', label: 'Session History' },
   { id: 'providers', label: 'Provider Setup' },
   { id: 'usage', label: 'Cost and Usage' },
@@ -203,9 +205,10 @@ export function Dashboard(): JSX.Element {
   const [starting, setStarting] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [activeTab, setActiveTab] = useState<TabId>('profiles');
+  const [promptDirty, setPromptDirty] = useState(false);
   const content = useRef<HTMLDivElement | null>(null);
 
-  // All six panels share this one scrolling element, so its scroll position
+  // All panels share this one scrolling element, so its scroll position
   // survives a tab switch on its own. Left alone, scrolling deep into a long
   // panel and then opening a shorter one opened it part-way down, or even
   // past its own content, with nothing of that tab on screen at all.
@@ -373,7 +376,19 @@ export function Dashboard(): JSX.Element {
       </header>
 
       <div className="dashboard-body">
-        <TabNav activeTab={activeTab} onSelect={setActiveTab} />
+        <TabNav
+          activeTab={activeTab}
+          onSelect={(id) => {
+            if (
+              activeTab === 'prompts' &&
+              id !== 'prompts' &&
+              promptDirty &&
+              !window.confirm('Discard the unsaved prompt changes?')
+            )
+              return;
+            setActiveTab(id);
+          }}
+        />
 
         <div className="dashboard-content" ref={content}>
           <div
@@ -390,6 +405,22 @@ export function Dashboard(): JSX.Element {
               docProgress={data.docProgress}
               onProfilesChanged={data.reloadProfiles}
               onSettingsChanged={data.reloadSettings}
+              settings={data.settings}
+            />
+          </div>
+
+          <div
+            id="panel-prompts"
+            role="tabpanel"
+            aria-labelledby="tab-prompts"
+            hidden={activeTab !== 'prompts'}
+          >
+            <Prompts
+              settings={data.settings}
+              profiles={data.profiles}
+              activeProfileId={data.settings.activeProfileId}
+              onSettingsChanged={data.reloadSettings}
+              onDirtyChange={setPromptDirty}
             />
           </div>
 

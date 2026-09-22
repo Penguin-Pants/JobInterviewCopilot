@@ -8,7 +8,8 @@
  */
 import { useCallback, useEffect, useState, type DragEvent, type FormEvent, type JSX } from 'react';
 import { KB_CEILING } from '../../../shared/defaults.js';
-import type { DocType, DocumentRecord, Profile } from '../../../shared/types.js';
+import { DEFAULT_PROMPT_ID, promptName } from '../../../shared/prompts.js';
+import type { DocType, DocumentRecord, Profile, Settings } from '../../../shared/types.js';
 import { call } from '../call.js';
 import { formatBytes } from '../format.js';
 import type { DocProgress, ModelState, SessionState } from '../state.js';
@@ -40,6 +41,7 @@ export interface CompanyProfilesProps {
   docProgress: Record<string, DocProgress>;
   onProfilesChanged: () => Promise<void>;
   onSettingsChanged: () => Promise<void>;
+  settings: Settings;
 }
 
 export function CompanyProfiles({
@@ -50,6 +52,7 @@ export function CompanyProfiles({
   docProgress,
   onProfilesChanged,
   onSettingsChanged,
+  settings,
 }: CompanyProfilesProps): JSX.Element {
   const [newName, setNewName] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -117,6 +120,17 @@ export function CompanyProfiles({
       return;
     }
     await refresh();
+  }
+
+  async function selectPrompt(profileId: string, promptId: string): Promise<void> {
+    if (!settings) return;
+    setError(null);
+    const profilePromptIds = { ...settings.profilePromptIds };
+    if (promptId === DEFAULT_PROMPT_ID) delete profilePromptIds[profileId];
+    else profilePromptIds[profileId] = promptId;
+    const result = await call('config:set', { profilePromptIds });
+    if (!result.ok) return setError(result.message);
+    await onSettingsChanged();
   }
 
   /**
@@ -251,6 +265,23 @@ export function CompanyProfiles({
             {profile.id === activeProfileId ? (
               <span data-testid={`profile-active-${profile.id}`}>Active</span>
             ) : null}
+            <>
+              <label htmlFor={`profile-prompt-${profile.id}`}>Suggestion prompt</label>
+              <select
+                id={`profile-prompt-${profile.id}`}
+                data-testid={`profile-prompt-${profile.id}`}
+                value={settings.profilePromptIds[profile.id] ?? DEFAULT_PROMPT_ID}
+                onChange={(event) => void selectPrompt(profile.id, event.target.value)}
+              >
+                <option value={DEFAULT_PROMPT_ID}>Default prompt</option>
+                {settings.customPrompts.map((prompt) => (
+                  <option key={prompt.id} value={prompt.id}>
+                    {prompt.name}
+                  </option>
+                ))}
+              </select>
+              <span>Using {promptName(settings, profile.id)}</span>
+            </>
             <button
               type="button"
               data-testid={`profile-activate-${profile.id}`}
