@@ -683,26 +683,6 @@ function SttSlot({
           </option>
         ))}
       </select>
-
-      <table data-testid={`${slot}-model-table`}>
-        <caption>Models offered by this provider</caption>
-        <thead>
-          <tr>
-            <th scope="col">Model</th>
-            <th scope="col">Streams</th>
-            <th scope="col">Price</th>
-          </tr>
-        </thead>
-        <tbody>
-          {models.map((model) => (
-            <tr key={model.id} data-testid={`${slot}-model-row-${model.id}`}>
-              <td>{model.displayName}</td>
-              <td>{model.streaming ? 'Yes' : 'No'}</td>
-              <td>{sttPrice(model)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
     </div>
   );
 }
@@ -788,26 +768,6 @@ function LlmSlot({
           </select>
         </>
       ) : null}
-
-      <table data-testid={`${slot}-model-table`}>
-        <caption>Models offered by this provider</caption>
-        <thead>
-          <tr>
-            <th scope="col">Model</th>
-            <th scope="col">Streams</th>
-            <th scope="col">Price</th>
-          </tr>
-        </thead>
-        <tbody>
-          {models.map((model) => (
-            <tr key={model.id} data-testid={`${slot}-model-row-${model.id}`}>
-              <td>{model.displayName}</td>
-              <td>Yes</td>
-              <td>{llmPrice(model)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
     </div>
   );
 }
