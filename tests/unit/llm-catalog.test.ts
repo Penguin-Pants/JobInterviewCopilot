@@ -10,7 +10,10 @@ import {
   anthropicCompatibility,
   openAiCompatibility,
 } from '../../src/main/ai/llm/catalog.js';
-import { llmCatalogStatus } from '../../src/renderer/dashboard/sections/ProviderSetup.js';
+import {
+  llmCatalogStatus,
+  modelsFromCutoff,
+} from '../../src/renderer/dashboard/sections/ProviderSetup.js';
 
 function response(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200 });
@@ -347,5 +350,31 @@ describe('runtime LLM catalog', () => {
     expect(
       JSON.parse(readFileSync(join(dir, 'llm-catalog.json'), 'utf8')).providers.openai,
     ).toBeUndefined();
+  });
+});
+
+describe('model display cutoff', () => {
+  const models = ['gpt-5.4', 'gpt-5.3', 'gpt-5.2', 'gpt-5.1'].map((id) => ({
+    id,
+    displayName: id,
+    providerId: 'openai' as const,
+    releasedAt: null,
+    status: 'available' as const,
+    streamingText: true as const,
+    effort: null,
+    pricing: { known: false as const },
+  }));
+
+  it('shows the chosen model and every newer model', () => {
+    expect(modelsFromCutoff(models, 'gpt-5.2').map((model) => model.id)).toEqual([
+      'gpt-5.4',
+      'gpt-5.3',
+      'gpt-5.2',
+    ]);
+  });
+
+  it('shows everything when no cutoff is saved or an old cutoff disappears', () => {
+    expect(modelsFromCutoff(models, null)).toEqual(models);
+    expect(modelsFromCutoff(models, 'retired-model')).toEqual(models);
   });
 });

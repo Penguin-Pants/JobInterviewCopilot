@@ -52,6 +52,17 @@ describe('TC-031 settings store recovery through electron-store', () => {
     new ConfigStore({ dir }).set({ theme: { ...defaultSettings().theme, mode: 'dark' } });
     expect(new ConfigStore({ dir }).get().theme.mode).toBe('dark');
   });
+
+  it('persists the oldest visible model for each provider', () => {
+    const dir = tmp();
+    new ConfigStore({ dir }).set({
+      llmModelCutoffs: { openai: 'gpt-5.2', anthropic: null },
+    });
+    expect(new ConfigStore({ dir }).get().llmModelCutoffs).toEqual({
+      openai: 'gpt-5.2',
+      anthropic: null,
+    });
+  });
 });
 
 /**

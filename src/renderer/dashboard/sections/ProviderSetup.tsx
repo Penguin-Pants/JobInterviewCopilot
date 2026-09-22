@@ -52,6 +52,15 @@ export function llmCatalogStatus(providers: LlmCatalogProvider[]): string {
     .join(' ');
 }
 
+export function modelsFromCutoff(
+  models: LlmModelDescriptor[],
+  cutoffModelId: string | null,
+): LlmModelDescriptor[] {
+  if (!cutoffModelId) return models;
+  const cutoff = models.findIndex((model) => model.id === cutoffModelId);
+  return cutoff === -1 ? models : models.slice(0, cutoff + 1);
+}
+
 function providerName<M>(registry: ProviderDescriptor<M>[], providerId: string): string {
   return registry.find((p) => p.id === providerId)?.displayName ?? providerId;
 }
@@ -237,6 +246,7 @@ export function ProviderSetup({
   const [keyStates, setKeyStates] = useState<Record<string, KeyState>>({});
   const [llmCatalog, setLlmCatalog] = useState<LlmCatalogProvider[] | null>(null);
   const [llmCatalogMessage, setLlmCatalogMessage] = useState('Loading models…');
+  const [llmModelCutoffs, setLlmModelCutoffs] = useState(settings.llmModelCutoffs);
 
   async function loadLlmCatalog(force = false): Promise<void> {
     setLlmCatalogMessage(force ? 'Refreshing models…' : 'Loading models…');
@@ -304,6 +314,10 @@ export function ProviderSetup({
   useEffect(() => {
     setDraft(JSON.parse(storedProviders) as Draft);
   }, [storedProviders]);
+  const storedLlmModelCutoffs = JSON.stringify(settings.llmModelCutoffs);
+  useEffect(() => {
+    setLlmModelCutoffs(JSON.parse(storedLlmModelCutoffs) as Settings['llmModelCutoffs']);
+  }, [storedLlmModelCutoffs]);
 
   const sttConflict = backupConflict(draft.stt.primary, draft.stt.backup, (id) =>
     providerName(sttRegistry, id),
@@ -369,7 +383,7 @@ export function ProviderSetup({
 
   async function save(): Promise<void> {
     setSaveError(null);
-    const result = await call('config:set', { providers: draft });
+    const result = await call('config:set', { providers: draft, llmModelCutoffs });
     if (!result.ok) {
       setSaveError(result.message);
       return;
@@ -505,11 +519,57 @@ export function ProviderSetup({
           </p>
         ) : null,
       )}
+      <p>Choose the oldest model to show. Newly released models will stay visible automatically.</p>
+      {llmCatalog?.map((provider) => (
+        <div key={`${provider.providerId}-model-cutoff`}>
+          <label htmlFor={`${provider.providerId}-model-cutoff`}>
+            Show {provider.displayName} models from
+          </label>
+          <select
+            id={`${provider.providerId}-model-cutoff`}
+            data-testid={`${provider.providerId}-model-cutoff`}
+            value={llmModelCutoffs[provider.providerId] ?? ''}
+            onChange={(event) => {
+              setSaved(false);
+              const cutoff = event.target.value || null;
+              setLlmModelCutoffs((current) => ({
+                ...current,
+                [provider.providerId]: cutoff,
+              }));
+              const visible = modelsFromCutoff(provider.models, cutoff);
+              setDraft((current) => {
+                const update = (choice: ProviderChoice | null): ProviderChoice | null =>
+                  choice?.providerId === provider.providerId &&
+                  !visible.some((model) => model.id === choice.modelId)
+                    ? visible[0]
+                      ? { providerId: provider.providerId, modelId: visible[0].id }
+                      : choice
+                    : choice;
+                return {
+                  ...current,
+                  llm: {
+                    primary: update(current.llm.primary) ?? current.llm.primary,
+                    backup: update(current.llm.backup),
+                  },
+                };
+              });
+            }}
+          >
+            <option value="">All available models</option>
+            {provider.models.map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.displayName} and newer
+              </option>
+            ))}
+          </select>
+        </div>
+      ))}
       <LlmSlot
         slot="llm-primary"
         label="Primary"
         choice={draft.llm.primary}
         catalog={llmCatalog}
+        cutoffs={llmModelCutoffs}
         onChange={(choice) => setLlmChoice('primary', choice)}
       />
       <LlmSlot
@@ -517,6 +577,7 @@ export function ProviderSetup({
         label="Backup"
         choice={draft.llm.backup}
         catalog={llmCatalog}
+        cutoffs={llmModelCutoffs}
         optional
         onChange={(choice) => setLlmChoice('backup', choice)}
       />
@@ -547,7 +608,7 @@ export function ProviderSetup({
         disabled={blocked}
         onClick={() => void save()}
       >
-        Save provider selection
+        Save provider and model settings
       </button>
       {saved ? <span data-testid="providers-saved">Saved</span> : null}
       {saveError ? (
@@ -683,26 +744,6 @@ function SttSlot({
           </option>
         ))}
       </select>
-
-      <table data-testid={`${slot}-model-table`}>
-        <caption>Models offered by this provider</caption>
-        <thead>
-          <tr>
-            <th scope="col">Model</th>
-            <th scope="col">Streams</th>
-            <th scope="col">Price</th>
-          </tr>
-        </thead>
-        <tbody>
-          {models.map((model) => (
-            <tr key={model.id} data-testid={`${slot}-model-row-${model.id}`}>
-              <td>{model.displayName}</td>
-              <td>{model.streaming ? 'Yes' : 'No'}</td>
-              <td>{sttPrice(model)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
     </div>
   );
 }
@@ -714,7 +755,11 @@ function LlmSlot({
   optional,
   onChange,
   catalog,
-}: SlotProps<ProviderChoice | null> & { catalog: LlmCatalogProvider[] | null }): JSX.Element {
+  cutoffs,
+}: SlotProps<ProviderChoice | null> & {
+  catalog: LlmCatalogProvider[] | null;
+  cutoffs: Settings['llmModelCutoffs'];
+}): JSX.Element {
   const providerId = choice?.providerId ?? '';
   const catalogProviders =
     catalog ??
@@ -724,7 +769,10 @@ function LlmSlot({
       models: provider.models,
     }));
   const models = providerId
-    ? (catalogProviders.find((provider) => provider.providerId === providerId)?.models ?? [])
+    ? modelsFromCutoff(
+        catalogProviders.find((provider) => provider.providerId === providerId)?.models ?? [],
+        cutoffs[providerId as keyof Settings['llmModelCutoffs']] ?? null,
+      )
     : [];
   const selected = models.find((model) => model.id === choice?.modelId);
   return (
@@ -737,8 +785,10 @@ function LlmSlot({
         onChange={(e) => {
           const nextProvider = e.target.value;
           if (nextProvider === '') return onChange(null);
-          const nextModels =
-            catalogProviders.find((provider) => provider.providerId === nextProvider)?.models ?? [];
+          const nextModels = modelsFromCutoff(
+            catalogProviders.find((provider) => provider.providerId === nextProvider)?.models ?? [],
+            cutoffs[nextProvider as keyof Settings['llmModelCutoffs']] ?? null,
+          );
           const first = nextModels.find((model) => model.status === 'available') ?? nextModels[0];
           onChange(first ? { providerId: nextProvider, modelId: first.id } : null);
         }}
@@ -788,26 +838,6 @@ function LlmSlot({
           </select>
         </>
       ) : null}
-
-      <table data-testid={`${slot}-model-table`}>
-        <caption>Models offered by this provider</caption>
-        <thead>
-          <tr>
-            <th scope="col">Model</th>
-            <th scope="col">Streams</th>
-            <th scope="col">Price</th>
-          </tr>
-        </thead>
-        <tbody>
-          {models.map((model) => (
-            <tr key={model.id} data-testid={`${slot}-model-row-${model.id}`}>
-              <td>{model.displayName}</td>
-              <td>Yes</td>
-              <td>{llmPrice(model)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
     </div>
   );
 }
