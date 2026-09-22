@@ -3,12 +3,7 @@
 A native Windows desktop app that gives a job candidate real-time, glanceable
 cues during a live video interview, drawn from their own resume, company
 research and notes. The purpose is accessibility support, for example ADHD or
-memory recall under stress. It is not a scripting tool.
-
-**Status: Milestones 0, 1 and 2 complete.** Foundations, audio and
-transcription, and the knowledge base are implemented and verified. Milestone 3
-(trigger and suggestions) is next. See `docs/03-tasks.md` for what each milestone
-covers and what it deferred.
+memory recall under stress. 
 
 ---
 
@@ -42,22 +37,16 @@ log, not a code change.
   applied before the window is shown and never disabled. On Windows 10 builds
   before 19041 it degrades to a black rectangle in the capture, and the app warns
   about that once per session (NFR-012). This keeps the overlay
-  from covering a presentation the candidate is sharing. It is a
-  presentation-integrity control, not a way to hide the tool. (ADR-001)
+  from covering a presentation the candidate is sharing.
 - **A consent reminder is rendered before every session.** Dismissible,
   non-blocking, and impossible to turn off. What the app guarantees is that the
   reminder was rendered before the first suggestion, enforced by buffering
-  suggestions until the overlay reports ready (ADR-016). It cannot guarantee the
-  user read it, and it does not verify that the interviewer was told. Making the
-  interviewer aware of the tool is the user's responsibility. The app supports
-  that responsibility, it does not discharge it. (ADR-002)
+  suggestions until the overlay reports ready (ADR-016). 
 - **Audio is never written to disk by this app.** Buffers live in memory and are
   released once transcribed. Proven by a filesystem write monitor, not only by a
   lint rule (ADR-019). Only text transcripts persist, and the user deletes them
   whenever they choose. Transcripts are plaintext JSON kept until deleted, with
-  no encryption at rest and no retention window in v1. That is a deliberate
-  choice, and the app says so in the Dashboard and in the consent copy rather
-  than leaving it implicit. (FR-043, FR-110, ADR-003, OQ-001)
+  no encryption at rest and no retention window in v1. 
 
 ---
 
@@ -70,11 +59,6 @@ electron-builder.
 Speech to text and suggestions both come from a **provider registry**, so the
 user picks a provider and a specific model, and adding a provider later costs one
 registry entry plus one adapter (ADR-022).
-
-| Capability | Ships with |
-|---|---|
-| Speech to text | Deepgram `nova-3` (default) and `nova-2`, OpenAI `gpt-4o-transcribe` and `gpt-4o-mini-transcribe`, ElevenLabs `scribe-v2-realtime`, plus OpenAI `whisper-1` as a clearly labeled non-streaming option |
-| Suggestions | Anthropic `claude-haiku-4-5-20251001` (default), OpenAI `gpt-4o-mini` |
 
 ---
 
