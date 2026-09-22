@@ -103,6 +103,18 @@ function catalogLists(models: LlmModelDescriptor[], modelId: string): boolean {
 }
 
 /**
+ * The cutoffs a user can pick.
+ *
+ * A model the catalog carries only because it is the saved selection is not
+ * one of them: picking it would be undone by `normalizedCutoffs` on the next
+ * render, and the control would snap back to "All available models" with
+ * nothing said.
+ */
+export function cutoffChoices(models: LlmModelDescriptor[]): LlmModelDescriptor[] {
+  return models.filter((model) => model.status !== 'unavailable');
+}
+
+/**
  * A cutoff the catalog cannot confirm stays selectable, labeled, so the picker
  * never sits on a value none of its options carry while the preference is held
  * for the next successful refresh.
@@ -605,35 +617,24 @@ export function ProviderSetup({
             id={`${provider.providerId}-model-cutoff`}
             data-testid={`${provider.providerId}-model-cutoff`}
             value={effectiveCutoffs[provider.providerId] ?? ''}
+            /*
+              The cutoff says which models to show, so it changes no choice.
+              It used to move a hidden selection to the newest model, which
+              turned a display preference into a different model for every
+              session, at different behavior and price, without saying so.
+              `withSelectedModel` keeps the selection in its picker instead.
+            */
             onChange={(event) => {
               setSaved(false);
-              const cutoff = event.target.value || null;
               setLlmModelCutoffs((current) => ({
                 ...current,
-                [provider.providerId]: cutoff,
+                [provider.providerId]: event.target.value || null,
               }));
-              const visible = modelsFromCutoff(provider.models, cutoff);
-              setDraft((current) => {
-                const update = (choice: ProviderChoice | null): ProviderChoice | null =>
-                  choice?.providerId === provider.providerId &&
-                  !visible.some((model) => model.id === choice.modelId)
-                    ? visible[0]
-                      ? { providerId: provider.providerId, modelId: visible[0].id }
-                      : choice
-                    : choice;
-                return {
-                  ...current,
-                  llm: {
-                    primary: update(current.llm.primary) ?? current.llm.primary,
-                    backup: update(current.llm.backup),
-                  },
-                };
-              });
             }}
           >
             <option value="">All available models</option>
             {cutoffOption(effectiveCutoffs[provider.providerId] ?? null, provider.models)}
-            {provider.models.map((model) => (
+            {cutoffChoices(provider.models).map((model) => (
               <option key={model.id} value={model.id}>
                 {model.displayName} and newer
               </option>

@@ -12,6 +12,7 @@ import {
 } from '../../src/main/ai/llm/catalog.js';
 import {
   llmCatalogStatus,
+  cutoffChoices,
   modelsFromCutoff,
   normalizedCutoffs,
   withSelectedModel,
@@ -448,6 +449,21 @@ describe('model display cutoff', () => {
       openai: null,
       anthropic: null,
     });
+  });
+
+  it('offers no cutoff the catalog carries only as the saved selection', () => {
+    const retired: LlmModelDescriptor = {
+      id: 'gpt-5.0',
+      displayName: 'gpt-5.0',
+      providerId: 'openai',
+      releasedAt: null,
+      status: 'unavailable',
+      streamingText: true,
+      effort: null,
+      pricing: { known: false },
+    };
+    expect(cutoffChoices([...models, retired])).toEqual(models);
+    expect(cutoffChoices(models)).toEqual(models);
   });
 
   it('keeps the cutoff when the catalog is not authoritative', () => {
