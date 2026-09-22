@@ -8,7 +8,7 @@
  */
 import { useCallback, useEffect, useState, type DragEvent, type FormEvent, type JSX } from 'react';
 import { KB_CEILING } from '../../../shared/defaults.js';
-import { DEFAULT_PROMPT_ID, promptName } from '../../../shared/prompts.js';
+import { DEFAULT_PROMPT_ID, DEFAULT_PROMPT_NAME, promptName } from '../../../shared/prompts.js';
 import type { DocType, DocumentRecord, Profile, Settings } from '../../../shared/types.js';
 import { call } from '../call.js';
 import { formatBytes } from '../format.js';
@@ -273,7 +273,7 @@ export function CompanyProfiles({
                 value={settings.profilePromptIds[profile.id] ?? DEFAULT_PROMPT_ID}
                 onChange={(event) => void selectPrompt(profile.id, event.target.value)}
               >
-                <option value={DEFAULT_PROMPT_ID}>Default prompt</option>
+                <option value={DEFAULT_PROMPT_ID}>{DEFAULT_PROMPT_NAME}</option>
                 {settings.customPrompts.map((prompt) => (
                   <option key={prompt.id} value={prompt.id}>
                     {prompt.name}

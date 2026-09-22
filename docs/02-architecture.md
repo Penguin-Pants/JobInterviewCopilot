@@ -1278,6 +1278,7 @@ payload is rejected and logged, never passed through.
 | CH-126 | `overlay:setFontSize` | `{ px }` | `{ ok: true }` |
 | CH-127 | `overlay:setSize` | `{ width, height }` | `{ ok: true }` |
 | CH-128 | `overlay:setPointerOverControls` | `{ over }` | `{ ok: true }` |
+| CH-132 | `dashboard:setPromptDirty` | `{ dirty }` | `{ ok: true }` |
 
 **Changes made in Milestone 2 (ADR-030, DoD 9).** `CH-121` and `CH-122` landed
 in Milestone 0 and are recorded here for the first time. The rest are new:
@@ -1470,6 +1471,7 @@ buffering is bounded by a declared constant.
 |---|---|---|---|
 | CH-130 | `llmCatalog:get` | Dashboard to main | Return cached normalized model catalogs and lazily refresh stale providers. |
 | CH-131 | `llmCatalog:refresh` | Dashboard to main | Force independent provider refreshes and return the retained catalogs. |
+| CH-132 | `dashboard:setPromptDirty` | Dashboard to main | Report whether the prompt editor holds unsaved changes, so main can confirm before closing the window. |
 
 **CH-129 `catalog:stt`** — Dashboard to main. Payload `{ force: boolean }`; response is the validated normalized STT provider catalog. `force` bypasses the 28-day age check. Credentials remain in main.
 
