@@ -359,35 +359,33 @@ test('TC-124 every interactive element is reachable by Tab and operable by Enter
   // The sidebar itself follows the ARIA tabs pattern: only the active tab is a
   // Tab stop, and Up/Down move between tabs and activate immediately.
   await openTab('profiles');
-  await dashboard.locator('[data-testid="tab-profiles"]').focus();
+  const profilesTab = dashboard.locator('[data-testid="tab-profiles"]');
+  const historyTab = dashboard.locator('[data-testid="tab-history"]');
+  await profilesTab.focus();
   await dashboard.keyboard.press('ArrowDown');
-  await expect(dashboard.locator('[data-testid="tab-history"]')).toHaveAttribute(
-    'aria-selected',
-    'true',
-  );
+  await expect(historyTab).toHaveAttribute('aria-selected', 'true');
   await expect(dashboard.locator('[data-testid="section-session-history"]')).toBeVisible();
+  // The sidebar moves focus to the newly selected tab from a
+  // `requestAnimationFrame`, one frame after the handler returns, because the
+  // button it moves to is not in the tab order until the re-render lands. That
+  // deferred focus is part of the pattern under test, so it is asserted rather
+  // than waited out: the next key can only be aimed once it has arrived.
+  await expect(historyTab).toBeFocused();
   await dashboard.keyboard.press('ArrowUp');
-  await expect(dashboard.locator('[data-testid="tab-profiles"]')).toHaveAttribute(
-    'aria-selected',
-    'true',
-  );
+  await expect(profilesTab).toHaveAttribute('aria-selected', 'true');
+  await expect(profilesTab).toBeFocused();
 
   // Operable by Enter. The empty name is refused, which is a visible result of
-  // the press rather than a silent no-op.
-  // The tab switch above remounts this panel, and the data it loads lands a
-  // moment later. `focus` is asserted before the key goes out, so the press
-  // cannot reach a button the panel has not settled on yet and be swallowed.
+  // the press rather than a silent no-op. The key goes through the button's own
+  // locator, which focuses and presses as one action, so nothing can take focus
+  // in between and swallow it.
   const createProfile = dashboard.locator('[data-testid="create-profile"]');
-  await createProfile.focus();
-  await expect(createProfile).toBeFocused();
-  await dashboard.keyboard.press('Enter');
+  await createProfile.press('Enter');
   await expect(dashboard.locator('[data-testid="profile-error"]')).toBeVisible();
 
   // And by Space.
   await dashboard.fill('[data-testid="new-profile-name"]', 'Keyboard Co');
-  await createProfile.focus();
-  await expect(createProfile).toBeFocused();
-  await dashboard.keyboard.press('Space');
+  await createProfile.press('Space');
   await expect(dashboard.locator('[data-testid="profile-list"]')).toContainText('Keyboard Co');
 });
 
