@@ -782,7 +782,13 @@ test('FR-083 click-through is a persisted setting, not only a hotkey', async () 
   // Turned off, the overlay is a solid window. Reported from a live session:
   // the overlay sat over browser toolbar buttons, hid them, and let the user
   // click them by accident, with no setting to point at.
-  await dashboard.uncheck('[data-testid="overlay-click-through"]');
+  // `uncheck` clicks once and fails outright when the box has not flipped by
+  // the time it looks, and this box is controlled: it flips only once
+  // `overlay:setInteractive` and the settings reload behind it have answered.
+  // A loaded runner is slower than that, so the click and the new state are
+  // asserted separately, with a retrying expectation.
+  await dashboard.click('[data-testid="overlay-click-through"]');
+  await expect(dashboard.locator('[data-testid="overlay-click-through"]')).not.toBeChecked();
   await expect.poll(ignoring).toBe(false);
   await expect(overlay.locator('[data-testid="overlay"]')).toHaveAttribute(
     'data-interactive',

@@ -374,13 +374,19 @@ test('TC-124 every interactive element is reachable by Tab and operable by Enter
 
   // Operable by Enter. The empty name is refused, which is a visible result of
   // the press rather than a silent no-op.
-  await dashboard.focus('[data-testid="create-profile"]');
+  // The tab switch above remounts this panel, and the data it loads lands a
+  // moment later. `focus` is asserted before the key goes out, so the press
+  // cannot reach a button the panel has not settled on yet and be swallowed.
+  const createProfile = dashboard.locator('[data-testid="create-profile"]');
+  await createProfile.focus();
+  await expect(createProfile).toBeFocused();
   await dashboard.keyboard.press('Enter');
   await expect(dashboard.locator('[data-testid="profile-error"]')).toBeVisible();
 
   // And by Space.
   await dashboard.fill('[data-testid="new-profile-name"]', 'Keyboard Co');
-  await dashboard.focus('[data-testid="create-profile"]');
+  await createProfile.focus();
+  await expect(createProfile).toBeFocused();
   await dashboard.keyboard.press('Space');
   await expect(dashboard.locator('[data-testid="profile-list"]')).toContainText('Keyboard Co');
 });
