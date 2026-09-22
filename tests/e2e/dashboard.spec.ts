@@ -156,12 +156,17 @@ test('TC-154 each model shows streaming and price, and a non-streaming choice wa
   const streamingModel = batchProvider!.models.find((m) => m.streaming);
 
   await dashboard.selectOption('[data-testid="stt-primary-provider"]', batchProvider!.id);
+  await expect(dashboard.locator('[data-testid="section-provider-setup"] .slot table')).toHaveCount(
+    0,
+  );
 
-  // FR-038: every row states whether the model streams and what it costs.
+  // FR-038: every option states whether the model streams and what it costs.
   for (const model of batchProvider!.models) {
-    const row = dashboard.locator(`[data-testid="stt-primary-model-row-${model.id}"]`);
-    await expect(row).toContainText(model.streaming ? 'Yes' : 'No');
-    await expect(row).toContainText(model.pricePerAudioMinuteUsd.toFixed(4));
+    const option = dashboard.locator(
+      `[data-testid="stt-primary-model"] option[value="${model.id}"]`,
+    );
+    await expect(option).toContainText(model.streaming ? 'streams' : 'does not stream');
+    await expect(option).toContainText(model.pricePerAudioMinuteUsd.toFixed(4));
   }
 
   // A streaming model says nothing about NFR-017, because it is not held to it.
