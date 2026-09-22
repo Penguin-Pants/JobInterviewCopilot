@@ -61,6 +61,22 @@ export function modelsFromCutoff(
   return cutoff === -1 ? models : models.slice(0, cutoff + 1);
 }
 
+/**
+ * A cutoff hides models, but never the one already saved. A retired model is
+ * appended to the catalog as an `unavailable` entry that sits past the cutoff,
+ * so without this the picker would show no option for the saved model while the
+ * draft still carried it, and the user could save a model the provider dropped.
+ */
+export function withSelectedModel(
+  visible: LlmModelDescriptor[],
+  all: LlmModelDescriptor[],
+  selectedModelId: string | null,
+): LlmModelDescriptor[] {
+  if (!selectedModelId || visible.some((model) => model.id === selectedModelId)) return visible;
+  const selected = all.find((model) => model.id === selectedModelId);
+  return selected ? [selected, ...visible] : visible;
+}
+
 function providerName<M>(registry: ProviderDescriptor<M>[], providerId: string): string {
   return registry.find((p) => p.id === providerId)?.displayName ?? providerId;
 }
@@ -768,12 +784,19 @@ function LlmSlot({
       displayName: provider.displayName,
       models: provider.models,
     }));
-  const models = providerId
-    ? modelsFromCutoff(
-        catalogProviders.find((provider) => provider.providerId === providerId)?.models ?? [],
-        cutoffs[providerId as keyof Settings['llmModelCutoffs']] ?? null,
-      )
+  const providerModels = providerId
+    ? (catalogProviders.find((provider) => provider.providerId === providerId)?.models ?? [])
     : [];
+  const models = withSelectedModel(
+    providerId
+      ? modelsFromCutoff(
+          providerModels,
+          cutoffs[providerId as keyof Settings['llmModelCutoffs']] ?? null,
+        )
+      : [],
+    providerModels,
+    choice?.modelId ?? null,
+  );
   const selected = models.find((model) => model.id === choice?.modelId);
   return (
     <div className="slot" data-testid={`slot-${slot}`}>
@@ -809,6 +832,9 @@ function LlmSlot({
         disabled={providerId === ''}
         onChange={(e) => onChange({ providerId, modelId: e.target.value })}
       >
+        {choice && !models.some((model) => model.id === choice.modelId) ? (
+          <option value={choice.modelId}>{choice.modelId} (unavailable)</option>
+        ) : null}
         {models.map((model) => (
           <option key={model.id} value={model.id}>
             {model.displayName}

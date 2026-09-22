@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { clearRuntimeLlmModels, findLlmModel } from '../../src/shared/registry/llm.js';
-import type { LlmCatalogResult } from '../../src/shared/types.js';
+import type { LlmCatalogResult, LlmModelDescriptor } from '../../src/shared/types.js';
 import {
   CATALOG_MAX_AGE_MS,
   LlmCatalogService,
@@ -13,6 +13,7 @@ import {
 import {
   llmCatalogStatus,
   modelsFromCutoff,
+  withSelectedModel,
 } from '../../src/renderer/dashboard/sections/ProviderSetup.js';
 
 function response(body: unknown): Response {
@@ -376,5 +377,38 @@ describe('model display cutoff', () => {
   it('shows everything when no cutoff is saved or an old cutoff disappears', () => {
     expect(modelsFromCutoff(models, null)).toEqual(models);
     expect(modelsFromCutoff(models, 'retired-model')).toEqual(models);
+  });
+
+  it('keeps the saved model visible when the cutoff hides it', () => {
+    const visible = modelsFromCutoff(models, 'gpt-5.3');
+    expect(withSelectedModel(visible, models, 'gpt-5.1').map((model) => model.id)).toEqual([
+      'gpt-5.1',
+      'gpt-5.4',
+      'gpt-5.3',
+    ]);
+  });
+
+  it('keeps a retired model visible when the catalog appends it past the cutoff', () => {
+    const retired: LlmModelDescriptor = {
+      id: 'gpt-5.0',
+      displayName: 'gpt-5.0',
+      providerId: 'openai',
+      releasedAt: null,
+      status: 'unavailable',
+      streamingText: true,
+      effort: null,
+      pricing: { known: false },
+    };
+    const all = [...models, retired];
+    const visible = modelsFromCutoff(all, 'gpt-5.2');
+    expect(visible.map((model) => model.id)).not.toContain('gpt-5.0');
+    expect(withSelectedModel(visible, all, 'gpt-5.0')[0]).toEqual(retired);
+  });
+
+  it('leaves the list alone when nothing is selected or the model is already shown', () => {
+    const visible = modelsFromCutoff(models, 'gpt-5.3');
+    expect(withSelectedModel(visible, models, null)).toEqual(visible);
+    expect(withSelectedModel(visible, models, 'gpt-5.4')).toEqual(visible);
+    expect(withSelectedModel(visible, models, 'never-existed')).toEqual(visible);
   });
 });
