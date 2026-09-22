@@ -152,8 +152,9 @@ test('prompt drafts are discarded deliberately, duplicated intact, and cannot us
     'You are a live interview memory aid',
   );
 
-  await dashboard.click('[data-testid="prompt-create"]');
-  await expect(dashboard.locator('[data-testid="prompt-name"]')).toHaveValue('Custom prompt');
+  await dashboard.selectOption('[data-testid="prompt-preset"]', {
+    label: 'Copy of Default prompt',
+  });
   await dashboard.fill('[data-testid="prompt-name"]', 'Draft prompt');
   await dashboard.fill('[data-testid="prompt-text"]', 'Preserve this draft in the duplicate.');
   await dashboard.click('[data-testid="prompt-duplicate"]');
