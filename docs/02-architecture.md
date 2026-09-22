@@ -1772,6 +1772,11 @@ structural cues instead of invented facts. Never invent an employer,
 a date, a metric or a project that is not in the notes.
 ```
 
+A custom system prompt replaces the wording above, never its grounding and
+output-shape rules. `composeSystemPrompt` appends those rules to every custom
+prompt, so a preset that only names a house style cannot license invented
+facts, a readable script or a paragraph (`FR-004`, `FR-073`).
+
 User message template:
 
 ```

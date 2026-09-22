@@ -22,6 +22,7 @@ import type {
 import { LLM_REGISTRY, findLlmModel } from '../../shared/registry/llm.js';
 import type { RetrievedChunk } from '../rag.js';
 import { LineBuffer } from './llm/lineBuffer.js';
+import { composeSystemPrompt } from '../../shared/prompts.js';
 import { GENERATION_PARAMS, SYSTEM_PROMPT, buildUserMessage } from './prompt.js';
 import { providerError } from './stt.js';
 
@@ -72,7 +73,9 @@ export interface GenerationMessages {
 export function buildMessages(req: GenerationRequest): GenerationMessages {
   if (req.promptOverride) return req.promptOverride;
   return {
-    system: req.systemPrompt ?? SYSTEM_PROMPT,
+    // A saved prompt replaces the shipped wording, never the grounding and
+    // shape rules `composeSystemPrompt` re-appends (FR-004, FR-073).
+    system: req.systemPrompt === undefined ? SYSTEM_PROMPT : composeSystemPrompt(req.systemPrompt),
     user: buildUserMessage({
       question: req.question,
       candidateContext: req.candidateContext,

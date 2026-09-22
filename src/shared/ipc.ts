@@ -1,6 +1,11 @@
 import { z } from 'zod';
 import { SETTINGS_LIMITS } from './defaults.js';
-import { MAX_CUSTOM_PROMPTS, MAX_PROMPT_NAME_CHARS, MAX_SYSTEM_PROMPT_CHARS } from './prompts.js';
+import {
+  DEFAULT_PROMPT_ID,
+  MAX_CUSTOM_PROMPTS,
+  MAX_PROMPT_NAME_CHARS,
+  MAX_SYSTEM_PROMPT_CHARS,
+} from './prompts.js';
 
 /**
  * The IPC contract. Mirrors `docs/02-architecture.md` section 4.
@@ -98,7 +103,14 @@ const sttCatalog = z.object({
 });
 
 const customPrompt = z.object({
-  id: z.string().min(1).max(100),
+  // `DEFAULT_PROMPT_ID` names the shipped prompt. A custom entry carrying it
+  // would render a duplicate option value and look editable, while
+  // `promptForProfile` still resolves the id to the shipped prompt.
+  id: z
+    .string()
+    .min(1)
+    .max(100)
+    .refine((value) => value !== DEFAULT_PROMPT_ID, 'Prompt id is reserved.'),
   name: z
     .string()
     .max(MAX_PROMPT_NAME_CHARS)

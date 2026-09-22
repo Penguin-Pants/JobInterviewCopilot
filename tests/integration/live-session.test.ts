@@ -18,6 +18,7 @@ import { chunkSeconds } from '../../src/main/live.js';
 import { RagEngine } from '../../src/main/rag.js';
 import { XenovaEmbedder } from '../../src/main/rag/embed.js';
 import { readSession } from '../../src/main/session.js';
+import { NON_OVERRIDABLE_PROMPT_RULES } from '../../src/shared/prompts.js';
 import { anthropicScript } from '../fakes/llm.js';
 import {
   GAP,
@@ -278,7 +279,7 @@ describe('session prompt binding', () => {
     await h.live.whenSettled();
 
     const body = h.llmTransport.requests[0]?.body as { system: string };
-    expect(body.system).toBe('Use the saved Acme prompt.');
+    expect(body.system).toBe(`Use the saved Acme prompt.\n\n${NON_OVERRIDABLE_PROMPT_RULES}`);
     await stopSession(h);
   });
 });

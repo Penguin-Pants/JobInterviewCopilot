@@ -30,6 +30,10 @@ export function Prompts({
   const [text, setText] = useState(SHIPPED_SYSTEM_PROMPT);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  // One library write at a time. Every mutation rebuilds the whole array from
+  // the `settings` prop, so a second click before the first `config:set`
+  // answers would send a stale array and drop the first change.
+  const [busy, setBusy] = useState(false);
 
   const dirty = selected
     ? name !== selected.name || text !== selected.systemPrompt
@@ -88,13 +92,19 @@ export function Prompts({
     customPrompts: CustomPrompt[],
     profilePromptIds = settings.profilePromptIds,
   ): Promise<boolean> {
-    const result = await call('config:set', { customPrompts, profilePromptIds });
-    if (!result.ok) {
-      setError(result.message);
-      return false;
+    if (busy) return false;
+    setBusy(true);
+    try {
+      const result = await call('config:set', { customPrompts, profilePromptIds });
+      if (!result.ok) {
+        setError(result.message);
+        return false;
+      }
+      await onSettingsChanged();
+      return true;
+    } finally {
+      setBusy(false);
     }
-    await onSettingsChanged();
-    return true;
   }
 
   async function save(): Promise<void> {
@@ -109,14 +119,20 @@ export function Prompts({
       )
     )
       return;
+    const trimmedName = name.trim();
     const next = settings.customPrompts.map((prompt) =>
-      prompt.id === selected.id ? { ...prompt, name: name.trim(), systemPrompt: text } : prompt,
+      prompt.id === selected.id ? { ...prompt, name: trimmedName, systemPrompt: text } : prompt,
     );
-    if (await write(next)) setStatus('Prompt saved. Changes apply to the next session.');
+    if (await write(next)) {
+      // Match the persisted value, or `dirty` stays true and the editor keeps
+      // warning about changes that were saved.
+      setName(trimmedName);
+      setStatus('Prompt saved. Changes apply to the next session.');
+    }
   }
 
   async function create(copyDefault = false): Promise<void> {
-    if (settings.customPrompts.length >= MAX_CUSTOM_PROMPTS) return;
+    if (busy || settings.customPrompts.length >= MAX_CUSTOM_PROMPTS) return;
     const id = crypto.randomUUID();
     const base = copyDefault ? 'Copy of Default prompt' : 'Custom prompt';
     const existing = new Set(
@@ -139,7 +155,7 @@ export function Prompts({
   }
 
   async function duplicate(): Promise<void> {
-    if (!selected || settings.customPrompts.length >= MAX_CUSTOM_PROMPTS) return;
+    if (busy || !selected || settings.customPrompts.length >= MAX_CUSTOM_PROMPTS) return;
     const id = crypto.randomUUID();
     const base = `Copy of ${selected.name}`.slice(0, MAX_PROMPT_NAME_CHARS - 3);
     let nextName = base;
@@ -251,7 +267,7 @@ export function Prompts({
       <button
         type="button"
         data-testid="prompt-create"
-        disabled={settings.customPrompts.length >= MAX_CUSTOM_PROMPTS}
+        disabled={busy || settings.customPrompts.length >= MAX_CUSTOM_PROMPTS}
         onClick={() => void create(!selected)}
       >
         Create custom prompt
@@ -259,7 +275,7 @@ export function Prompts({
       <button
         type="button"
         data-testid="prompt-save"
-        disabled={!selected || !dirty}
+        disabled={busy || !selected || !dirty}
         onClick={() => void save()}
       >
         Save
@@ -267,7 +283,7 @@ export function Prompts({
       <button
         type="button"
         data-testid="prompt-duplicate"
-        disabled={!selected || settings.customPrompts.length >= MAX_CUSTOM_PROMPTS}
+        disabled={busy || !selected || settings.customPrompts.length >= MAX_CUSTOM_PROMPTS}
         onClick={() => void duplicate()}
       >
         Duplicate
@@ -285,7 +301,7 @@ export function Prompts({
         type="button"
         className="secondary-button"
         data-testid="prompt-delete"
-        disabled={!selected}
+        disabled={busy || !selected}
         onClick={() => void remove()}
       >
         Delete
@@ -299,7 +315,7 @@ export function Prompts({
       <button
         type="button"
         data-testid="prompt-use-for-profile"
-        disabled={!activeProfileId || activeSelection === selectedId}
+        disabled={busy || !activeProfileId || activeSelection === selectedId}
         onClick={() => void useForProfile()}
       >
         Use for this profile
