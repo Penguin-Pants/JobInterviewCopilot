@@ -18,6 +18,7 @@ import {
   buildUserMessage,
 } from '../../src/main/ai/prompt.js';
 import { buildMessages } from '../../src/main/ai/llm.js';
+import { NON_OVERRIDABLE_PROMPT_RULES, SHIPPED_SYSTEM_PROMPT } from '../../src/shared/prompts.js';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const architecture = readFileSync(join(repoRoot, 'docs', '02-architecture.md'), 'utf8');
@@ -152,8 +153,32 @@ describe('custom suggestion prompt', () => {
       choice: { providerId: 'anthropic', modelId: 'model' },
       systemPrompt: 'Focus on measurable outcomes.',
     });
-    expect(messages.system).toBe('Focus on measurable outcomes.');
+    expect(messages.system).toContain('Focus on measurable outcomes.');
     expect(messages.user).toContain('What did you improve?');
     expect(messages.maxTokens).toBe(GENERATION_PARAMS.maxTokens);
+  });
+
+  it('keeps the non-overridable rules a custom prompt cannot drop', () => {
+    const messages = buildMessages({
+      generationId: 'g1',
+      question: 'What did you improve?',
+      candidateContext: '',
+      chunks: [],
+      choice: { providerId: 'anthropic', modelId: 'model' },
+      systemPrompt: 'Focus on the company values.',
+    });
+    expect(messages.system).toBe(`Focus on the company values.\n\n${NON_OVERRIDABLE_PROMPT_RULES}`);
+  });
+
+  it('does not repeat the rules when the profile uses the shipped prompt', () => {
+    const messages = buildMessages({
+      generationId: 'g1',
+      question: 'What did you improve?',
+      candidateContext: '',
+      chunks: [],
+      choice: { providerId: 'anthropic', modelId: 'model' },
+      systemPrompt: SHIPPED_SYSTEM_PROMPT,
+    });
+    expect(messages.system).toBe(SHIPPED_SYSTEM_PROMPT);
   });
 });

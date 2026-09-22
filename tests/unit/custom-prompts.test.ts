@@ -40,6 +40,10 @@ describe('custom suggestion prompts', () => {
     ];
     expect(settingsSchema.safeParse(duplicate).success).toBe(false);
 
+    const reservedId = defaultSettings();
+    reservedId.customPrompts = [{ id: DEFAULT_PROMPT_ID, name: 'Impostor', systemPrompt: 'text' }];
+    expect(settingsSchema.safeParse(reservedId).success).toBe(false);
+
     const tooMany = defaultSettings();
     tooMany.customPrompts = Array.from({ length: 6 }, (_, index) => ({
       id: String(index),
