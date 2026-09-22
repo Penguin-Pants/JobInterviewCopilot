@@ -62,6 +62,31 @@ export function modelsFromCutoff(
 }
 
 /**
+ * `modelsFromCutoff` reads a cutoff the catalog no longer lists as "show all",
+ * so a retired cutoff model must not stay in the setting: the picker would sit
+ * on a value none of its options carry, and the next save would write the
+ * retired ID back. Normalizing to `null` keeps what is shown, what is stored
+ * and what is applied in agreement. The input is returned unchanged when
+ * nothing is stale, so this is safe to call on every render.
+ */
+export function normalizedCutoffs(
+  cutoffs: Settings['llmModelCutoffs'],
+  providers: LlmCatalogProvider[],
+): Settings['llmModelCutoffs'] {
+  const next = { ...cutoffs };
+  let stale = false;
+  for (const provider of providers) {
+    const key = provider.providerId as keyof Settings['llmModelCutoffs'];
+    const cutoff = next[key];
+    if (cutoff && !provider.models.some((model) => model.id === cutoff)) {
+      next[key] = null;
+      stale = true;
+    }
+  }
+  return stale ? next : cutoffs;
+}
+
+/**
  * A cutoff hides models, but never the one already saved. A retired model is
  * appended to the catalog as an `unavailable` entry that sits past the cutoff,
  * so without this the picker would show no option for the saved model while the
@@ -334,6 +359,12 @@ export function ProviderSetup({
   useEffect(() => {
     setLlmModelCutoffs(JSON.parse(storedLlmModelCutoffs) as Settings['llmModelCutoffs']);
   }, [storedLlmModelCutoffs]);
+  // Derived, not state: a refresh can retire the saved cutoff at any time, and
+  // this way the pickers and Save always read the same effective value.
+  const effectiveCutoffs = useMemo(
+    () => (llmCatalog ? normalizedCutoffs(llmModelCutoffs, llmCatalog) : llmModelCutoffs),
+    [llmModelCutoffs, llmCatalog],
+  );
 
   const sttConflict = backupConflict(draft.stt.primary, draft.stt.backup, (id) =>
     providerName(sttRegistry, id),
@@ -399,7 +430,10 @@ export function ProviderSetup({
 
   async function save(): Promise<void> {
     setSaveError(null);
-    const result = await call('config:set', { providers: draft, llmModelCutoffs });
+    const result = await call('config:set', {
+      providers: draft,
+      llmModelCutoffs: effectiveCutoffs,
+    });
     if (!result.ok) {
       setSaveError(result.message);
       return;
@@ -544,7 +578,7 @@ export function ProviderSetup({
           <select
             id={`${provider.providerId}-model-cutoff`}
             data-testid={`${provider.providerId}-model-cutoff`}
-            value={llmModelCutoffs[provider.providerId] ?? ''}
+            value={effectiveCutoffs[provider.providerId] ?? ''}
             onChange={(event) => {
               setSaved(false);
               const cutoff = event.target.value || null;
@@ -585,7 +619,7 @@ export function ProviderSetup({
         label="Primary"
         choice={draft.llm.primary}
         catalog={llmCatalog}
-        cutoffs={llmModelCutoffs}
+        cutoffs={effectiveCutoffs}
         onChange={(choice) => setLlmChoice('primary', choice)}
       />
       <LlmSlot
@@ -593,7 +627,7 @@ export function ProviderSetup({
         label="Backup"
         choice={draft.llm.backup}
         catalog={llmCatalog}
-        cutoffs={llmModelCutoffs}
+        cutoffs={effectiveCutoffs}
         optional
         onChange={(choice) => setLlmChoice('backup', choice)}
       />

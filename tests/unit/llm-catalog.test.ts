@@ -13,6 +13,7 @@ import {
 import {
   llmCatalogStatus,
   modelsFromCutoff,
+  normalizedCutoffs,
   withSelectedModel,
 } from '../../src/renderer/dashboard/sections/ProviderSetup.js';
 
@@ -403,6 +404,36 @@ describe('model display cutoff', () => {
     const visible = modelsFromCutoff(all, 'gpt-5.2');
     expect(visible.map((model) => model.id)).not.toContain('gpt-5.0');
     expect(withSelectedModel(visible, all, 'gpt-5.0')[0]).toEqual(retired);
+  });
+
+  it('drops a cutoff the catalog no longer lists, so the setting matches what is applied', () => {
+    const providers = [
+      {
+        providerId: 'openai' as const,
+        displayName: 'OpenAI',
+        models,
+        lastSuccessfulRefresh: null,
+        state: 'ready' as const,
+      },
+    ];
+    expect(normalizedCutoffs({ openai: 'retired-model', anthropic: null }, providers)).toEqual({
+      openai: null,
+      anthropic: null,
+    });
+  });
+
+  it('returns the saved cutoffs unchanged when every one is still listed', () => {
+    const providers = [
+      {
+        providerId: 'openai' as const,
+        displayName: 'OpenAI',
+        models,
+        lastSuccessfulRefresh: null,
+        state: 'ready' as const,
+      },
+    ];
+    const cutoffs = { openai: 'gpt-5.2', anthropic: null };
+    expect(normalizedCutoffs(cutoffs, providers)).toBe(cutoffs);
   });
 
   it('leaves the list alone when nothing is selected or the model is already shown', () => {
