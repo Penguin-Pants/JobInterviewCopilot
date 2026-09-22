@@ -97,11 +97,15 @@ const sttCatalog = z.object({
 });
 
 export const settingsSchema = z.object({
-  schemaVersion: z.literal(4),
+  schemaVersion: z.literal(5),
   activeProfileId: z.string(),
   providers: z.object({
     stt: z.object({ primary: providerChoice, backup: providerChoice.nullable() }),
     llm: z.object({ primary: providerChoice, backup: providerChoice.nullable() }),
+  }),
+  llmModelCutoffs: z.object({
+    openai: z.string().nullable(),
+    anthropic: z.string().nullable(),
   }),
   theme: z.object({
     mode: z.enum(['light', 'dark', 'system']),

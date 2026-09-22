@@ -3,14 +3,19 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { clearRuntimeLlmModels, findLlmModel } from '../../src/shared/registry/llm.js';
-import type { LlmCatalogResult } from '../../src/shared/types.js';
+import type { LlmCatalogResult, LlmModelDescriptor } from '../../src/shared/types.js';
 import {
   CATALOG_MAX_AGE_MS,
   LlmCatalogService,
   anthropicCompatibility,
   openAiCompatibility,
 } from '../../src/main/ai/llm/catalog.js';
-import { llmCatalogStatus } from '../../src/renderer/dashboard/sections/ProviderSetup.js';
+import {
+  llmCatalogStatus,
+  modelsFromCutoff,
+  normalizedCutoffs,
+  withSelectedModel,
+} from '../../src/renderer/dashboard/sections/ProviderSetup.js';
 
 function response(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200 });
@@ -347,5 +352,138 @@ describe('runtime LLM catalog', () => {
     expect(
       JSON.parse(readFileSync(join(dir, 'llm-catalog.json'), 'utf8')).providers.openai,
     ).toBeUndefined();
+  });
+});
+
+describe('model display cutoff', () => {
+  const models = ['gpt-5.4', 'gpt-5.3', 'gpt-5.2', 'gpt-5.1'].map((id) => ({
+    id,
+    displayName: id,
+    providerId: 'openai' as const,
+    releasedAt: null,
+    status: 'available' as const,
+    streamingText: true as const,
+    effort: null,
+    pricing: { known: false as const },
+  }));
+
+  it('shows the chosen model and every newer model', () => {
+    expect(modelsFromCutoff(models, 'gpt-5.2').map((model) => model.id)).toEqual([
+      'gpt-5.4',
+      'gpt-5.3',
+      'gpt-5.2',
+    ]);
+  });
+
+  it('shows everything when no cutoff is saved or an old cutoff disappears', () => {
+    expect(modelsFromCutoff(models, null)).toEqual(models);
+    expect(modelsFromCutoff(models, 'retired-model')).toEqual(models);
+  });
+
+  it('keeps the saved model visible when the cutoff hides it', () => {
+    const visible = modelsFromCutoff(models, 'gpt-5.3');
+    expect(withSelectedModel(visible, models, 'gpt-5.1').map((model) => model.id)).toEqual([
+      'gpt-5.1',
+      'gpt-5.4',
+      'gpt-5.3',
+    ]);
+  });
+
+  it('keeps a retired model visible when the catalog appends it past the cutoff', () => {
+    const retired: LlmModelDescriptor = {
+      id: 'gpt-5.0',
+      displayName: 'gpt-5.0',
+      providerId: 'openai',
+      releasedAt: null,
+      status: 'unavailable',
+      streamingText: true,
+      effort: null,
+      pricing: { known: false },
+    };
+    const all = [...models, retired];
+    const visible = modelsFromCutoff(all, 'gpt-5.2');
+    expect(visible.map((model) => model.id)).not.toContain('gpt-5.0');
+    expect(withSelectedModel(visible, all, 'gpt-5.0')[0]).toEqual(retired);
+  });
+
+  it('drops a cutoff the catalog no longer lists, so the setting matches what is applied', () => {
+    const providers = [
+      {
+        providerId: 'openai' as const,
+        displayName: 'OpenAI',
+        models,
+        lastSuccessfulRefresh: null,
+        state: 'ready' as const,
+      },
+    ];
+    expect(normalizedCutoffs({ openai: 'retired-model', anthropic: null }, providers)).toEqual({
+      openai: null,
+      anthropic: null,
+    });
+  });
+
+  it('clears a cutoff the catalog knows only as the saved selection', () => {
+    // `LlmCatalogService.result()` appends the saved model as an `unavailable`
+    // entry, which is not the catalog listing it.
+    const retired: LlmModelDescriptor = {
+      id: 'gpt-5.0',
+      displayName: 'gpt-5.0',
+      providerId: 'openai',
+      releasedAt: null,
+      status: 'unavailable',
+      streamingText: true,
+      effort: null,
+      pricing: { known: false },
+    };
+    const providers = [
+      {
+        providerId: 'openai' as const,
+        displayName: 'OpenAI',
+        models: [...models, retired],
+        lastSuccessfulRefresh: null,
+        state: 'ready' as const,
+      },
+    ];
+    expect(normalizedCutoffs({ openai: 'gpt-5.0', anthropic: null }, providers)).toEqual({
+      openai: null,
+      anthropic: null,
+    });
+  });
+
+  it('keeps the cutoff when the catalog is not authoritative', () => {
+    const cutoffs = { openai: 'gpt-5.9', anthropic: null };
+    for (const state of ['error', 'fallback', 'missing-key'] as const) {
+      const providers = [
+        {
+          providerId: 'openai' as const,
+          displayName: 'OpenAI',
+          models,
+          lastSuccessfulRefresh: null,
+          state,
+        },
+      ];
+      expect(normalizedCutoffs(cutoffs, providers)).toBe(cutoffs);
+    }
+  });
+
+  it('returns the saved cutoffs unchanged when every one is still listed', () => {
+    const providers = [
+      {
+        providerId: 'openai' as const,
+        displayName: 'OpenAI',
+        models,
+        lastSuccessfulRefresh: null,
+        state: 'ready' as const,
+      },
+    ];
+    const cutoffs = { openai: 'gpt-5.2', anthropic: null };
+    expect(normalizedCutoffs(cutoffs, providers)).toBe(cutoffs);
+  });
+
+  it('leaves the list alone when nothing is selected or the model is already shown', () => {
+    const visible = modelsFromCutoff(models, 'gpt-5.3');
+    expect(withSelectedModel(visible, models, null)).toEqual(visible);
+    expect(withSelectedModel(visible, models, 'gpt-5.4')).toEqual(visible);
+    expect(withSelectedModel(visible, models, 'never-existed')).toEqual(visible);
   });
 });

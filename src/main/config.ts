@@ -44,7 +44,7 @@ const ElectronStore = ((ElectronStoreImport as unknown as { default?: unknown })
 const MAX_CORRUPT_FILES = 3;
 
 /** Bump when the Settings shape changes, and add a step to MIGRATIONS. */
-export const CURRENT_SCHEMA_VERSION = 4;
+export const CURRENT_SCHEMA_VERSION = 5;
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -88,6 +88,12 @@ export const MIGRATIONS: Record<number, (input: UnknownRecord) => UnknownRecord>
   // 3 -> 4: choices may carry an optional, model-specific effort value.
   // Existing selections are intentionally unchanged.
   3: (input) => ({ ...input, schemaVersion: 4 }),
+  // 4 -> 5: model visibility defaults to the complete provider catalog.
+  4: (input) => ({
+    ...input,
+    schemaVersion: 5,
+    llmModelCutoffs: { openai: null, anthropic: null },
+  }),
 };
 
 function clamp(value: number, min: number, max: number): number {

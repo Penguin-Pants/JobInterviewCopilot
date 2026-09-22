@@ -54,7 +54,7 @@ export const SETTINGS_LIMITS = {
 
 export function defaultSettings(): Settings {
   return {
-    schemaVersion: 4,
+    schemaVersion: 5,
     activeProfileId: '',
     providers: {
       stt: { primary: { providerId: 'deepgram', modelId: 'nova-3' }, backup: null },
@@ -63,6 +63,7 @@ export function defaultSettings(): Settings {
         backup: null,
       },
     },
+    llmModelCutoffs: { openai: null, anthropic: null },
     theme: {
       mode: 'system',
       accent: '#6366F1',

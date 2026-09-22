@@ -30,6 +30,7 @@ describe('TC-030 defaults', () => {
       providerId: 'anthropic',
       modelId: 'claude-haiku-4-5-20251001',
     });
+    expect(s.llmModelCutoffs).toEqual({ openai: null, anthropic: null });
     expect(s.theme.mode).toBe('system');
     expect(s.theme.accent).toBe('#6366F1');
     expect(s.theme.overlayOpacity).toBe(0.85);
@@ -153,6 +154,11 @@ describe('TC-032 migration chain', () => {
       overlayWindow: { x: 0, y: 0, width: 800, height: 600, displayId: '1' },
     });
     expect(migrated.overlayWindow).toMatchObject({ width: 800, height: 600 });
+  });
+
+  it('shows every language model by default when upgrading a version 4 file', () => {
+    const migrated = migrate({ schemaVersion: 4 });
+    expect(migrated.llmModelCutoffs).toEqual({ openai: null, anthropic: null });
   });
 });
 

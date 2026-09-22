@@ -52,6 +52,82 @@ export function llmCatalogStatus(providers: LlmCatalogProvider[]): string {
     .join(' ');
 }
 
+export function modelsFromCutoff(
+  models: LlmModelDescriptor[],
+  cutoffModelId: string | null,
+): LlmModelDescriptor[] {
+  if (!cutoffModelId) return models;
+  const cutoff = models.findIndex((model) => model.id === cutoffModelId);
+  return cutoff === -1 ? models : models.slice(0, cutoff + 1);
+}
+
+/**
+ * `modelsFromCutoff` reads a cutoff the catalog no longer lists as "show all",
+ * so a retired cutoff model must not stay in the setting: the picker would sit
+ * on a value none of its options carry, and the next save would write the
+ * retired ID back. Normalizing to `null` keeps what is shown, what is stored
+ * and what is applied in agreement. The input is returned unchanged when
+ * nothing is stale, so this is safe to call on every render.
+ *
+ * Only a `ready` provider says a model is gone. A failed refresh answers with
+ * the shipped fallback models, which list far fewer models than the provider
+ * has, so clearing on that would throw away a good preference over a network
+ * blip. Those states keep the cutoff, and the picker labels it instead.
+ */
+export function normalizedCutoffs(
+  cutoffs: Settings['llmModelCutoffs'],
+  providers: LlmCatalogProvider[],
+): Settings['llmModelCutoffs'] {
+  const next = { ...cutoffs };
+  let stale = false;
+  for (const provider of providers) {
+    if (provider.state !== 'ready') continue;
+    const key = provider.providerId as keyof Settings['llmModelCutoffs'];
+    const cutoff = next[key];
+    if (cutoff && !catalogLists(provider.models, cutoff)) {
+      next[key] = null;
+      stale = true;
+    }
+  }
+  return stale ? next : cutoffs;
+}
+
+/**
+ * A model the catalog knows only because it is the saved selection is not the
+ * catalog listing it: `LlmCatalogService.result()` appends that ID as an
+ * `unavailable` entry even for a `ready` provider, so a cutoff is confirmed by
+ * the real models alone.
+ */
+function catalogLists(models: LlmModelDescriptor[], modelId: string): boolean {
+  return models.some((model) => model.id === modelId && model.status !== 'unavailable');
+}
+
+/**
+ * A cutoff the catalog cannot confirm stays selectable, labeled, so the picker
+ * never sits on a value none of its options carry while the preference is held
+ * for the next successful refresh.
+ */
+function cutoffOption(cutoff: string | null, models: LlmModelDescriptor[]): JSX.Element | null {
+  if (!cutoff || catalogLists(models, cutoff)) return null;
+  return <option value={cutoff}>{cutoff} and newer (unavailable)</option>;
+}
+
+/**
+ * A cutoff hides models, but never the one already saved. A retired model is
+ * appended to the catalog as an `unavailable` entry that sits past the cutoff,
+ * so without this the picker would show no option for the saved model while the
+ * draft still carried it, and the user could save a model the provider dropped.
+ */
+export function withSelectedModel(
+  visible: LlmModelDescriptor[],
+  all: LlmModelDescriptor[],
+  selectedModelId: string | null,
+): LlmModelDescriptor[] {
+  if (!selectedModelId || visible.some((model) => model.id === selectedModelId)) return visible;
+  const selected = all.find((model) => model.id === selectedModelId);
+  return selected ? [selected, ...visible] : visible;
+}
+
 function providerName<M>(registry: ProviderDescriptor<M>[], providerId: string): string {
   return registry.find((p) => p.id === providerId)?.displayName ?? providerId;
 }
@@ -237,6 +313,7 @@ export function ProviderSetup({
   const [keyStates, setKeyStates] = useState<Record<string, KeyState>>({});
   const [llmCatalog, setLlmCatalog] = useState<LlmCatalogProvider[] | null>(null);
   const [llmCatalogMessage, setLlmCatalogMessage] = useState('Loading models…');
+  const [llmModelCutoffs, setLlmModelCutoffs] = useState(settings.llmModelCutoffs);
 
   async function loadLlmCatalog(force = false): Promise<void> {
     setLlmCatalogMessage(force ? 'Refreshing models…' : 'Loading models…');
@@ -304,6 +381,16 @@ export function ProviderSetup({
   useEffect(() => {
     setDraft(JSON.parse(storedProviders) as Draft);
   }, [storedProviders]);
+  const storedLlmModelCutoffs = JSON.stringify(settings.llmModelCutoffs);
+  useEffect(() => {
+    setLlmModelCutoffs(JSON.parse(storedLlmModelCutoffs) as Settings['llmModelCutoffs']);
+  }, [storedLlmModelCutoffs]);
+  // Derived, not state: a refresh can retire the saved cutoff at any time, and
+  // this way the pickers and Save always read the same effective value.
+  const effectiveCutoffs = useMemo(
+    () => (llmCatalog ? normalizedCutoffs(llmModelCutoffs, llmCatalog) : llmModelCutoffs),
+    [llmModelCutoffs, llmCatalog],
+  );
 
   const sttConflict = backupConflict(draft.stt.primary, draft.stt.backup, (id) =>
     providerName(sttRegistry, id),
@@ -369,7 +456,10 @@ export function ProviderSetup({
 
   async function save(): Promise<void> {
     setSaveError(null);
-    const result = await call('config:set', { providers: draft });
+    const result = await call('config:set', {
+      providers: draft,
+      llmModelCutoffs: effectiveCutoffs,
+    });
     if (!result.ok) {
       setSaveError(result.message);
       return;
@@ -505,11 +595,58 @@ export function ProviderSetup({
           </p>
         ) : null,
       )}
+      <p>Choose the oldest model to show. Newly released models will stay visible automatically.</p>
+      {llmCatalog?.map((provider) => (
+        <div key={`${provider.providerId}-model-cutoff`}>
+          <label htmlFor={`${provider.providerId}-model-cutoff`}>
+            Show {provider.displayName} models from
+          </label>
+          <select
+            id={`${provider.providerId}-model-cutoff`}
+            data-testid={`${provider.providerId}-model-cutoff`}
+            value={effectiveCutoffs[provider.providerId] ?? ''}
+            onChange={(event) => {
+              setSaved(false);
+              const cutoff = event.target.value || null;
+              setLlmModelCutoffs((current) => ({
+                ...current,
+                [provider.providerId]: cutoff,
+              }));
+              const visible = modelsFromCutoff(provider.models, cutoff);
+              setDraft((current) => {
+                const update = (choice: ProviderChoice | null): ProviderChoice | null =>
+                  choice?.providerId === provider.providerId &&
+                  !visible.some((model) => model.id === choice.modelId)
+                    ? visible[0]
+                      ? { providerId: provider.providerId, modelId: visible[0].id }
+                      : choice
+                    : choice;
+                return {
+                  ...current,
+                  llm: {
+                    primary: update(current.llm.primary) ?? current.llm.primary,
+                    backup: update(current.llm.backup),
+                  },
+                };
+              });
+            }}
+          >
+            <option value="">All available models</option>
+            {cutoffOption(effectiveCutoffs[provider.providerId] ?? null, provider.models)}
+            {provider.models.map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.displayName} and newer
+              </option>
+            ))}
+          </select>
+        </div>
+      ))}
       <LlmSlot
         slot="llm-primary"
         label="Primary"
         choice={draft.llm.primary}
         catalog={llmCatalog}
+        cutoffs={effectiveCutoffs}
         onChange={(choice) => setLlmChoice('primary', choice)}
       />
       <LlmSlot
@@ -517,6 +654,7 @@ export function ProviderSetup({
         label="Backup"
         choice={draft.llm.backup}
         catalog={llmCatalog}
+        cutoffs={effectiveCutoffs}
         optional
         onChange={(choice) => setLlmChoice('backup', choice)}
       />
@@ -547,7 +685,7 @@ export function ProviderSetup({
         disabled={blocked}
         onClick={() => void save()}
       >
-        Save provider selection
+        Save provider and model settings
       </button>
       {saved ? <span data-testid="providers-saved">Saved</span> : null}
       {saveError ? (
@@ -694,7 +832,11 @@ function LlmSlot({
   optional,
   onChange,
   catalog,
-}: SlotProps<ProviderChoice | null> & { catalog: LlmCatalogProvider[] | null }): JSX.Element {
+  cutoffs,
+}: SlotProps<ProviderChoice | null> & {
+  catalog: LlmCatalogProvider[] | null;
+  cutoffs: Settings['llmModelCutoffs'];
+}): JSX.Element {
   const providerId = choice?.providerId ?? '';
   const catalogProviders =
     catalog ??
@@ -703,9 +845,19 @@ function LlmSlot({
       displayName: provider.displayName,
       models: provider.models,
     }));
-  const models = providerId
+  const providerModels = providerId
     ? (catalogProviders.find((provider) => provider.providerId === providerId)?.models ?? [])
     : [];
+  const models = withSelectedModel(
+    providerId
+      ? modelsFromCutoff(
+          providerModels,
+          cutoffs[providerId as keyof Settings['llmModelCutoffs']] ?? null,
+        )
+      : [],
+    providerModels,
+    choice?.modelId ?? null,
+  );
   const selected = models.find((model) => model.id === choice?.modelId);
   return (
     <div className="slot" data-testid={`slot-${slot}`}>
@@ -717,8 +869,10 @@ function LlmSlot({
         onChange={(e) => {
           const nextProvider = e.target.value;
           if (nextProvider === '') return onChange(null);
-          const nextModels =
-            catalogProviders.find((provider) => provider.providerId === nextProvider)?.models ?? [];
+          const nextModels = modelsFromCutoff(
+            catalogProviders.find((provider) => provider.providerId === nextProvider)?.models ?? [],
+            cutoffs[nextProvider as keyof Settings['llmModelCutoffs']] ?? null,
+          );
           const first = nextModels.find((model) => model.status === 'available') ?? nextModels[0];
           onChange(first ? { providerId: nextProvider, modelId: first.id } : null);
         }}
@@ -739,6 +893,9 @@ function LlmSlot({
         disabled={providerId === ''}
         onChange={(e) => onChange({ providerId, modelId: e.target.value })}
       >
+        {choice && !models.some((model) => model.id === choice.modelId) ? (
+          <option value={choice.modelId}>{choice.modelId} (unavailable)</option>
+        ) : null}
         {models.map((model) => (
           <option key={model.id} value={model.id}>
             {model.displayName}

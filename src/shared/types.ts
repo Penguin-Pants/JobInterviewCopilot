@@ -108,12 +108,13 @@ export type OverlayTranslucency = 'acrylic' | 'opacity';
 
 /** Non-secret settings, persisted by electron-store (FR-020). */
 export interface Settings {
-  schemaVersion: 4;
+  schemaVersion: 5;
   activeProfileId: string;
   providers: {
     stt: { primary: ProviderChoice; backup: ProviderChoice | null };
     llm: { primary: ProviderChoice; backup: ProviderChoice | null };
   };
+  llmModelCutoffs: Record<'openai' | 'anthropic', string | null>;
   theme: {
     mode: ThemeMode;
     accent: string;
