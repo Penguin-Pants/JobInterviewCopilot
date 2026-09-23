@@ -777,6 +777,88 @@ describe('answering a turn', () => {
     await loop.stop();
   });
 
+  /**
+   * The converse: a retry that fails empty after an earlier attempt salvaged.
+   *
+   * An attempt that streamed a bullet and then failed ends `'complete'`, so
+   * the salvage stays on the overlay (FR-004, ADR-036). A retry that then fails
+   * before producing a bullet reports `'cancelled'`, which says only that *it*
+   * salvaged nothing. Forwarding it would make `reduceCards` remove the card
+   * (`ADR-047`) and take the earlier salvage with it, so it is held back. A
+   * cancellation because a newer turn superseded this one is still forwarded,
+   * because `FR-054` removes that partial output.
+   */
+  it('keeps an earlier attempt’s salvage when a retry fails empty', async () => {
+    const failure = new Error('the provider hung up') as ProviderError;
+    failure.class = 'server';
+    failure.providerId = 'anthropic';
+    failure.retryable = true;
+
+    let call = 0;
+    const { loop, messages } = makeLoop({
+      runFor: async (_capability, fn) => {
+        try {
+          return await fn('primary');
+        } catch {
+          return await fn('primary');
+        }
+      },
+      generate: (_provider, _request, _signal, events) => {
+        call += 1;
+        events.onBegin({ generationId: 'g1', cardId: 'card-g1', question: 'q' });
+        if (call === 1) {
+          events.onLine({ generationId: 'g1', cardId: 'card-g1', line: 'one', index: 0 });
+          events.onEnd({ generationId: 'g1', status: 'complete' });
+          return Promise.resolve(outcome({ error: failure }));
+        }
+        events.onEnd({ generationId: 'g1', status: 'cancelled' });
+        return Promise.resolve(outcome({ status: 'cancelled', bullets: [], error: failure }));
+      },
+    });
+    await loop.start(PROFILE_ID);
+
+    loop.onFire(turn());
+    await loop.whenSettled();
+
+    expect(messages).toEqual([
+      {
+        channel: 'suggestion:begin',
+        payload: { generationId: 'g1', cardId: 'card-g1', question: 'q' },
+      },
+      {
+        channel: 'suggestion:line',
+        payload: { generationId: 'g1', cardId: 'card-g1', line: 'one', index: 0 },
+      },
+      { channel: 'suggestion:end', payload: { generationId: 'g1', status: 'complete' } },
+    ]);
+
+    await loop.stop();
+  });
+
+  it('still clears a salvaged card when a newer turn cancels it', async () => {
+    const controller = new AbortController();
+    const { loop, messages } = makeLoop({
+      generate: (_provider, _request, _signal, events) => {
+        events.onBegin({ generationId: 'g1', cardId: 'card-g1', question: 'q' });
+        events.onLine({ generationId: 'g1', cardId: 'card-g1', line: 'one', index: 0 });
+        controller.abort();
+        events.onEnd({ generationId: 'g1', status: 'cancelled' });
+        return Promise.resolve(outcome({ status: 'cancelled' }));
+      },
+    });
+    await loop.start(PROFILE_ID);
+
+    loop.onFire(turn({ signal: controller.signal }));
+    await loop.whenSettled();
+
+    expect(messages.at(-1)).toEqual({
+      channel: 'suggestion:end',
+      payload: { generationId: 'g1', status: 'cancelled' },
+    });
+
+    await loop.stop();
+  });
+
   it('does nothing for a turn that was already aborted before it was answered', async () => {
     const controller = new AbortController();
     controller.abort();

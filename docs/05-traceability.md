@@ -163,9 +163,9 @@ Coverage: 116 requirements, 33 tasks, 165 automated test cases, 15 manual checks
 | TASK-043 | Overlay UI — COMPLETE | FR-006, FR-007, FR-008, FR-076, FR-085, FR-089, FR-090, FR-091, FR-092, FR-093, FR-094, FR-102, NFR-007, NFR-010, NFR-012 | TC-006, TC-110, TC-111, TC-112, TC-113, TC-114, TC-115, TC-116, TC-117, TC-138, TC-142 |
 | TASK-050 | Global resilience — COMPLETE | NFR-001, NFR-002, NFR-004, NFR-005, NFR-008, NFR-009 | TC-130, TC-131, TC-132, TC-133, TC-137, MW-06, MW-14 |
 | TASK-051 | Release pipeline — AUTOMATION COMPLETE, MANUAL EXECUTION OUTSTANDING | NFR-011, NFR-013, NFR-015 | TC-001, TC-165, TC-166, MW-01, MW-02, MW-03, MW-04, MW-05, MW-06, MW-07, MW-08, MW-09, MW-10, MW-11, MW-12, MW-13, MW-14, MW-15 |
-| TASK-060 | Actionability filter | FR-054, FR-111, NFR-018 | TC-167, TC-168, TC-169, TC-178, TC-180, TC-181, TC-182, TC-183, TC-184, TC-187, TC-188 |
-| TASK-061 | STT confidence capability and gate | FR-112, FR-113 | TC-170, TC-171, TC-185, TC-187 |
-| TASK-062 | Stale-suggestion discard | FR-114 | TC-172, TC-173, TC-179, TC-189, TC-190 |
-| TASK-063 | Single-card overlay | FR-091 | TC-111, TC-191 |
-| TASK-064 | Card hold buffer | FR-115 | TC-174, TC-175, TC-176, TC-177, TC-186 |
-| TASK-053 | Runtime STT catalog | FR-116, FR-117, FR-118 | TC-192, TC-193, TC-194, TC-195, TC-196, TC-197, TC-198 |
+| TASK-060 | Actionability filter — COMPLETE | FR-054, FR-111, NFR-018 | TC-167, TC-168, TC-169, TC-178, TC-180, TC-181, TC-182, TC-183, TC-184, TC-187, TC-188 |
+| TASK-061 | STT confidence capability and gate — COMPLETE | FR-112, FR-113 | TC-170, TC-171, TC-185, TC-187 |
+| TASK-062 | Stale-suggestion discard — COMPLETE | FR-114 | TC-172, TC-173, TC-179, TC-189, TC-190 |
+| TASK-063 | Single-card overlay — COMPLETE | FR-091 | TC-111, TC-191 |
+| TASK-064 | Card hold buffer — COMPLETE | FR-115 | TC-174, TC-175, TC-176, TC-177, TC-186 |
+| TASK-053 | Runtime STT catalog — COMPLETE | FR-116, FR-117, FR-118 | TC-192, TC-193, TC-194, TC-195, TC-196, TC-197, TC-198 |

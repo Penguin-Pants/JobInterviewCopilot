@@ -1,5 +1,6 @@
 import type { CardEvent } from './cards.js';
 
+/** Options for `HoldBuffer` (FR-115, ASM-018). Timers are injectable for tests. */
 export interface HoldBufferOptions {
   minHoldMs: number;
   now?: () => number;
@@ -12,6 +13,13 @@ interface QueuedEvent {
   offsetMs: number;
 }
 
+/**
+ * The minimum-hold floor, in front of `reduceCards` (FR-115, ADR-049).
+ *
+ * Holds a card for a *different* generation until the shown card has been
+ * visible for `minHoldMs`, then replays it at its original spacing. Events for
+ * the shown card, a `'reset'` and a pause are never held.
+ */
 export class HoldBuffer {
   private readonly dispatch: (event: CardEvent) => void;
   private readonly minHoldMs: number;
@@ -53,7 +61,17 @@ export class HoldBuffer {
     const id = event.payload.generationId;
     if (id === this.shownId) {
       this.dispatch(event);
-      if (event.kind === 'end' && event.payload.status === 'cancelled') this.shownId = null;
+      if (event.kind === 'end' && event.payload.status === 'cancelled') {
+        this.shownId = null;
+        // The hold protects the card on screen, and there is none now. A
+        // candidate already waiting on it is promoted at once rather than at
+        // the old deadline, which would leave the idle card up while a ready
+        // suggestion sat in the queue (FR-115).
+        if (this.queuedId !== null) {
+          if (this.holdTimer !== null) this.clearTimer(this.holdTimer);
+          this.replay();
+        }
+      }
       return;
     }
     if (event.kind === 'end' && event.payload.status === 'cancelled' && id === this.queuedId) {

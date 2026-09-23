@@ -430,13 +430,39 @@ test('TC-110 the idle card shows before the first suggestion and whenever paused
  * TC-111  single-card replacement
  * ------------------------------------------------------------------ */
 
+/**
+ * A settled count cannot see a replacement that fades: the old card leaves
+ * eventually and the count ends at one either way. The probe counts on every
+ * DOM mutation instead, so an old card still in the DOM when the new one is
+ * inserted is recorded as two, whether or not the window gets frames.
+ */
 test('TC-111 a new suggestion replaces the card already shown', async () => {
   await setSession(true);
+  await overlay.evaluate(() => {
+    const count = (): number => document.querySelectorAll('[data-testid="suggestion-card"]').length;
+    let most = count();
+    const observer = new MutationObserver(() => {
+      most = Math.max(most, count());
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    (window as unknown as { __cards?: { stop: () => number } }).__cards = {
+      stop: () => {
+        observer.disconnect();
+        return most;
+      },
+    };
+  });
+
   await generate('1', 'Question 1', ['Cue 1']);
   await generate('4', 'Question 4', ['Cue 4']);
   await expect(overlay.locator('[data-testid="suggestion-card"]')).toHaveCount(1);
   await expect(overlay.locator('[data-card-id="card-1"]')).toHaveCount(0);
   await expect(overlay.locator('[data-card-id="card-4"]')).toHaveCount(1);
+
+  const most = await overlay.evaluate(
+    () => (window as unknown as { __cards?: { stop: () => number } }).__cards?.stop() ?? -1,
+  );
+  expect(most, 'two suggestion cards were in the DOM at the same time').toBe(1);
 });
 
 /* ------------------------------------------------------------------ *

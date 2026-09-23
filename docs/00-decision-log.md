@@ -1999,6 +1999,18 @@ this milestone makes to the `'end'` case; `'begin'`'s one-card cap is the
 change already described above, and `'line'`/`'complete'`/`'nonconforming'`
 are untouched. `TASK-063` implements both.
 
+**Two consequences found in the Milestone 6 completion review.** First, the
+card's `AnimatePresence` exit fade never played for a cancellation or a
+session boundary, because an empty card list shows the idle card and unmounts
+the stack. It played only for a replacement, where it kept the old card in the
+DOM beside the new one for 250 ms: the eviction fade this decision deletes,
+under another name. `AnimatePresence` is removed, so a card has an entrance and
+no exit (`TC-111`). Second, removing a cancelled card reached a retry that fails
+empty after an earlier attempt salvaged bullets. That attempt reports
+`'cancelled'` because *it* salvaged nothing, and forwarding it removed the
+earlier salvage `FR-004` keeps on screen. `CMP-15` now holds that end back and
+still forwards a cancellation caused by a newer turn (`FR-054`).
+
 ### ADR-048 — Staleness is measured from when the turn fired, not from a count of turns
 
 **Context.** Nothing today stops a slow generation from surfacing an answer to

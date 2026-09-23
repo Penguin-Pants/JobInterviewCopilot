@@ -14,10 +14,10 @@ Read them in this order. The decision log wins over every other document.
 | Document | What it answers |
 |---|---|
 | [`docs/00-decision-log.md`](docs/00-decision-log.md) | Which way each contested question was settled, what is still an assumption, and what is still open |
-| [`docs/01-requirements.md`](docs/01-requirements.md) | What the product must do, as 107 verifiable requirements |
+| [`docs/01-requirements.md`](docs/01-requirements.md) | What the product must do, as 116 verifiable requirements |
 | [`docs/02-architecture.md`](docs/02-architecture.md) | Components, data model, interfaces, IPC contract, dependencies |
-| [`docs/03-tasks.md`](docs/03-tasks.md) | 27 implementation tasks with binary acceptance criteria and the global Definition of Done |
-| [`docs/04-test-strategy.md`](docs/04-test-strategy.md) | 133 automated test cases, 15 manual Windows checks, the CI pipeline |
+| [`docs/03-tasks.md`](docs/03-tasks.md) | 33 implementation tasks with binary acceptance criteria and the global Definition of Done |
+| [`docs/04-test-strategy.md`](docs/04-test-strategy.md) | 165 automated test cases, 15 manual Windows checks, the CI pipeline |
 | [`docs/07-release-checklist.md`](docs/07-release-checklist.md) | How a tag becomes an installer, and what blocks one |
 | [`docs/06-verification-map.md`](docs/06-verification-map.md) | Hand-authored. One row per requirement naming the tests that actually prove it |
 | [`docs/05-traceability.md`](docs/05-traceability.md) | Generated matrix. Do not edit |

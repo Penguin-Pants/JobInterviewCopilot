@@ -500,7 +500,10 @@ constant this module exports any more — the cap of 1 is load-bearing, not a
 configured value (`TASK-063`). A `'begin'` event for a new `cardId` replaces
 whatever card is held; `depthOpacity` and every multi-card branch this module
 and `SuggestionCardView` (11) once carried are deleted, not defaulted to a cap
-of 1. A `'reset'` event (a session boundary) empties the held card.
+of 1. A `'reset'` event (a session boundary) empties the held card. The
+overlay renders the card without `AnimatePresence`, so a card has an entrance
+and no exit transition: a replacement unmounts the old card in the same commit
+that mounts the new one, and two cards are never in the DOM at once (`TC-111`).
 
 **A `'cancelled'` `'end'` removes the card, not just its `status` field —
 corrected during a fifth round of spec review (`ADR-047`).** Before this
@@ -1401,7 +1404,10 @@ directions, so a channel cannot be added in code and left undocumented again.
   renderer. It fails safe: each reminder starts clickable, so a renderer that
   never reports leaves the button working rather than dead.
 
-**Changes made in TASK-053.**
+**Changes made in the overlay click-through fix.** Labelled `TASK-053` when it
+landed, before that id was given to the runtime STT catalog in `03-tasks.md`.
+The catalog's own changes are `CH-129` and the "Runtime STT catalog boundary"
+section.
 
 - `schemaVersion` moves to `3` for `overlayWindow.clickThrough`. `FR-083` made
   click-through the default and `FR-084` gave it a hotkey, but nothing made it a
@@ -1417,9 +1423,12 @@ directions, so a channel cannot be added in code and left undocumented again.
 **Changes made in `TASK-062`.** `CH-209`'s wire schema is unchanged
 (`FR-114`, `ADR-048`): a generation discarded for arriving after its threshold
 never reaches `CH-207`/`208`/`209` at all, so there is no wire value to add.
-`'stale'` exists only on the shared `GenerationStatus` type and the
-`TranscriptEntry` record it is written to (2.5) — code that switches on
-`CH-209`'s payload never needs to name it, because it can never arrive.
+`'stale'` exists only where the transcript is persisted: `TranscriptEntry`'s
+`'suggestion'` variant (2.5), `sessionSchema`'s matching enum and
+`SessionManager.appendSuggestion`'s parameter. It is **not** on
+`GenerationStatus`, which is also the type `CH-209`'s payload carries, so
+code that switches on that payload never needs to name it, because it can
+never arrive.
 
 ```ts
 /** CH-124 and CH-214 both carry this (ADR-011, ADR-026, ADR-030). */
@@ -1909,7 +1918,7 @@ is preferable to a network call during an interview.
 | `chokidar` | Knowledge base folder watch | FR-068 | Low |
 | `zod` | IPC and settings validation | FR-033, CMP-10 | Low |
 | `react`, `react-dom` | Both renderers | FR-002 | Low |
-| `framer-motion` | Card animation and `AnimatePresence`, which `FR-091` names | FR-091, FR-092 | Low |
+| `framer-motion` | Card entrance and bullet reveal animation | FR-091, FR-092 | Low |
 | *(build only)* | `tailwindcss` and `@tailwindcss/vite` are **devDependencies**, not runtime ones: they compile the overlay's stylesheet into a static CSS asset at build time and nothing of them reaches the shipped bundle. That is also why the license gate, which scans `--production`, does not see their `lightningcss` (MPL-2.0) — the same scope that already excludes `vite`, `electron-builder` and `typescript` (TASK-043, DoD 6) | FR-094 | Low |
 | Magic UI | Vendored, not an npm dependency. `BlurFade` is copied into `src/renderer/overlay/vendor/blur-fade.tsx` and is the bullet reveal `FR-092` specifies; its source, commit and MIT license are in `VENDORED.md`, which `scripts/check-licenses.mjs` enforces. `MagicCard` and `AnimatedList` were evaluated and deliberately not used, for reasons in ADR-042: a pointer-hover effect is dead on a click-through window (`FR-083`), shadcn tokens are not the `FR-029` tokens the contrast floor is computed from (`FR-093`, ADR-039), and a timer-driven list is not an IPC-driven stack | FR-094, NFR-016 | Low, one file with a recorded upstream commit |
 | *(none)* | Acrylic translucency uses Electron's built-in `backgroundMaterial`. No native blur module is added | FR-089 | Low |

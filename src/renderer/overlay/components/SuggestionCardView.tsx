@@ -6,10 +6,10 @@ import { BulletReveal } from './BulletReveal.js';
 /**
  * The overlay's one suggestion card (FR-004, FR-076, FR-091, FR-092, FR-094).
  *
- * The card is the unit `AnimatePresence` adds and removes, so its enter and
- * exit transitions live here and `cards.ts` above only decides which card
- * exists. The exit is the fade a card leaving gets -- a cancellation
- * (`FR-054`), a session boundary, or a replacement arriving (`ADR-047`).
+ * The card's entrance lives here and `cards.ts` above only decides which card
+ * exists. There is no exit transition: a replacement removes the old card
+ * outright, in the same commit that mounts the new one, and a cancellation or
+ * a session boundary shows the idle card in its place (`ADR-047`, `TC-111`).
  *
  * A card has three possible endings and renders none of them as a failure. A
  * `cancelled` or `nonconforming` generation shows exactly what it produced,
@@ -23,8 +23,8 @@ export interface SuggestionCardViewProps {
   slide: boolean;
 }
 
-/** How long a card takes to fade out on its way off the overlay. */
-export const CARD_EXIT_DURATION_SECONDS = 0.25;
+/** How long a new card takes to fade in (FR-092). */
+export const CARD_ENTER_DURATION_SECONDS = 0.25;
 
 /**
  * Opacity is the **animated** target, never an inline style (NFR-010).
@@ -46,8 +46,7 @@ export function SuggestionCardView({ card, slide }: SuggestionCardViewProps): JS
       // Opacity only, never a scale: a scale would move text the user may be
       // halfway through reading.
       animate={slide ? { opacity: 1, y: 0 } : { opacity: 1 }}
-      exit={{ opacity: 0 }}
-      transition={{ duration: CARD_EXIT_DURATION_SECONDS, ease: 'easeOut' }}
+      transition={{ duration: CARD_ENTER_DURATION_SECONDS, ease: 'easeOut' }}
       // Position only. A full layout projection re-measures the card on every
       // commit, and a card re-renders on each arriving bullet, for a reflow
       // that is vertical anyway: the card is anchored to the bottom of the

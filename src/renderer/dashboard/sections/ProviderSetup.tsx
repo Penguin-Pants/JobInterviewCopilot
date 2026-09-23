@@ -5,7 +5,7 @@
  * No provider and no model is named in this file, so adding one is a registry
  * edit rather than a UI edit (FR-037, ADR-022, TC-057).
  */
-import { useEffect, useMemo, useRef, useState, type JSX } from 'react';
+import { useEffect, useMemo, useState, type JSX } from 'react';
 import { LLM_REGISTRY } from '../../../shared/registry/llm.js';
 import {
   backupConflict,
@@ -25,7 +25,7 @@ import type {
   SttModelDescriptor,
   SttCatalogSnapshot,
 } from '../../../shared/types.js';
-import { call } from '../call.js';
+import { call, type CallResult } from '../call.js';
 import type { ProvidersState } from '../state.js';
 
 type Slot = 'stt-primary' | 'stt-backup' | 'llm-primary' | 'llm-backup';
@@ -138,6 +138,40 @@ export function withSelectedModel(
   if (!selectedModelId || visible.some((model) => model.id === selectedModelId)) return visible;
   const selected = all.find((model) => model.id === selectedModelId);
   return selected ? [selected, ...visible] : visible;
+}
+
+/** What one speech-to-text catalog load reports to the section (FR-117). */
+export type SttCatalogUpdate =
+  | { kind: 'loading' }
+  | { kind: 'loaded'; catalog: SttCatalogSnapshot }
+  | { kind: 'failed'; message: string };
+
+/**
+ * Loads the speech-to-text catalog so that only the newest request is applied
+ * (FR-117, TC-198).
+ *
+ * A manual refresh can overlap the section's first load, and either can settle
+ * first. The request issued last is the one the user is looking at, so an older
+ * answer that settles after it is dropped rather than replacing newer usable
+ * state. A failure reports its message and leaves the catalog already shown in
+ * place.
+ */
+export function createSttCatalogLoader(
+  request: (force: boolean) => Promise<CallResult<'catalog:stt'>>,
+  apply: (update: SttCatalogUpdate) => void,
+): (force?: boolean) => Promise<void> {
+  let latest = 0;
+  return async (force = false) => {
+    const id = ++latest;
+    apply({ kind: 'loading' });
+    const result = await request(force);
+    if (id !== latest) return;
+    apply(
+      result.ok
+        ? { kind: 'loaded', catalog: result.value }
+        : { kind: 'failed', message: result.message },
+    );
+  };
 }
 
 function providerName<M>(registry: ProviderDescriptor<M>[], providerId: string): string {
@@ -349,18 +383,23 @@ export function ProviderSetup({
   const [sttCatalog, setSttCatalog] = useState<SttCatalogSnapshot | null>(null);
   const [sttCatalogLoading, setSttCatalogLoading] = useState(true);
   const [sttCatalogError, setSttCatalogError] = useState<string | null>(null);
-  const sttCatalogRequest = useRef(0);
-
-  async function loadSttCatalog(force = false): Promise<void> {
-    const request = ++sttCatalogRequest.current;
-    setSttCatalogLoading(true);
-    setSttCatalogError(null);
-    const result = await call('catalog:stt', { force });
-    if (request !== sttCatalogRequest.current) return;
-    if (result.ok) setSttCatalog(result.value);
-    else setSttCatalogError(result.message);
-    setSttCatalogLoading(false);
-  }
+  // Created once: the loader holds the request sequence, and the setters it
+  // closes over are stable for the life of the component.
+  const [loadSttCatalog] = useState(() =>
+    createSttCatalogLoader(
+      (force) => call('catalog:stt', { force }),
+      (update) => {
+        if (update.kind === 'loading') {
+          setSttCatalogLoading(true);
+          setSttCatalogError(null);
+          return;
+        }
+        if (update.kind === 'loaded') setSttCatalog(update.catalog);
+        else setSttCatalogError(update.message);
+        setSttCatalogLoading(false);
+      },
+    ),
+  );
   useEffect(() => {
     void loadSttCatalog();
   }, []);
