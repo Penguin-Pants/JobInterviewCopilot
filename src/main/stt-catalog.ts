@@ -9,7 +9,9 @@ import type {
   SttModelDescriptor,
 } from '../shared/types.js';
 
+/** How long a cached STT catalog stays fresh (FR-117, ADR-051). */
 export const STT_CATALOG_MAX_AGE_MS = 28 * 24 * 60 * 60 * 1000;
+/** The deadline on one discovery request (FR-117). */
 export const STT_CATALOG_REQUEST_TIMEOUT_MS = 10_000;
 const PROVIDERS = ['openai', 'deepgram', 'elevenlabs'] as const;
 type SttProviderId = (typeof PROVIDERS)[number];
@@ -49,7 +51,9 @@ const cacheSchema = z.object({
 });
 type Cache = z.infer<typeof cacheSchema>;
 
+/** The fetch the catalog uses, injectable for tests (FR-116). */
 export type CatalogFetch = typeof fetch;
+/** What `SttCatalogService` needs from its host (FR-116, FR-117). */
 export interface SttCatalogOptions {
   dir: string;
   keyFor: (id: CredentialId) => string | undefined;
@@ -64,6 +68,10 @@ export function compatibleModel(providerId: SttProviderId, id: string): SttModel
   return shipped ? { ...shipped, audio: { ...shipped.audio } } : null;
 }
 
+/**
+ * Orders catalog models deterministically (FR-118): available, then legacy,
+ * then unavailable; newest release first; then by name and id.
+ */
 export function sortCatalogModels(models: SttModelDescriptor[]): SttModelDescriptor[] {
   const rank = { available: 0, legacy: 1, unavailable: 2 } as const;
   return [...models].sort(
@@ -88,6 +96,13 @@ function fallback(providerId: SttProviderId): SttModelDescriptor[] {
   }));
 }
 
+/**
+ * The main-process runtime STT catalog (FR-116, FR-117, FR-118, ADR-051).
+ *
+ * Discovers account models where a provider can say so safely, filters them
+ * through the compatibility policy, and keeps a last-known-good copy in an
+ * atomically written cache that no failure or superseded request replaces.
+ */
 export class SttCatalogService {
   private readonly file: string;
   private readonly fetcher: CatalogFetch;

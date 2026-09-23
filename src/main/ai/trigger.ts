@@ -16,6 +16,10 @@ import { classifyHeuristically, type ActionabilityVerdict } from './actionabilit
 export type TriggerState =
   'IDLE' | 'LISTENING' | 'AWAITING_TURN_END' | 'CLASSIFYING' | 'GENERATING' | 'PAUSED';
 
+/**
+ * A turn whose last final segment scores below this does not fire, when the
+ * serving STT model supports confidence (FR-113, ASM-016).
+ */
 export const CONFIDENCE_THRESHOLD = 0.55;
 
 /** The trigger subset of `Settings`, plus the capability read off the STT model. */

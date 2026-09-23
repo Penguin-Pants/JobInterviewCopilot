@@ -1828,12 +1828,64 @@ bad record is actually caught. A tag with no release behind it is inert.
 
 ## Milestone 6 — Overlay relevance and pacing (from UX review)
 
-**Status: NOT STARTED.** Follows a UX review of the live overlay against the
-core interview scenario, scoped into `FR-111` through `FR-115`, `NFR-018` and
-`ADR-045` through `ADR-049`. Every task below extends an existing, complete
-component (`TASK-030`, `TASK-032`, `TASK-012`, `TASK-043`) rather than
-replacing it, and none adds a runtime dependency (`02-architecture.md`
-section 8).
+**Status: COMPLETE, 2026-09-23.** All six tasks implemented and verified.
+Follows a UX review of the live overlay against the core interview scenario,
+scoped into `FR-111` through `FR-115`, `NFR-018` and `ADR-045` through
+`ADR-049`. Every task below extends an existing, complete component
+(`TASK-030`, `TASK-032`, `TASK-012`, `TASK-043`) rather than replacing it, and
+none adds a runtime dependency (`02-architecture.md` section 8).
+
+The code landed before this status did. `TASK-060` to `TASK-064` merged in
+pull request #21 and their seventeen missing test cases in #22; `TASK-053`
+merged in #24 and #25. This document still read NOT STARTED over working
+code, so a completion review read every acceptance criterion against the code
+and the tests before marking anything done. `npm run typecheck`, `npm run
+lint`, `npm run format:check`, `npm run licenses`, `npm run trace` and 1081
+unit and integration tests pass, at 96.5 percent line coverage against an 80
+percent floor. The Playwright E2E suite runs on the Windows runner only, so
+the strengthened `TC-111` is proven there, not in this review's container.
+
+| Task | Criteria | Verified by | Result |
+|---|---|---|---|
+| `TASK-061` Confidence gate | All met | TC-170, TC-171, TC-185, TC-187 | Complete |
+| `TASK-060` Actionability filter | All met | TC-167 to TC-169, TC-178, TC-180 to TC-184, TC-187, TC-188 | Complete |
+| `TASK-062` Stale discard | All met | TC-172, TC-173, TC-179, TC-189, TC-190 | Complete |
+| `TASK-063` Single-card overlay | All met after one fix below; advisory item not taken | TC-111, TC-191 | Complete |
+| `TASK-064` Hold buffer | All met after one fix below | TC-174 to TC-177, TC-186 | Complete |
+| `TASK-053` Runtime STT catalog | FR-116 to FR-118 met; test gaps closed below | TC-192 to TC-198 | Complete |
+
+**Found and fixed in the completion review.** Each fix has a test that fails
+without it.
+
+| Defect | Consequence | Fix |
+|---|---|---|
+| **A replacement faded the old card out beside the new one.** The card's `AnimatePresence` exit never ran for a cancellation or a session boundary, because an empty list shows the idle card and unmounts the stack. A replacement was the only exit it ever ran | Two cards were in the DOM for 250 ms on every replacement: the fade-out-the-oldest transition `TASK-063` removes, and what `TC-111` forbids. The E2E case asserted only the settled count, so it passed | `AnimatePresence` and the exit are removed (`ADR-047`). `TC-111` now counts cards on every DOM mutation |
+| **An empty failed retry removed an earlier attempt's salvage.** An attempt that streams a bullet and fails ends `'complete'`; a retry that then fails before a bullet ends `'cancelled'`, and `reduceCards` now removes a cancelled card | Bullets `FR-004` keeps on screen after a provider failure vanished when the retry failed. Before `TASK-063` a cancelled card kept its lines, so this was a regression | `CMP-15` holds that end back once this generation has shown a bullet. A cancellation because a newer turn superseded it is still forwarded (`FR-054`). Two tests pin both directions |
+| **A queued card waited out a cancelled card's hold.** Cancelling the shown card cleared "a card is shown" but left the queued candidate's timer at the old deadline | Up to 1.5 s of idle card while a ready suggestion sat in the queue, against the criterion that no hold applies when no card is shown | The queued candidate is promoted at once, at its original spacing |
+| **`TC-192` to `TC-198` carried no test case id**, and three clauses had no test: `TC-197`'s last-known-good branch, `TC-198`'s superseded UI request, and `TC-192`'s "only in main" for the cache file | `scripts/traceability.py` checks the documents, not `tests/`, so the gap was silent | One `describe` per case. The Provider Setup loader is extracted as `createSttCatalogLoader` so its ordering is unit tested, as the LLM catalog's helpers already are |
+| `TC-174`'s "one arriving after the hold dispatches immediately" had no test | The branch was correct and unpinned | Test added |
+| DoD 8: seventeen Milestone 6 exports had no TSDoc | A requirement could not be traced from its code | TSDoc with requirement ids added |
+| `02-architecture.md` said `'stale'` is on `GenerationStatus`, which `TASK-062` forbids, and gave `TASK-053` to both the overlay click-through fix and the STT catalog | A reader following the architecture would have put `'stale'` on the wire | Both corrected. The `framer-motion` dependency row no longer cites the `AnimatePresence` the amended `FR-091` dropped |
+
+Two sentences in the criteria below are looser than the code, and neither is a
+defect. `actionability.ts` does import `LlmProvider`, as a type only, for
+`classifyWithLlm`'s signature; nothing network-capable reaches `trigger.ts`,
+which is what `TC-182` enforces. And `TC-133` is unaffected by the classifier
+because its harness wires none, not because its fixtures resolve on the
+heuristic path.
+
+**Deferred.** Real, and outside this milestone's scope.
+
+| Item | Why it is not done here | Owner |
+|---|---|---|
+| The transcript records the **last** attempt's outcome, so a salvaging attempt followed by an empty failed retry is written as `'cancelled'` with no bullets | Pre-existing since `TASK-044`, and it contradicts `ADR-036` Decision 3's "keeps the salvaged outcome". This review fixed the overlay half, which `TASK-063` caused; the transcript half is older and changes what `session:read` returns | Follow-up |
+| The `secrets:set` to `SttCatalogService.invalidate` wiring has no test | It lives in `src/main/index.ts`, which cannot be imported without Electron and is excluded from coverage by design. `TC-196` proves the service half | Follow-up |
+| `SttCatalogProvider.state` declares `'error'`, which the service never produces | Harmless: the renderer prints the state as text. Removing it changes `CH-129`'s schema | Follow-up |
+| `TASK-063`'s advisory overlay height | Not a criterion. The default stays 420 by 260 | None |
+| A `line` or `end` that arrives before its own `begin` can seed the hold buffer's queue | Unreachable over ordered single-window IPC; recorded as a possible risk, not a defect | None |
+
+**Blockers.** None in this milestone. The build plan's only open item is
+`TASK-051`'s manual release checklist, which needs Windows hardware.
 
 **Numbering note.** `TASK-060` (actionability filter) is listed before
 `TASK-061` (confidence gate) because the actionability filter is the
@@ -1842,7 +1894,7 @@ higher-level, user-visible feature the UX review asked for, but `TASK-060`
 (`02-architecture.md` 3.6) and a turn it suppresses must never reach the
 classifier. Build `TASK-061` first regardless of the numbering.
 
-### TASK-060 Actionability filter
+### TASK-060 Actionability filter — COMPLETE
 **Traces** FR-054 (amended), FR-111, NFR-018, ASM-015, ASM-019, ASM-020
 **Depends on** TASK-030, TASK-032, TASK-044, TASK-061
 **Acceptance criteria**
@@ -1977,7 +2029,7 @@ classifier. Build `TASK-061` first regardless of the numbering.
   cost-accounting `finally`.
 **Verified by** TC-167, TC-168, TC-169, TC-178, TC-180, TC-181, TC-182, TC-183, TC-184, TC-187, TC-188
 
-### TASK-061 STT confidence capability and gate
+### TASK-061 STT confidence capability and gate — COMPLETE
 **Traces** FR-112, FR-113, ASM-016
 **Depends on** TASK-012, TASK-013, TASK-030, TASK-044
 **Acceptance criteria**
@@ -2015,7 +2067,7 @@ classifier. Build `TASK-061` first regardless of the numbering.
   not apply, following the registry-driven pattern `TC-151` established.
 **Verified by** TC-170, TC-171, TC-185, TC-187
 
-### TASK-062 Stale-suggestion discard
+### TASK-062 Stale-suggestion discard — COMPLETE
 **Traces** FR-114, ASM-017
 **Depends on** TASK-030, TASK-032, TASK-044, TASK-060, TASK-061
 **Acceptance criteria**
@@ -2085,7 +2137,7 @@ classifier. Build `TASK-061` first regardless of the numbering.
   `session:read` to prove `sessionSchema` accepts the persisted file.
 **Verified by** TC-172, TC-173, TC-179, TC-189, TC-190
 
-### TASK-063 Single-card overlay
+### TASK-063 Single-card overlay — COMPLETE
 **Traces** FR-091 (amended), ASM-010
 **Depends on** TASK-043
 **Acceptance criteria**
@@ -2135,7 +2187,7 @@ classifier. Build `TASK-061` first regardless of the numbering.
   default.
 **Verified by** TC-111, TC-191
 
-### TASK-064 Card hold buffer
+### TASK-064 Card hold buffer — COMPLETE
 **Traces** FR-115, ASM-018
 **Depends on** TASK-063
 **Acceptance criteria**
@@ -2188,7 +2240,7 @@ classifier. Build `TASK-061` first regardless of the numbering.
   the first one after a pause — the hold does not apply.
 **Verified by** TC-174, TC-175, TC-176, TC-177, TC-186
 
-### TASK-053 Runtime STT catalog
+### TASK-053 Runtime STT catalog — COMPLETE
 **Traces** FR-116, FR-117, FR-118
 
 Implement the atomic cache, validated IPC, bounded manual and lazy refresh, credential-race protection, policy revalidation, and Provider Setup states.

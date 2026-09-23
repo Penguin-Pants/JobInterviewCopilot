@@ -53,6 +53,46 @@ describe('TC-174 through TC-177 and TC-186 hold buffer', () => {
     expect(seen.at(-1)).toEqual(end('four', 'cancelled'));
   });
 
+  it('lets a different card through at once when the shown one has had its hold', () => {
+    vi.useFakeTimers();
+    const seen: CardEvent[] = [];
+    const buffer = new HoldBuffer((event) => seen.push(event), { minHoldMs: 1500 });
+    buffer.onEvent(begin('one'));
+    vi.advanceTimersByTime(1500);
+    buffer.onEvent(begin('two'));
+    buffer.onEvent(line('two'));
+    expect(seen).toEqual([begin('one'), begin('two'), line('two')]);
+  });
+
+  /**
+   * The hold protects the card on screen. Once that card is cancelled nothing
+   * is shown, so a candidate already queued behind it is promoted at once, at
+   * its original spacing, rather than at the cancelled card's old deadline.
+   */
+  it('promotes a queued card at once when the shown card is cancelled', () => {
+    vi.useFakeTimers();
+    const seen: CardEvent[] = [];
+    const buffer = new HoldBuffer((event) => seen.push(event), { minHoldMs: 1500 });
+    buffer.onEvent(begin('one'));
+    vi.advanceTimersByTime(100);
+    buffer.onEvent(begin('two'));
+    vi.advanceTimersByTime(50);
+    buffer.onEvent(line('two'));
+    vi.advanceTimersByTime(50);
+    buffer.onEvent(end('one', 'cancelled'));
+    expect(seen).toEqual([begin('one'), end('one', 'cancelled'), begin('two')]);
+    vi.advanceTimersByTime(50);
+    expect(seen).toEqual([begin('one'), end('one', 'cancelled'), begin('two'), line('two')]);
+
+    // 'two' is the shown card now, so its own hold runs from its promotion at
+    // 200 ms: 'three', arriving at 250 ms, waits until 1700 ms.
+    buffer.onEvent(begin('three'));
+    vi.advanceTimersByTime(1449);
+    expect(seen.at(-1)).toEqual(line('two'));
+    vi.advanceTimersByTime(1);
+    expect(seen.at(-1)).toEqual(begin('three'));
+  });
+
   /**
    * Discarding a queued candidate must not cancel the shown card's own replays.
    *

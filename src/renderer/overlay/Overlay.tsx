@@ -1,4 +1,3 @@
-import { AnimatePresence } from 'framer-motion';
 import {
   StrictMode,
   useCallback,
@@ -491,30 +490,24 @@ function Overlay(): JSX.Element {
         ) : (
           <div data-testid="card-stack" className="mt-auto flex flex-col gap-1">
             {/*
-              FR-091: one card at a time, and a new suggestion replaces it.
-              `cards.ts` decides which card exists; AnimatePresence is what
-              makes a card leaving -- a cancellation (`FR-054`) or a session
-              boundary -- a fade rather than a disappearance (`ADR-047`).
+              FR-091: one card at a time, and a new suggestion replaces it
+              outright (`ADR-047`). `cards.ts` decides which card exists.
 
-              No `initial={false}`. It was here to stop a rebuilt overlay
-              animating a replayed card in, and it cost `FR-092` instead: this
-              AnimatePresence mounts with its first child, because the stack is
-              only rendered once a card exists, and on its first render
-              `initial={false}` is passed down as `initial: false`. That value
-              is memoised on the child's presence context without `initial` as
-              a dependency, so it sticks for that card's whole life and reaches
-              every `BulletReveal` mounted inside it. Measured on the built
-              renderer: the first card of every active period, and all of its
-              bullets, appeared at full opacity with no fade and no slide, while
-              the cards that replaced it animated correctly. It recurred after
-              every pause and every session boundary, because those unmount the
-              wrapper.
+              No AnimatePresence, and so no exit fade. A card leaves in one of
+              two ways and neither may fade. A cancellation, a pause or a
+              session boundary empties `cards`, which shows the idle card and
+              unmounts this whole stack, so an exit animation never had a
+              chance to play there. That left a replacement as the only exit
+              it ever ran, which kept the old card in the DOM beside the new
+              one for the length of its fade: the fade-out-the-oldest
+              transition `TASK-063` removes, and two cards at once where
+              `TC-111` allows one. Keyed on `cardId`, so a replacement unmounts
+              the old card in the same commit that mounts the new one, and the
+              new card still gets its own entrance.
             */}
-            <AnimatePresence>
-              {cards.map((card) => (
-                <SuggestionCardView key={card.cardId} card={card} slide={slide} />
-              ))}
-            </AnimatePresence>
+            {cards.map((card) => (
+              <SuggestionCardView key={card.cardId} card={card} slide={slide} />
+            ))}
           </div>
         )}
       </div>

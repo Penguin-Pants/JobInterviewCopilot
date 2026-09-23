@@ -50,7 +50,9 @@ import { promptForProfile } from '../shared/prompts.js';
 
 /** How many knowledge-base chunks one suggestion is built from (`FR-072`). */
 export const RETRIEVAL_K = 3;
+/** A suggestion older than this since its turn fired is not shown (FR-114, ASM-017). */
 export const STALE_DISCARD_MS = 20_000;
+/** The client-side budget for one classification call (FR-111, ASM-020). */
 export const CLASSIFICATION_TIMEOUT_MS = 800;
 
 /** Both streams, in the order they are opened and closed (`FR-040`, `FR-047`). */
@@ -709,6 +711,15 @@ export class LiveSessionLoop {
      * its lines arrive for a card that no longer exists.
      */
     let cardUp = false;
+    /**
+     * Whether any attempt of this generation has put a bullet on the overlay.
+     *
+     * An attempt that fails before producing a bullet reports `'cancelled'`,
+     * which says only that *it* salvaged nothing. After an earlier attempt's
+     * salvage is on screen, forwarding that end would make `reduceCards` remove
+     * the card and the salvage with it (FR-004, ADR-036, ADR-047).
+     */
+    let linesShown = false;
 
     try {
       await this.options.health.runFor('llm', async (target) => {
@@ -771,14 +782,22 @@ export class LiveSessionLoop {
                   return;
                 }
               }
+              linesShown = true;
               this.options.onSuggestion({ channel: 'suggestion:line', payload });
             },
             onEnd: (payload) => {
               if (stale || staleEndSent) return;
-              // `reduceCards` removes a cancelled card, so this end is what
-              // leaves the overlay empty and what a retry's own begin has to
-              // fill again.
-              if (payload.status === 'cancelled') cardUp = false;
+              if (payload.status === 'cancelled') {
+                // A failed attempt with nothing of its own to show must not
+                // clear an earlier attempt's salvage. A newer turn's
+                // cancellation still clears it, because FR-054 removes that
+                // partial output.
+                if (linesShown && !turn.signal.aborted) return;
+                // `reduceCards` removes a cancelled card, so this end is what
+                // leaves the overlay empty and what a retry's own begin has to
+                // fill again.
+                cardUp = false;
+              }
               this.options.onSuggestion({ channel: 'suggestion:end', payload });
             },
           },
