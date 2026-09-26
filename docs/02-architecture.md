@@ -1255,7 +1255,7 @@ payload is rejected and logged, never passed through.
 |---|---|---|---|
 | CH-101 | `config:get` | none | `Settings` (never secrets) |
 | CH-102 | `config:set` | `Partial<Settings>` | `Settings` |
-| CH-103 | `secrets:set` | `{ provider, key }` | `ValidationResult` (validates then saves, `FR-026`) |
+| CH-103 | `secrets:set` | `{ provider, key }` | `ValidationResult` (validates then saves, `FR-026`; a saved key then invalidates the catalogs built with the old one, `FR-117`) |
 | CH-104 | `secrets:status` | none | `{ deepgram: boolean, openai: boolean, anthropic: boolean }` |
 | CH-105 | `profile:list` | none | `Profile[]` |
 | CH-106 | `profile:create` | `{ name }` | `Profile` |
@@ -1863,7 +1863,11 @@ or a failover sends the question again, and both requests are billable, possibly
 at different rates. Replacement by `generationId` is right *within* one request
 and wrong across two, so `CMP-15` accounts each attempt under `<generationId>#n`
 and every attempt is summed. The transcript still records the outcome the
-overlay showed, which is the last attempt's.
+overlay showed: the last attempt's, except that an attempt which produced no
+bullet does not replace an earlier attempt's salvage. A failed one leaves the
+salvage as it was, which the overlay also keeps; a cancelled one marks it
+`'cancelled'`, as a cancelled single attempt keeps the bullets it showed. The
+entry's model is the one whose bullets it records (ADR-035, ADR-052).
 
 **Audio seconds are read from the adapter, not from the chunk handed to it**
 (ADR-036). `SocketSttSession` drops queued chunks during an outage rather than
@@ -2013,6 +2017,7 @@ src/
     index.ts           CMP-01
     config.ts          CMP-02
     secrets.ts         CMP-02
+    key-save.ts        CH-103, what a validated key save invalidates (FR-117)
     audio.ts           CMP-03a
     session.ts         CMP-08
     cost.ts            CMP-09
@@ -2091,3 +2096,5 @@ docs/
 ## Runtime STT catalog boundary
 
 `SttCatalogService` is the single discovery, compatibility, normalization, sorting, and cache boundary. The validated `catalog:stt` IPC channel carries descriptors to Provider Setup; it never carries keys. OpenAI's authenticated Models API supplies account-visible identifiers but not transport capabilities, pricing, or lifecycle state, so results are conservatively intersected with verified adapter policy. Deepgram's project model metadata is not an entitlement list and ElevenLabs' general model response does not reliably identify realtime STT compatibility; both therefore use labelled shipped fallback metadata. The cache is `userData/stt-catalog.json`, schema version 1, written by temporary-file rename. Each cached account result carries an opaque random rotation marker whose current value lives with the encrypted credential; a mismatch makes the entry stale after restart without storing a key fingerprint or any reversible credential identifier. A credential replacement invalidates only its STT entry; OpenAI retains its single shared credential ownership.
+
+Each provider's `state` is `ready`, `stale`, `missing-key` or `fallback`. There is no error state: a failed discovery keeps the last-known-good catalog as `stale`, or the shipped one as `fallback`, and says why in `message` (ADR-051, ADR-052). The invalidation is `secrets:set`'s, through `saveProviderKey` in `src/main/key-save.ts`, and only after the key is saved. A credential that also serves a language model invalidates and refreshes that catalog too. A catalog that cannot persist its invalidation does not fail the save: the key is already stored, and each catalog drops the entry from memory before it writes.

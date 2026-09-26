@@ -2256,3 +2256,47 @@ effort is normalized in settings and translated only by the matching adapter.
 ### ADR-051 — Conservative account-aware STT catalog
 
 Use authenticated discovery only when the provider response safely represents account-visible identifiers, and intersect incomplete provider metadata with one verified compatibility policy. Never classify by model-name prefix. Cache last-known-good results for 28 days; use explicitly labelled shipped fallback metadata where an endpoint cannot establish realtime STT entitlement.
+
+### ADR-052 — A salvage survives an empty retry, the key save is testable, and the STT catalog has no error state
+
+**Decided 2026-09-26**, closing the three rows the Milestone 6 completion review
+deferred as "Follow-up" (`03-tasks.md`).
+
+**1. An attempt with no bullets does not replace a salvage in the transcript.**
+ADR-035 Decision 3 keeps the salvaged outcome, and Milestone 6 made the overlay
+keep an earlier attempt's salvage when a retry then fails before producing a
+bullet. The transcript still recorded the last attempt, so the card the user had
+just read was written as `'cancelled'` with no bullets. `CMP-15` now records an
+attempt's outcome unless it produced no bullet while an earlier attempt had
+salvaged some. Two consequences are decided here rather than left implicit.
+First, a cancellation of that empty attempt, by a newer turn, a pause or a
+stop, marks the entry `'cancelled'` and keeps the salvage's bullets. A cancelled
+single attempt already keeps the bullets it showed, because `runGeneration`
+returns them, and `FR-054` governs the overlay, not the transcript. Second, a
+stale generation keeps its salvage too, because its entry records what was
+produced rather than what was shown (`TASK-062`). The entry's `model` and
+`providerId` move with its bullets, so they name the model that produced them
+rather than the last one attempted.
+
+**2. `secrets:set`'s effects are a function, not a handler body.** The handler
+lived in `index.ts`, which a test cannot import, so nothing pinned its call to
+`SttCatalogService.invalidate`. It is `saveProviderKey` in
+`src/main/key-save.ts` now, with every collaborator injected. Extracting it
+exposed a defect: the STT catalog's invalidation was guarded against a failed
+write and the LLM catalog's was not, so a failed write of `llm-catalog.json`
+reported a saved key as a failed save and skipped the refresh. Both are guarded
+now, for the reason the STT guard already gave.
+
+**3. The STT catalog has no error state.** `SttCatalogProvider.state` and
+`CH-129`'s schema declared `'error'`, which `SttCatalogService` never produced:
+ADR-051 answers a failed discovery with the last-known-good catalog (`stale`)
+or the shipped one (`fallback`), and a message. The value is removed from both,
+so the type forbids producing it and the router's response validation refuses
+it at the boundary. The language-model catalog keeps its own `'error'`, which
+it does produce.
+
+**Consequence.** `02-architecture.md` corrects "the transcript records the last
+attempt's outcome", which Milestone 6 made false, and records the key-save path
+and the STT catalog's states. `TC-196` gains the save that starts a credential
+replacement, and `TC-003` asserts that the STT catalog's schema and type agree
+on the states.
