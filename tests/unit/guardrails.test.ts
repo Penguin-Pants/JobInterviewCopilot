@@ -1195,7 +1195,11 @@ describe('TASK-042 the main-process half of the Dashboard', () => {
   /** FR-026: an inline pass or fail within 10 seconds, every time. */
   it('bounds key validation in front of the save, not in the renderer', () => {
     const text = source();
-    expect(handlerBody('secrets:set')).toContain('validateWithinDeadline');
+    // The handler saves through `saveProviderKey`, which validates with the
+    // validator it is handed (`key-save.test.ts`). This is that validator.
+    expect(handlerBody('secrets:set')).toContain('saveProviderKey(keySaveDeps()');
+    const deps = text.slice(text.indexOf('function keySaveDeps('));
+    expect(deps.slice(0, deps.indexOf('\n}\n'))).toContain('validate: validateWithinDeadline');
     expect(text).toContain('KEY_VALIDATION_DEADLINE_MS = 10_000');
     // A renderer-side timeout cannot stop an in-flight call from saving a key
     // the user has already been told was refused.
