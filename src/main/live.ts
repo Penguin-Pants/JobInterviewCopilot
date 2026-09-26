@@ -692,8 +692,10 @@ export class LiveSessionLoop {
     }
 
     // Held outside the closure because the health machine retries and fails
-    // over: what the overlay was shown, and what the transcript must record, is
-    // whatever the **last** attempt produced.
+    // over. The transcript records the outcome the overlay showed: the **last**
+    // attempt's, unless that attempt produced no bullet after an earlier one
+    // had salvaged some (FR-101, ADR-035, ADR-052). `choice` moves with the
+    // bullets, so the entry names the model that produced them.
     const settled: { outcome: GenerationOutcome | null; choice: ProviderChoice } = {
       outcome: null,
       choice: primary.choice,
@@ -724,7 +726,6 @@ export class LiveSessionLoop {
     try {
       await this.options.health.runFor('llm', async (target) => {
         const bound = this.targetFor(target, primary, backup, 'language model');
-        settled.choice = bound.choice;
 
         const outcome = await this.generate(
           bound.provider,
@@ -802,7 +803,21 @@ export class LiveSessionLoop {
             },
           },
         );
-        settled.outcome = outcome;
+        // An attempt that produced no bullet must not replace an earlier
+        // attempt's salvage. A failed one salvaged nothing of its own: `onEnd`
+        // keeps the salvage on the overlay, and recording the empty attempt
+        // instead wrote the card the user read as `'cancelled'` with no bullets.
+        // A cancelled one still marks the entry `'cancelled'`, and keeps the
+        // bullets shown before the cancel, as a cancelled single attempt does.
+        // A stale generation keeps its salvage too, because its entry records
+        // what was produced rather than what was shown (TASK-062).
+        const salvage = settled.outcome;
+        if (outcome.bullets.length > 0 || salvage === null || salvage.bullets.length === 0) {
+          settled.outcome = outcome;
+          settled.choice = bound.choice;
+        } else if (turn.signal.aborted) {
+          settled.outcome = { ...salvage, status: 'cancelled' };
+        }
 
         // Accounted per **attempt**, under a key of its own. `noteGeneration`
         // replaces by id, which is right for one request reporting usage twice

@@ -859,6 +859,157 @@ describe('answering a turn', () => {
     await loop.stop();
   });
 
+  /**
+   * The transcript half of the same rule (FR-101, ADR-035 Decision 3).
+   *
+   * The overlay keeps an earlier attempt's salvage when a retry fails empty,
+   * and the transcript records what the overlay showed. Recording the last
+   * attempt instead wrote the card the user had just read as `'cancelled'` with
+   * no bullets, under the name of the model that produced nothing.
+   */
+  describe('the transcript entry for a retried generation', () => {
+    function hungUp(): ProviderError {
+      const failure = new Error('the provider hung up') as ProviderError;
+      failure.class = 'server';
+      failure.providerId = 'anthropic';
+      failure.retryable = true;
+      return failure;
+    }
+
+    /** Attempt 1 streams one bullet and fails; every later attempt fails empty. */
+    function salvageThenEmpty(
+      failure: ProviderError,
+      between: (call: number) => void = () => {},
+    ): NonNullable<LiveSessionLoopOptions['generate']> {
+      let call = 0;
+      return (_provider, _request, _signal, events) => {
+        call += 1;
+        between(call);
+        events.onBegin({ generationId: 'g1', cardId: 'card-g1', question: 'q' });
+        if (call === 1) {
+          events.onLine({ generationId: 'g1', cardId: 'card-g1', line: 'one', index: 0 });
+          events.onEnd({ generationId: 'g1', status: 'complete' });
+          return Promise.resolve(outcome({ bullets: ['one'], error: failure }));
+        }
+        events.onEnd({ generationId: 'g1', status: 'cancelled' });
+        return Promise.resolve(outcome({ status: 'cancelled', bullets: [], error: failure }));
+      };
+    }
+
+    it('keeps an earlier attempt’s salvage, under the model that produced it', async () => {
+      const settings = defaultSettings();
+      const { primary } = settings.providers.llm;
+      const backup: ProviderChoice = { providerId: 'openai', modelId: 'gpt-4o-mini' };
+
+      const { loop, messages, appended } = makeLoop({
+        settings: { providers: { ...settings.providers, llm: { primary, backup } } },
+        runFor: async (_capability, fn) => {
+          try {
+            return await fn('primary');
+          } catch {
+            return await fn('backup');
+          }
+        },
+        generate: salvageThenEmpty(hungUp()),
+      });
+      await loop.start(PROFILE_ID);
+
+      loop.onFire(turn());
+      await loop.whenSettled();
+
+      // The overlay kept the salvage, and the transcript records the same card.
+      expect(messages.at(-1)).toEqual({
+        channel: 'suggestion:end',
+        payload: { generationId: 'g1', status: 'complete' },
+      });
+      expect(appended).toEqual([
+        {
+          forQuestion: turn().question,
+          bullets: ['one'],
+          model: primary.modelId,
+          providerId: primary.providerId,
+          status: 'complete',
+        },
+      ]);
+
+      await loop.stop();
+    });
+
+    /**
+     * A cancelled single attempt keeps the bullets it showed, because
+     * `runGeneration` returns them with `'cancelled'`. A cancelled retry that
+     * showed nothing of its own keeps the salvage the overlay showed instead.
+     */
+    it('marks a superseded salvage cancelled and keeps its bullets', async () => {
+      const controller = new AbortController();
+      const { loop, messages, appended } = makeLoop({
+        runFor: async (_capability, fn) => {
+          try {
+            return await fn('primary');
+          } catch {
+            return await fn('primary');
+          }
+        },
+        // The newer turn arrives while the retry is in flight.
+        generate: salvageThenEmpty(hungUp(), (call) => {
+          if (call === 2) controller.abort();
+        }),
+      });
+      await loop.start(PROFILE_ID);
+
+      loop.onFire(turn({ signal: controller.signal }));
+      await loop.whenSettled();
+
+      // FR-054 removed the card from the overlay, and the entry says why.
+      expect(messages.at(-1)).toEqual({
+        channel: 'suggestion:end',
+        payload: { generationId: 'g1', status: 'cancelled' },
+      });
+      expect(appended).toMatchObject([{ status: 'cancelled', bullets: ['one'] }]);
+
+      await loop.stop();
+    });
+
+    it('keeps the salvage in a stale generation’s entry', async () => {
+      const firedAt = 1_000_000;
+      let clock = firedAt;
+      const now = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+      const script = salvageThenEmpty(hungUp());
+
+      const { loop, pushes, appended } = makeLoop({
+        runFor: async (_capability, fn) => {
+          try {
+            return await fn('primary');
+          } catch {
+            return await fn('primary');
+          }
+        },
+        // Attempt 1's begin is inside the budget and its first line is not, so
+        // checkpoint 2 clears the card and nothing more reaches the overlay.
+        generate: (provider, request, signal, events) =>
+          script(provider, request, signal, {
+            ...events,
+            onBegin: (payload) => {
+              events.onBegin(payload);
+              clock = firedAt + STALE_DISCARD_MS + 1;
+            },
+          }),
+      });
+      await loop.start(PROFILE_ID);
+
+      loop.onFire(turn({ firedAt }));
+      await loop.whenSettled();
+
+      expect(pushes).toEqual(['suggestion:begin', 'suggestion:end']);
+      // A stale entry records what the generation produced (TASK-062), and the
+      // empty retry produced nothing that could replace it.
+      expect(appended).toMatchObject([{ status: 'stale', bullets: ['one'] }]);
+
+      await loop.stop();
+      now.mockRestore();
+    });
+  });
+
   it('does nothing for a turn that was already aborted before it was answered', async () => {
     const controller = new AbortController();
     controller.abort();
