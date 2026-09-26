@@ -1008,6 +1008,101 @@ describe('answering a turn', () => {
       await loop.stop();
       now.mockRestore();
     });
+
+    /** The health machine's ladder, reduced to the targets it tries in order. */
+    function ladder(...targets: ('primary' | 'backup')[]): NonNullable<StubOptions['runFor']> {
+      return async (_capability, fn) => {
+        for (const target of targets.slice(0, -1)) {
+          try {
+            return await fn(target);
+          } catch {
+            // The machine moves on to its next target.
+          }
+        }
+        return fn(targets.at(-1) ?? 'primary');
+      };
+    }
+
+    /** One scripted outcome per attempt: the bullets it streams, and whether it then fails. */
+    function scripted(
+      attempts: { lines: string[]; fails: boolean }[],
+    ): NonNullable<LiveSessionLoopOptions['generate']> {
+      let call = 0;
+      return (_provider, _request, _signal, events) => {
+        const { lines, fails } = attempts[call] ?? { lines: [], fails: true };
+        call += 1;
+        events.onBegin({ generationId: 'g1', cardId: 'card-g1', question: 'q' });
+        lines.forEach((line, index) => {
+          events.onLine({ generationId: 'g1', cardId: 'card-g1', line, index });
+        });
+        // `resolveStatus`: a failure with nothing to show is `'cancelled'`, and a
+        // clean stream that never produced a newline is `'nonconforming'`.
+        const status = lines.length > 0 ? 'complete' : fails ? 'cancelled' : 'nonconforming';
+        events.onEnd({ generationId: 'g1', status });
+        return Promise.resolve(outcome({ status, bullets: lines, error: fails ? hungUp() : null }));
+      };
+    }
+
+    it('keeps the salvage across a failover, whichever attempt produced it', async () => {
+      const settings = defaultSettings();
+      const { primary } = settings.providers.llm;
+      const backup: ProviderChoice = { providerId: 'openai', modelId: 'gpt-4o-mini' };
+
+      const { loop, messages, appended } = makeLoop({
+        settings: { providers: { ...settings.providers, llm: { primary, backup } } },
+        runFor: ladder('primary', 'backup', 'backup', 'backup'),
+        // Two empty failures, one on each provider, then a salvage on the
+        // backup, then one more empty failure.
+        generate: scripted([
+          { lines: [], fails: true },
+          { lines: [], fails: true },
+          { lines: ['two'], fails: true },
+          { lines: [], fails: true },
+        ]),
+      });
+      await loop.start(PROFILE_ID);
+
+      loop.onFire(turn());
+      await loop.whenSettled();
+
+      expect(messages.at(-1)).toEqual({
+        channel: 'suggestion:end',
+        payload: { generationId: 'g1', status: 'complete' },
+      });
+      expect(appended).toMatchObject([
+        {
+          bullets: ['two'],
+          model: backup.modelId,
+          providerId: backup.providerId,
+          status: 'complete',
+        },
+      ]);
+
+      await loop.stop();
+    });
+
+    /**
+     * A retry can also succeed with nothing to show. The card keeps the
+     * salvage's lines, so the entry keeps them too, with the status that
+     * describes them rather than the empty stream's `'nonconforming'`.
+     */
+    it('keeps the salvage when a clean retry produces nothing', async () => {
+      const { loop, appended } = makeLoop({
+        runFor: ladder('primary', 'primary'),
+        generate: scripted([
+          { lines: ['one'], fails: true },
+          { lines: [], fails: false },
+        ]),
+      });
+      await loop.start(PROFILE_ID);
+
+      loop.onFire(turn());
+      await loop.whenSettled();
+
+      expect(appended).toMatchObject([{ bullets: ['one'], status: 'complete' }]);
+
+      await loop.stop();
+    });
   });
 
   it('does nothing for a turn that was already aborted before it was answered', async () => {
