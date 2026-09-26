@@ -95,7 +95,7 @@ const sttCatalog = z.object({
       providerId: z.string(),
       displayName: z.string(),
       source: z.enum(['account', 'fallback']),
-      state: z.enum(['ready', 'stale', 'missing-key', 'fallback', 'error']),
+      state: z.enum(['ready', 'stale', 'missing-key', 'fallback']),
       lastSuccessfulRefresh: z.string().nullable(),
       models: z.array(sttCatalogModel),
       message: z.string().optional(),

@@ -64,11 +64,17 @@ export interface SttModelDescriptor {
   badge?: string;
 }
 
+/** One provider's entry in `CH-129`'s speech-to-text catalog (FR-116, FR-117). */
 export interface SttCatalogProvider {
   providerId: string;
   displayName: string;
   source: 'account' | 'fallback';
-  state: 'ready' | 'stale' | 'missing-key' | 'fallback' | 'error';
+  /**
+   * There is no error state. A failed discovery keeps the last-known-good
+   * catalog as `stale`, or the shipped one as `fallback`, and says why in
+   * `message` (FR-117, ADR-051).
+   */
+  state: 'ready' | 'stale' | 'missing-key' | 'fallback';
   lastSuccessfulRefresh: string | null;
   models: SttModelDescriptor[];
   message?: string;
