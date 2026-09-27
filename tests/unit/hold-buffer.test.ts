@@ -37,6 +37,32 @@ describe('TC-174 through TC-177 and TC-186 hold buffer', () => {
     expect(seen).toEqual([begin('one'), begin('two'), line('two')]);
   });
 
+  /**
+   * ADR-053. A retry's answer replaces a salvaged card with a card of its own,
+   * for the same generation. That card is newly visible, so FR-115's hold runs
+   * from when it appeared, not from when the salvage did.
+   */
+  it('restarts the hold when the shown generation replaces its own card', () => {
+    vi.useFakeTimers();
+    const seen: CardEvent[] = [];
+    const buffer = new HoldBuffer((event) => seen.push(event), { minHoldMs: 1500 });
+    const replacement: CardEvent = {
+      kind: 'begin',
+      payload: { generationId: 'one', cardId: 'card-one#2', question: 'one' },
+    };
+    buffer.onEvent(begin('one'));
+    vi.advanceTimersByTime(2000);
+    // The shown generation's own event, so it goes through at once.
+    buffer.onEvent(replacement);
+    expect(seen).toEqual([begin('one'), replacement]);
+    vi.advanceTimersByTime(100);
+    buffer.onEvent(begin('two'));
+    // Held: the replacement has been visible for 100 ms, not 2100.
+    expect(seen).toEqual([begin('one'), replacement]);
+    vi.advanceTimersByTime(1400);
+    expect(seen).toEqual([begin('one'), replacement, begin('two')]);
+  });
+
   it('dispatches own events, and drops cancelled or superseded queued cards', () => {
     vi.useFakeTimers();
     const seen: CardEvent[] = [];

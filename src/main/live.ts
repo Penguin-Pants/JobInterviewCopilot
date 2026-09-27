@@ -37,6 +37,7 @@ import { classifyWithLlm, type ActionabilityVerdict } from './ai/actionability.j
 import {
   requireLlmProvider,
   runGeneration,
+  type GenerationEvents,
   type GenerationOutcome,
   type LlmProvider,
 } from './ai/llm.js';
@@ -722,10 +723,17 @@ export class LiveSessionLoop {
      * the card and the salvage with it (FR-004, ADR-036, ADR-047).
      */
     let linesShown = false;
+    /** How many attempts have begun, which names a replacement card (ADR-053). */
+    let attemptsBegun = 0;
 
     try {
       await this.options.health.runFor('llm', async (target) => {
         const bound = this.targetFor(target, primary, backup, 'language model');
+        /** This attempt's begin, held back because a card was already up. */
+        let heldBegin: Parameters<GenerationEvents['onBegin']>[0] | null = null;
+        /** The card this attempt's lines go to, once it has replaced a salvage. */
+        let cardId: string | null = null;
+        let linesThisAttempt = false;
 
         const outcome = await this.generate(
           bound.provider,
@@ -747,18 +755,23 @@ export class LiveSessionLoop {
               // of every one. What it does here turns on whether a card is
               // still on the overlay.
               //
-              // Card still up: the retry's begin is a duplicate, so it is
-              // dropped and checkpoint 1 is not re-run. Re-running the clock
-              // stranded a card once -- a retry past the threshold marked the
-              // whole generation stale, which suppressed the real `onEnd` while
-              // the cancellation that clears a card lives in `onLine` alone.
-              // An already-begun generation is checkpoint 2's to catch.
+              // Card still up: the retry's begin is held back, and checkpoint 1
+              // is not re-run. Re-running the clock stranded a card once -- a
+              // retry past the threshold marked the whole generation stale,
+              // which suppressed the real `onEnd` while the cancellation that
+              // clears a card lives in `onLine` alone. An already-begun
+              // generation is checkpoint 2's to catch. The held begin is sent
+              // only if this attempt produces a bullet (`onLine`).
               //
               // Card gone, because an empty failed attempt resolved
               // `'cancelled'` and `reduceCards` removed it: this begin is the
               // one that puts the retry's answer back on screen, so it is a
               // first begin in every sense and checkpoint 1 applies to it.
-              if (cardUp) return;
+              attemptsBegun += 1;
+              if (cardUp) {
+                heldBegin = payload;
+                return;
+              }
               if (Date.now() - turn.firedAt > STALE_DISCARD_MS) {
                 stale = true;
                 return;
@@ -783,8 +796,27 @@ export class LiveSessionLoop {
                   return;
                 }
               }
+              // A retry's first bullet, with an earlier attempt's salvage on
+              // screen: the retry's answer replaces the salvage on a card of
+              // its own. Its lines restart at index 0, and `reduceCards` keeps
+              // a card's first line for an index, so sent to the salvaged card
+              // they merged two answers into one. A begin for a new `cardId`
+              // replaces the held card in one commit (`ADR-047`, ADR-053). Only
+              // here and not at the begin: a retry that fails with nothing to
+              // show keeps the salvage (ADR-052).
+              if (!linesThisAttempt && heldBegin !== null && linesShown) {
+                cardId = `${heldBegin.cardId}#${String(attemptsBegun)}`;
+                this.options.onSuggestion({
+                  channel: 'suggestion:begin',
+                  payload: { ...heldBegin, cardId },
+                });
+              }
+              linesThisAttempt = true;
               linesShown = true;
-              this.options.onSuggestion({ channel: 'suggestion:line', payload });
+              this.options.onSuggestion({
+                channel: 'suggestion:line',
+                payload: cardId === null ? payload : { ...payload, cardId },
+              });
             },
             onEnd: (payload) => {
               if (stale || staleEndSent) return;
