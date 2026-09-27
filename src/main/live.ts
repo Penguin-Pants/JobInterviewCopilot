@@ -35,6 +35,7 @@ import type { AudioSupervisor } from './audio.js';
 import type { ProviderHealthRegistry } from './ai/health.js';
 import { classifyWithLlm, type ActionabilityVerdict } from './ai/actionability.js';
 import {
+  buildMessages,
   requireLlmProvider,
   runGeneration,
   type GenerationEvents,
@@ -689,6 +690,27 @@ export class LiveSessionLoop {
 
     if (!primary) {
       this.options.onError('no usable language model is configured, so this turn is not answered');
+      return;
+    }
+
+    // The prompt is assembled outside the health machine too, for the reason
+    // the targets are (ADR-035): `runFor` must see only what a provider did.
+    // Each adapter builds it inside `generate`, so a chunk it cannot render
+    // reached the machine as a retryable failure and spent the retry ladder
+    // against a healthy key. It is a fault in the notes, so the turn is
+    // abandoned the way a failed retrieval is. The adapters build the same
+    // messages from the same inputs, so once this passes, theirs cannot throw.
+    try {
+      buildMessages({
+        generationId: turn.generationId,
+        question: turn.question,
+        candidateContext: turn.candidateContext,
+        chunks,
+        choice: primary.choice,
+        systemPrompt: this.systemPrompt ?? undefined,
+      });
+    } catch (err) {
+      this.options.onError('the prompt could not be assembled, so this turn is not answered', err);
       return;
     }
 

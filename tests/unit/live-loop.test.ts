@@ -547,6 +547,55 @@ describe('a backup the health machine believes in but the loop cannot use', () =
 });
 
 describe('answering a turn', () => {
+  /**
+   * A chunk the prompt cannot render is a fault in the notes, not in the
+   * provider. `buildMessages` ran inside the adapter's `generate`, so the throw
+   * reached the health machine as a retryable failure and spent the whole
+   * retry ladder against a healthy key. It is assembled outside the machine
+   * now, and the turn is abandoned the way a failed retrieval is (ADR-035).
+   */
+  it('abandons the turn when the prompt cannot be assembled, without a provider call', async () => {
+    const broken = {
+      chunk: {
+        id: 'c1',
+        docId: 'd1',
+        profileId: PROFILE_ID,
+        index: 0,
+        text: 'shipped the thing',
+        headerPath: null as unknown as string[],
+        docType: 'resume' as const,
+        sourceFile: 'resume.md',
+        tokenCount: 3,
+      },
+      score: 0.9,
+    };
+    let llmRuns = 0;
+    const generate = vi.fn(() => Promise.resolve(outcome()));
+    const { loop, errors, settled, appended } = makeLoop({
+      retrieve: () => Promise.resolve([broken]),
+      runFor: (capability, fn) => {
+        if (capability === 'llm') llmRuns += 1;
+        return fn('primary');
+      },
+      generate,
+    });
+    await loop.start(PROFILE_ID);
+
+    loop.onFire(turn());
+    await loop.whenSettled();
+
+    // Nothing reached the health machine, so a healthy key is not blamed.
+    expect(llmRuns).toBe(0);
+    expect(generate).not.toHaveBeenCalled();
+    expect(errors.map((e) => e.message)).toEqual([
+      'the prompt could not be assembled, so this turn is not answered',
+    ]);
+    expect(appended).toEqual([]);
+    // The machine is freed, or the next question would never fire.
+    expect(settled).toEqual(['g1']);
+    await loop.stop();
+  });
+
   it('abandons the turn when no language model is usable, and says so', async () => {
     const { loop, errors, settled } = makeLoop({
       resolveLlmProvider: () => {
