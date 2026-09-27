@@ -15,6 +15,7 @@
 import { useEffect, useState, type JSX } from 'react';
 import type { Settings } from '../../../shared/types.js';
 import { call } from '../call.js';
+import { useInFlight } from '../inFlight.js';
 import type { SessionState, UsageState } from '../state.js';
 
 export interface CostAndUsageProps {
@@ -34,6 +35,7 @@ export function CostAndUsage({
   const [timeMinutes, setTimeMinutes] = useState(String(settings.thresholds.timeMinutes));
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const saving = useInFlight();
 
   useEffect(() => {
     setCostUsd(String(settings.thresholds.costUsd));
@@ -116,7 +118,12 @@ export function CostAndUsage({
         value={timeMinutes}
         onChange={(e) => setTimeMinutes(e.target.value)}
       />
-      <button type="button" data-testid="save-thresholds" onClick={() => void saveThresholds()}>
+      <button
+        type="button"
+        data-testid="save-thresholds"
+        disabled={saving.busy}
+        onClick={() => void saving.run(saveThresholds)}
+      >
         Save thresholds
       </button>
       {saved ? <span data-testid="thresholds-saved">Saved</span> : null}

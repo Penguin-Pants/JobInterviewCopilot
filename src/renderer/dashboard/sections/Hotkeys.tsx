@@ -9,6 +9,7 @@
 import { useEffect, useRef, useState, type JSX, type KeyboardEvent } from 'react';
 import type { Settings } from '../../../shared/types.js';
 import { call } from '../call.js';
+import { useInFlight } from '../inFlight.js';
 
 type Action = 'toggleInteraction' | 'togglePause';
 
@@ -54,6 +55,9 @@ export function Hotkeys({ settings, onSettingsChanged }: HotkeysProps): JSX.Elem
   const [draft, setDraft] = useState(settings.hotkeys);
   const [errors, setErrors] = useState<Partial<Record<Action, string>>>({});
   const [applied, setApplied] = useState<Partial<Record<Action, boolean>>>({});
+  // One gate for both actions. They share the draft and the reload after a
+  // rebind, and nothing needs two rebinds in flight at once.
+  const applying = useInFlight();
 
   // Keyed on the value. `config:get` answers with a fresh object every time, so
   // depending on the object identity threw away a captured but unapplied
@@ -135,7 +139,8 @@ export function Hotkeys({ settings, onSettingsChanged }: HotkeysProps): JSX.Elem
             <button
               type="button"
               data-testid={`hotkey-apply-${action}`}
-              onClick={() => void apply(action)}
+              disabled={applying.busy}
+              onClick={() => void applying.run(() => apply(action))}
             >
               Apply
             </button>

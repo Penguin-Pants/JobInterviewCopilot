@@ -26,6 +26,7 @@ import type {
   SttCatalogSnapshot,
 } from '../../../shared/types.js';
 import { call, type CallResult } from '../call.js';
+import { useInFlight } from '../inFlight.js';
 import type { ProvidersState } from '../state.js';
 
 type Slot = 'stt-primary' | 'stt-backup' | 'llm-primary' | 'llm-backup';
@@ -355,6 +356,7 @@ export function ProviderSetup({
   }));
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const saving = useInFlight();
   const [keys, setKeys] = useState<Record<string, string>>({});
   const [keyStates, setKeyStates] = useState<Record<string, KeyState>>({});
   const [llmCatalog, setLlmCatalog] = useState<LlmCatalogProvider[] | null>(null);
@@ -722,8 +724,8 @@ export function ProviderSetup({
       <button
         type="button"
         data-testid="save-providers"
-        disabled={blocked}
-        onClick={() => void save()}
+        disabled={blocked || saving.busy}
+        onClick={() => void saving.run(save)}
       >
         Save provider and model settings
       </button>

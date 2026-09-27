@@ -1220,3 +1220,61 @@ describe('TASK-042 the main-process half of the Dashboard', () => {
     expect(body).not.toMatch(/extensions: \['/);
   });
 });
+
+/**
+ * TASK-050, carried rows fixed in the follow-up sweep. `dashboard-actions.test.ts`
+ * asserts the gate and the drag rule. These pin that the components call them,
+ * which no test in this suite can drive: the Dashboard has no DOM here.
+ */
+describe('TASK-050 Dashboard actions run one at a time', () => {
+  const sections = join(process.cwd(), 'src', 'renderer', 'dashboard', 'sections');
+  const read = (file: string): string => readFileSync(join(sections, file), 'utf8');
+
+  /** The JSX element that carries `marker`, from its opening tag to its closing tag. */
+  function element(text: string, tag: string, marker: string): string {
+    const at = text.indexOf(marker);
+    expect(at, `${marker} is not rendered`).toBeGreaterThan(-1);
+    const start = text.lastIndexOf(`<${tag}`, at);
+    const end = text.indexOf(`</${tag}>`, at);
+    return text.slice(start, end);
+  }
+
+  const guarded: { file: string; tag: string; marker: string; gate: string }[] = [
+    { file: 'CostAndUsage.tsx', tag: 'button', marker: '"save-thresholds"', gate: 'saving' },
+    { file: 'Hotkeys.tsx', tag: 'button', marker: '`hotkey-apply-', gate: 'applying' },
+    { file: 'ProviderSetup.tsx', tag: 'button', marker: '"save-providers"', gate: 'saving' },
+    { file: 'CompanyProfiles.tsx', tag: 'button', marker: '`document-retry-', gate: 'acting' },
+    { file: 'CompanyProfiles.tsx', tag: 'button', marker: '`document-delete-', gate: 'acting' },
+    { file: 'CompanyProfiles.tsx', tag: 'select', marker: '`document-type-', gate: 'acting' },
+  ];
+
+  for (const { file, tag, marker, gate } of guarded) {
+    it(`disables ${marker.replace(/["`]/g, '')} while its action is in flight`, () => {
+      const text = read(file);
+      expect(text).toContain(`const ${gate} = useInFlight();`);
+      expect(element(text, tag, marker)).toMatch(new RegExp(`disabled=\\{[^}]*${gate}\\.busy`));
+    });
+  }
+
+  it('sends each guarded action through the gate, not around it', () => {
+    expect(element(read('CostAndUsage.tsx'), 'button', '"save-thresholds"')).toContain(
+      'saving.run(saveThresholds)',
+    );
+    expect(element(read('Hotkeys.tsx'), 'button', '`hotkey-apply-')).toContain(
+      'applying.run(() => apply(action))',
+    );
+    expect(element(read('ProviderSetup.tsx'), 'button', '"save-providers"')).toContain(
+      'saving.run(save)',
+    );
+    // A document row's three controls all call `run`, so the gate sits there.
+    const profiles = read('CompanyProfiles.tsx');
+    const run = profiles.slice(profiles.indexOf('const run = <C extends'));
+    expect(run.slice(0, run.indexOf('\n  };\n'))).toContain('void acting.run(async () => {');
+  });
+
+  it('ends the drop highlight only when the drag has left the zone', () => {
+    const zone = element(read('CompanyProfiles.tsx'), 'div', '"drop-zone"');
+    expect(zone).toContain('dragLeftZone(e.currentTarget, e.relatedTarget)');
+    expect(zone).not.toContain('onDragLeave={() => setDropTarget(false)}');
+  });
+});

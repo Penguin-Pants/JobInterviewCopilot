@@ -12,6 +12,7 @@ import { DEFAULT_PROMPT_ID, DEFAULT_PROMPT_NAME, promptName } from '../../../sha
 import type { DocType, DocumentRecord, Profile, Settings } from '../../../shared/types.js';
 import { call } from '../call.js';
 import { formatBytes } from '../format.js';
+import { useInFlight } from '../inFlight.js';
 import type { DocProgress, ModelState, SessionState } from '../state.js';
 
 const DOC_TYPES: { value: DocType | 'auto'; label: string }[] = [
@@ -361,7 +362,9 @@ export function CompanyProfiles({
           e.preventDefault();
           setDropTarget(true);
         }}
-        onDragLeave={() => setDropTarget(false)}
+        onDragLeave={(e) => {
+          if (dragLeftZone(e.currentTarget, e.relatedTarget)) setDropTarget(false);
+        }}
         onDrop={onDrop}
       >
         <p>Drag Markdown, PDF or Word files here to add them to this profile.</p>
@@ -451,6 +454,19 @@ function ModelGate({ model }: { model: ModelState | null }): JSX.Element | null 
   );
 }
 
+/**
+ * Whether a `dragleave` on the drop zone means the drag has left it (TASK-050,
+ * ADR-037).
+ *
+ * `dragleave` also fires on the zone when the pointer crosses onto one of its
+ * own children, with that child as `relatedTarget`. Clearing the highlight on
+ * every one made it flicker off until the next `dragover` put it back. A drag
+ * that leaves the window has no `relatedTarget`, and that is leaving.
+ */
+export function dragLeftZone(zone: Pick<Node, 'contains'>, next: EventTarget | null): boolean {
+  return next === null || !zone.contains(next as Node);
+}
+
 function DocumentRow({
   doc,
   progress,
@@ -461,19 +477,25 @@ function DocumentRow({
   onChanged: () => Promise<void>;
 }): JSX.Element {
   const [error, setError] = useState<string | null>(null);
+  const acting = useInFlight();
   const state = progress?.state ?? doc.state;
 
   /**
    * Every document action answers the same way: reload on success, show the
    * reason on failure. Written once, because three copies of the same
    * `.then` block is three places for the error branch to be dropped from.
+   *
+   * One action at a time per row, behind the Dashboard's in-flight gate. A fast
+   * second click on Try again queued a second conversion pass behind the first,
+   * and one on Remove document sent a delete for a row that was already gone.
    */
   const run = <C extends 'doc:setType' | 'doc:retry' | 'doc:delete'>(
     channel: C,
     payload: Parameters<typeof call<C>>[1],
   ): void => {
-    setError(null);
-    void call(channel, payload).then(async (result) => {
+    void acting.run(async () => {
+      setError(null);
+      const result = await call(channel, payload);
       if (!result.ok) setError(result.message);
       else await onChanged();
     });
@@ -501,6 +523,7 @@ function DocumentRow({
         id={`doc-type-${doc.id}`}
         data-testid={`document-type-${doc.id}`}
         value={doc.docTypeSource === 'user' ? doc.docType : 'auto'}
+        disabled={acting.busy}
         onChange={(e) =>
           run('doc:setType', {
             docId: doc.id,
@@ -525,6 +548,7 @@ function DocumentRow({
           <button
             type="button"
             data-testid={`document-retry-${doc.id}`}
+            disabled={acting.busy}
             onClick={() => run('doc:retry', { docId: doc.id, profileId: doc.profileId })}
           >
             Try again
@@ -535,6 +559,7 @@ function DocumentRow({
       <button
         type="button"
         data-testid={`document-delete-${doc.id}`}
+        disabled={acting.busy}
         onClick={() => run('doc:delete', { docId: doc.id, profileId: doc.profileId })}
       >
         Remove document
