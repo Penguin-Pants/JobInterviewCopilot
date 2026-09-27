@@ -121,7 +121,7 @@ export function CostAndUsage({
       <button
         type="button"
         data-testid="save-thresholds"
-        disabled={saving.busy}
+        aria-disabled={saving.busy || undefined}
         onClick={() => void saving.run(saveThresholds)}
       >
         Save thresholds

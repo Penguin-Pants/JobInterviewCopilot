@@ -139,7 +139,7 @@ export function Hotkeys({ settings, onSettingsChanged }: HotkeysProps): JSX.Elem
             <button
               type="button"
               data-testid={`hotkey-apply-${action}`}
-              disabled={applying.busy}
+              aria-disabled={applying.busy || undefined}
               onClick={() => void applying.run(() => apply(action))}
             >
               Apply

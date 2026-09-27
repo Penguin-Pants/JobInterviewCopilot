@@ -724,7 +724,8 @@ export function ProviderSetup({
       <button
         type="button"
         data-testid="save-providers"
-        disabled={blocked || saving.busy}
+        disabled={blocked}
+        aria-disabled={saving.busy || undefined}
         onClick={() => void saving.run(save)}
       >
         Save provider and model settings

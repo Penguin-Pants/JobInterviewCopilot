@@ -9,9 +9,12 @@
  * `doc:retry` or `doc:delete` twice. This is the one convention those buttons
  * share, rather than a flag of their own in each section.
  *
- * The gate refuses a second run synchronously, so it holds even before the
- * re-render that disables the control has landed. `busy` is what the control
- * binds to `disabled`, so the refusal is also visible.
+ * The gate refuses a second run synchronously, so the control needs no native
+ * `disabled` to be safe. It binds `busy` to `aria-disabled` instead, because
+ * Chromium moves focus off a focused control that becomes `disabled` and does
+ * not give it back: a keyboard user who pressed Enter on Save lost their place
+ * for good (NFR-010). `aria-disabled` keeps the focus, is announced as
+ * unavailable, and is styled like `disabled` in `styles.css`.
  */
 import { useState } from 'react';
 
@@ -42,7 +45,11 @@ export function createInFlightGate(onBusyChange: (busy: boolean) => void): InFli
 }
 
 export interface InFlight {
-  /** True while an action runs. Bind it to the control's `disabled`. */
+  /**
+   * True while an action runs. Bind it as `aria-disabled={busy || undefined}`,
+   * never to `disabled`, so the attribute is absent at rest and cannot
+   * contradict a native `disabled` the control has for another reason.
+   */
   busy: boolean;
   run: InFlightRun;
 }

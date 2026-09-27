@@ -78,18 +78,18 @@ describe('an action button runs its action once per intent (FR-030, FR-079, FR-0
     expect(next).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps separate gates apart, so one document row does not lock another', async () => {
-    const rowA = createInFlightGate(() => undefined);
-    const rowB = createInFlightGate(() => undefined);
-    const pendingA = deferred();
-    const actionB = vi.fn(async () => undefined);
+  it('keeps separate gates apart, so a long retry does not lock Remove document', async () => {
+    const retrying = createInFlightGate(() => undefined);
+    const removing = createInFlightGate(() => undefined);
+    const retry = deferred();
+    const remove = vi.fn(async () => undefined);
 
-    const a = rowA(() => pendingA.promise);
-    await rowB(actionB);
-    expect(actionB).toHaveBeenCalledTimes(1);
+    const pending = retrying(() => retry.promise);
+    await removing(remove);
+    expect(remove).toHaveBeenCalledTimes(1);
 
-    pendingA.resolve();
-    await a;
+    retry.resolve();
+    await pending;
   });
 });
 

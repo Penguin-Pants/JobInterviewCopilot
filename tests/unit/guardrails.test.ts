@@ -1227,8 +1227,8 @@ describe('TASK-042 the main-process half of the Dashboard', () => {
  * which no test in this suite can drive: the Dashboard has no DOM here.
  */
 describe('TASK-050 Dashboard actions run one at a time', () => {
-  const sections = join(process.cwd(), 'src', 'renderer', 'dashboard', 'sections');
-  const read = (file: string): string => readFileSync(join(sections, file), 'utf8');
+  const dashboard = join(process.cwd(), 'src', 'renderer', 'dashboard');
+  const read = (file: string): string => readFileSync(join(dashboard, 'sections', file), 'utf8');
 
   /** The JSX element that carries `marker`, from its opening tag to its closing tag. */
   function element(text: string, tag: string, marker: string): string {
@@ -1239,37 +1239,69 @@ describe('TASK-050 Dashboard actions run one at a time', () => {
     return text.slice(start, end);
   }
 
-  const guarded: { file: string; tag: string; marker: string; gate: string }[] = [
-    { file: 'CostAndUsage.tsx', tag: 'button', marker: '"save-thresholds"', gate: 'saving' },
-    { file: 'Hotkeys.tsx', tag: 'button', marker: '`hotkey-apply-', gate: 'applying' },
-    { file: 'ProviderSetup.tsx', tag: 'button', marker: '"save-providers"', gate: 'saving' },
-    { file: 'CompanyProfiles.tsx', tag: 'button', marker: '`document-retry-', gate: 'acting' },
-    { file: 'CompanyProfiles.tsx', tag: 'button', marker: '`document-delete-', gate: 'acting' },
-    { file: 'CompanyProfiles.tsx', tag: 'select', marker: '`document-type-', gate: 'acting' },
+  const guarded: { file: string; marker: string; gate: string; runs: string }[] = [
+    {
+      file: 'CostAndUsage.tsx',
+      marker: '"save-thresholds"',
+      gate: 'saving',
+      runs: 'saving.run(saveThresholds)',
+    },
+    {
+      file: 'Hotkeys.tsx',
+      marker: '`hotkey-apply-',
+      gate: 'applying',
+      runs: 'applying.run(() => apply(action))',
+    },
+    {
+      file: 'ProviderSetup.tsx',
+      marker: '"save-providers"',
+      gate: 'saving',
+      runs: 'saving.run(save)',
+    },
+    {
+      file: 'CompanyProfiles.tsx',
+      marker: '`document-retry-',
+      gate: 'retrying',
+      runs: "retrying.run(() => run('doc:retry'",
+    },
+    {
+      file: 'CompanyProfiles.tsx',
+      marker: '`document-delete-',
+      gate: 'removing',
+      runs: "removing.run(() => run('doc:delete'",
+    },
   ];
 
-  for (const { file, tag, marker, gate } of guarded) {
-    it(`disables ${marker.replace(/["`]/g, '')} while its action is in flight`, () => {
+  for (const { file, marker, gate, runs } of guarded) {
+    const name = marker.replace(/["`]/g, '');
+
+    it(`runs ${name} through its gate`, () => {
       const text = read(file);
       expect(text).toContain(`const ${gate} = useInFlight();`);
-      expect(element(text, tag, marker)).toMatch(new RegExp(`disabled=\\{[^}]*${gate}\\.busy`));
+      expect(element(text, 'button', marker)).toContain(runs);
+    });
+
+    /**
+     * Not `disabled`: Chromium moves focus off a focused control that becomes
+     * disabled and does not give it back, so a keyboard user who pressed Enter
+     * lost their place (NFR-010). The gate refuses the second run by itself.
+     */
+    it(`marks ${name} busy with aria-disabled, which keeps keyboard focus`, () => {
+      const button = element(read(file), 'button', marker);
+      expect(button).toContain(`aria-disabled={${gate}.busy || undefined}`);
+      expect(button).not.toMatch(/(?<!aria-)disabled=\{[^}]*busy/);
     });
   }
 
-  it('sends each guarded action through the gate, not around it', () => {
-    expect(element(read('CostAndUsage.tsx'), 'button', '"save-thresholds"')).toContain(
-      'saving.run(saveThresholds)',
-    );
-    expect(element(read('Hotkeys.tsx'), 'button', '`hotkey-apply-')).toContain(
-      'applying.run(() => apply(action))',
-    );
-    expect(element(read('ProviderSetup.tsx'), 'button', '"save-providers"')).toContain(
-      'saving.run(save)',
-    );
-    // A document row's three controls all call `run`, so the gate sits there.
-    const profiles = read('CompanyProfiles.tsx');
-    const run = profiles.slice(profiles.indexOf('const run = <C extends'));
-    expect(run.slice(0, run.indexOf('\n  };\n'))).toContain('void acting.run(async () => {');
+  it('leaves the document type select ungated, as each change is a new intent', () => {
+    const select = element(read('CompanyProfiles.tsx'), 'select', '`document-type-');
+    expect(select).not.toMatch(/disabled=|\.run\(/);
+  });
+
+  it('styles a busy button like a disabled one', () => {
+    const css = readFileSync(join(dashboard, 'styles.css'), 'utf8');
+    expect(css).toMatch(/button:disabled,\s*button\[aria-disabled='true'\] \{/);
+    expect(css).toContain("button:hover:not(:disabled, [aria-disabled='true'])");
   });
 
   it('ends the drop highlight only when the drag has left the zone', () => {

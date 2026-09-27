@@ -250,7 +250,7 @@ button {
     background-color var(--motion-fast) ease-out;
 }
 
-button:hover:not(:disabled) {
+button:hover:not(:disabled, [aria-disabled='true']) {
   border-color: var(--accent);
 }
 
@@ -260,7 +260,10 @@ button.secondary-button {
   color: var(--text);
 }
 
-button:disabled {
+/* `aria-disabled` is how an action in flight refuses a second click while
+   keeping keyboard focus on the button (`inFlight.ts`). It looks the same. */
+button:disabled,
+button[aria-disabled='true'] {
   cursor: not-allowed;
   filter: grayscale(0.7);
   opacity: 0.55;
