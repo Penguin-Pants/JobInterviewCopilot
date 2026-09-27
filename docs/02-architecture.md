@@ -500,7 +500,9 @@ constant this module exports any more — the cap of 1 is load-bearing, not a
 configured value (`TASK-063`). A `'begin'` event for a new `cardId` replaces
 whatever card is held; `depthOpacity` and every multi-card branch this module
 and `SuggestionCardView` (11) once carried are deleted, not defaulted to a cap
-of 1. A `'reset'` event (a session boundary) empties the held card. The
+of 1. A generation's first card is `card-<generationId>`. A retry that replaces
+a salvage sends a card of its own, `card-<generationId>#<attempt>`, at its first
+bullet (`ADR-053`). A `'reset'` event (a session boundary) empties the held card. The
 overlay renders the card without `AnimatePresence`, so a card has an entrance
 and no exit transition: a replacement unmounts the old card in the same commit
 that mounts the new one, and two cards are never in the DOM at once (`TC-111`).
@@ -1867,7 +1869,9 @@ overlay showed: the last attempt's, except that an attempt which produced no
 bullet does not replace an earlier attempt's salvage. A failed one leaves the
 salvage as it was, which the overlay also keeps; a cancelled one marks it
 `'cancelled'`, as a cancelled single attempt keeps the bullets it showed. The
-entry's model is the one whose bullets it records (ADR-035, ADR-052).
+entry's model is the one whose bullets it records (ADR-035, ADR-052). A
+retry that does produce bullets replaces the salvage on the overlay with a card
+of its own (ADR-053), so the overlay and the transcript show the same answer.
 
 **Audio seconds are read from the adapter, not from the chunk handed to it**
 (ADR-036). `SocketSttSession` drops queued chunks during an outage rather than
