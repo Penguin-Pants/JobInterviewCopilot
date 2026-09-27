@@ -8,7 +8,7 @@ import {
   type InvokePayload,
   type InvokeResponse,
 } from '../../src/shared/ipc.js';
-import type { Settings } from '../../src/shared/types.js';
+import type { Settings, SttCatalogProvider } from '../../src/shared/types.js';
 
 /** TC-002: a payload failing its schema is rejected, not forwarded. */
 describe('TC-002 payload validation', () => {
@@ -64,6 +64,30 @@ describe('TC-003 contract types', () => {
     expectTypeOf<InvokePayload<'overlay:setInteractive'>>().toEqualTypeOf<{
       interactive: boolean;
     }>();
+  });
+
+  /**
+   * The schema and the shared type declare the STT catalog's states apart, so
+   * one could keep a state the other drops. `'error'` was declared on both and
+   * produced by neither (ADR-051).
+   */
+  it('the STT catalog schema and its type agree on the states', () => {
+    expectTypeOf<InvokeResponse<'catalog:stt'>['providers'][number]['state']>().toEqualTypeOf<
+      SttCatalogProvider['state']
+    >();
+    const provider = {
+      providerId: 'openai',
+      displayName: 'OpenAI',
+      source: 'fallback',
+      state: 'error',
+      lastSuccessfulRefresh: null,
+      models: [],
+    };
+    const parse = (state: string) =>
+      invokeChannels['catalog:stt'].response.safeParse({ providers: [{ ...provider, state }] })
+        .success;
+    expect(parse('fallback')).toBe(true);
+    expect(parse('error')).toBe(false);
   });
 
   it('the settings schema and the Settings type agree on shape', () => {

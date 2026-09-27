@@ -1514,14 +1514,14 @@ were confirmed by the code and fixed; the rest are carried below.
 
 | Item | Why it is not done here | Owner |
 |---|---|---|
-| `FR-025` is enforced in the Dashboard only. `config:set` still accepts a backup from the primary's provider | `FR-025` says the Dashboard must prevent the selection, which it does, and `TC-121` proves it. A second check in `config:set` is defense in depth against a renderer that is already compromised, which is the resilience task's subject | TASK-050 |
+| ~~`FR-025` is enforced in the Dashboard only. `config:set` still accepts a backup from the primary's provider~~ **Closed 2026-09-26: never true.** `ConfigStore.set` has called `assertBackupDiffersFromPrimary` since Milestone 0, so `config:set` refuses the selection, and `TC-025`'s "is enforced at the config layer, not only in the UI" proves it | `FR-025` says the Dashboard must prevent the selection, which it does, and `TC-121` proves it. A second check in `config:set` is defense in depth against a renderer that is already compromised, which is the resilience task's subject | TASK-050 |
 | ~~`FR-089`'s "on Windows 10 the acrylic option must be disabled in the Dashboard with an explanatory note"~~ **Closed in TASK-043**, which added `CH-216 notice:platform` to carry `{ windowsBuild, acrylicSupported }` to both windows on every load (ADR-038). `FR-089` is now traced by TASK-043 as well, which is what the note below assumed | No channel carries the Windows build to the Dashboard except `CH-215`, which fires only when the capture-fidelity notice does. `FR-089` is traced by TASK-005 and TASK-043, not by this task, and the option carries the note today without being disabled | TASK-043 |
 | `doc:import` still takes renderer-supplied paths for drag and drop | Unavoidable: only the renderer knows what was dropped. `CH-125` removes the button path and `basename` keeps the target inside `kb/` (ADR-037) | TASK-050 |
 | A read-only way for a renderer to ask for the current session state | `earlyPushes.ts` closes the practical race without a contract change, and a `CH-1xx session:get` is a contract change with no acceptance criterion in this task. It is the right fix if a second renderer ever needs the state mid-session | TASK-050 |
 | Nothing aborts an in-flight key validation once its deadline has passed | `validateWithinDeadline` stops the **save**, which is what `FR-026` is about, but the request and its socket stay alive until they settle, and each retry adds another. Threading an `AbortSignal` through `validateCredential` and every adapter's `validateKey` is a change to four adapters with no acceptance criterion here | TASK-050 |
 | The 10 second deadline is measured before the IPC round trip, so the user sees the answer marginally after 10 s | Measuring from the renderer would need the deadline to live where it cannot stop the save (ADR-037). The overshoot is the round trip, in single-digit milliseconds | TASK-050 |
 | `doc:pickFiles` and `pathForFile` are pinned by source guardrails, not by behavioural tests | Neither a native file dialog nor a real OS drag can be driven from the Playwright Electron runner, and `src/preload/**` is outside the coverage `include`. The guardrails assert what the handler does, including that a cancel answers `[]`; a manual check belongs on the release checklist | TASK-051 |
-| The Dashboard button text is white on the user's chosen accent color, which `config:set` validates only as a six-digit hex | A light accent gives an unreadable button. `NFR-010` is about keyboard operation and `TC-113`'s contrast ratio is the overlay's, so nothing in this task's criteria covers it | TASK-050 |
+| ~~The Dashboard button text is white on the user's chosen accent color, which `config:set` validates only as a six-digit hex~~ **Closed 2026-09-18 in commit `82c1b95`, recorded 2026-09-26.** `App.tsx`'s `accentForeground` picks black or white by contrast ratio and sets `--accent-foreground`. No test pins the choice, which is carried as a follow-up below | A light accent gives an unreadable button. `NFR-010` is about keyboard operation and `TC-113`'s contrast ratio is the overlay's, so nothing in this task's criteria covers it | TASK-050 |
 | A health state other than `config-required` cannot be attributed to the credential that caused it | `CH-202` carries one `HealthState` per capability, and `stateOf` reports the worst state among every credential that capability depends on, its backup included. Only `config-required` names its credential, which is why the architecture's own "the Dashboard groups by that id" holds for that state and for no other. Where one credential is one capability's backup and another's primary, a `retrying` or `degraded` state is attributed to the serving choice and can name the wrong key. The renderer cannot fix this: the payload has to carry the responsible credential, which is a contract change with no acceptance criterion here (ADR-017) | TASK-050 |
 | A rebuilt overlay is not reconciled against the newest settings | The renderer now serializes its own theme commits, so it can no longer start two rebuilds. A rebuild racing a settings change from anywhere else still ends with a window built from older settings. The fix belongs where the window is rebuilt (ADR-015) | TASK-050 |
 | Changing the STT selection during a live session | Refused in the Dashboard for now, because rebinding health while `CMP-15` holds sockets on the old choice puts the badge and the audio out of step. Allowing it means closing and reopening the STT pair together with the health rebind, at a boundary with no audio in flight, which is the session loop's work and the same shape as the `noteCleanBoundary` item TASK-044 carried | TASK-050 |
@@ -1684,6 +1684,19 @@ the only open item in the whole build plan. It cannot be done from a Linux
 container: `MW-01` to `MW-15` need a Windows 10 (build 19041 or later) and a
 Windows 11 machine, real audio devices, a second monitor and provider
 credentials. A release record written without them would be fabricated.
+
+**Re-confirmed 2026-09-26.** Still the only open acceptance work, and still
+blocked for the same reason: `releases/` holds only `TEMPLATE.md`. Milestone
+6's three deferred follow-ups were closed instead ("Milestone 6 follow-ups",
+at the end of this document).
+
+**Carried rows with no active owner.** Milestones 2 to 4 carried thirty rows
+to `TASK-050` (optimizations, defense in depth and four IPC contract changes).
+`TASK-050` was completed against its own acceptance criteria and none of them
+was taken up or re-routed. Two were found already closed on 2026-09-26 and
+are struck through where they stand; the other twenty-eight remain open. A
+sweep is a follow-up, not a blocker, because none of them is an acceptance
+criterion.
 
 ### TASK-050 Global resilience — COMPLETE
 **Traces** NFR-001, NFR-002, NFR-004, NFR-005, NFR-008, NFR-009
@@ -1884,9 +1897,9 @@ heuristic path.
 
 | Item | Why it is not done here | Owner |
 |---|---|---|
-| The transcript records the **last** attempt's outcome, so a salvaging attempt followed by an empty failed retry is written as `'cancelled'` with no bullets | Pre-existing since `TASK-044`, and it contradicts `ADR-036` Decision 3's "keeps the salvaged outcome". This review fixed the overlay half, which `TASK-063` caused; the transcript half is older and changes what `session:read` returns | Follow-up |
-| The `secrets:set` to `SttCatalogService.invalidate` wiring has no test | It lives in `src/main/index.ts`, which cannot be imported without Electron and is excluded from coverage by design. `TC-196` proves the service half | Follow-up |
-| `SttCatalogProvider.state` declares `'error'`, which the service never produces | Harmless: the renderer prints the state as text. Removing it changes `CH-129`'s schema | Follow-up |
+| ~~The transcript records the **last** attempt's outcome, so a salvaging attempt followed by an empty failed retry is written as `'cancelled'` with no bullets~~ **Closed 2026-09-26**, see "Milestone 6 follow-ups" below. This row first cited `ADR-036` Decision 3, which is about the stop and start race; the salvage rule is `ADR-035`'s, and the citation is corrected | Pre-existing since `TASK-044`, and it contradicts `ADR-035` Decision 3's "keeps the salvaged outcome". This review fixed the overlay half, which `TASK-063` caused; the transcript half is older and changes what `session:read` returns | Follow-up |
+| ~~The `secrets:set` to `SttCatalogService.invalidate` wiring has no test~~ **Closed 2026-09-26.** The handler body is `saveProviderKey` in `src/main/key-save.ts`, tested under `TC-196` | It lives in `src/main/index.ts`, which cannot be imported without Electron and is excluded from coverage by design. `TC-196` proves the service half | Follow-up |
+| ~~`SttCatalogProvider.state` declares `'error'`, which the service never produces~~ **Closed 2026-09-26.** Removed from the type and from `CH-129`'s schema (`ADR-052`) | Harmless: the renderer prints the state as text. Removing it changes `CH-129`'s schema | Follow-up |
 | `TASK-063`'s advisory overlay height | Not a criterion. The default stays 420 by 260 | None |
 | A `line` or `end` that arrives before its own `begin` can seed the hold buffer's queue | Unreachable over ordered single-window IPC; recorded as a possible risk, not a defect | None |
 
@@ -2252,3 +2265,65 @@ classifier. Build `TASK-061` first regardless of the numbering.
 Implement the atomic cache, validated IPC, bounded manual and lazy refresh, credential-race protection, policy revalidation, and Provider Setup states.
 
 **Verified by** TC-192, TC-193, TC-194, TC-195, TC-196, TC-197, TC-198
+
+---
+
+## Milestone 6 follow-ups
+
+**Status: COMPLETE, 2026-09-26.** The three rows the Milestone 6 completion
+review deferred as "Follow-up" are closed. They were taken up because the only
+open phase, Milestone 5, is blocked on Windows hardware (see its status above).
+No runtime dependency and no requirement changed. One IPC contract changed, a
+narrowing of `CH-129`, recorded with the rest as `ADR-052`.
+
+`npm run typecheck`, `npm run lint`, `npm run format:check`, `npm run
+licenses`, `npm run trace`, `npm run build`, `npm run smoke:main`, `npm run
+check:release` and 1092 unit and integration tests pass, at 96.53 percent line
+coverage against an 80 percent floor. `src/main/key-save.ts`, the one new
+module, is at 100 percent of lines and branches. The Playwright E2E suite runs
+on the Windows runner only; nothing it asserts changed.
+
+| Row | What changed | Verified by |
+|---|---|---|
+| The transcript recorded an empty failed retry over an earlier salvage | `CMP-15`'s `generateFor` no longer lets an attempt that produced no bullet replace an earlier attempt's salvage. A cancelled one marks the entry `'cancelled'` and keeps the salvage's bullets, as a cancelled single attempt keeps the bullets it showed. A stale generation keeps its salvage too. The entry's model now moves with its bullets | Five cases under "the transcript entry for a retried generation" in `tests/unit/live-loop.test.ts`. All five fail on the old code, and the cancellation case also fails without its own branch |
+| The `secrets:set` wiring had no test | The handler body is `saveProviderKey` in `src/main/key-save.ts`, with every collaborator injected. `index.ts` builds the collaborators per call, as the handler always read them | `TC-196` in `tests/unit/key-save.test.ts`, including a source pin that the handler runs it. `guardrails.test.ts`'s `FR-026` deadline check follows the delegation |
+| `SttCatalogProvider.state` declared `'error'` | Removed from the type and from `CH-129`'s response schema. A failed discovery answers `stale` or `fallback` with a message (`ADR-051`) | `TC-003`: a type-level equality between the schema and the type, and a runtime check that the schema refuses `'error'`. Both fail when the value is put back in the schema alone |
+
+**Found and fixed during this work.** Each fix has a test that fails without it,
+or is a document correction.
+
+| Defect | Consequence | Fix |
+|---|---|---|
+| **A saved key could be reported as a failed save.** `secrets:set` guarded the STT catalog's invalidation against a failed write and not the LLM catalog's. `LlmCatalogService.invalidate` writes `llm-catalog.json` by temporary-file rename, which throws on a full disk or, on Windows, on a file an antivirus scanner holds | The throw escaped the handler after the vault write, so the Dashboard told the user a stored key had failed, and the refresh after it never ran | Guarded like the STT call. `TC-196`'s "reports a stored key as saved when a catalog cannot persist its invalidation" |
+| **The first version of the transcript fix let a cancelled empty retry erase the salvage.** It replaced the salvage whenever the turn was aborted, citing `FR-054` | A cancelled single attempt keeps the bullets it showed, so the same cancellation recorded different bullets depending on whether a retry had started. `FR-054` governs the overlay, not the transcript | The kept entry takes `'cancelled'` and keeps the salvage. "marks a superseded salvage cancelled and keeps its bullets" |
+| The transcript cases covered one retry that failed or was cancelled, not a retry that succeeds with nothing, nor several attempts across a failover. Found by an independent review of the diff | The "empty attempt after an empty attempt" branch was never taken, and a clean empty retry, which reports `'nonconforming'`, was unpinned | "keeps the salvage across a failover, whichever attempt produced it" and "keeps the salvage when a clean retry produces nothing" |
+| `02-architecture.md` said the transcript records "the last attempt's" outcome | True before Milestone 6's overlay hold-back, false after it | Corrected, with the rule above |
+| The deferred row cited `ADR-036` Decision 3 for "keeps the salvaged outcome" | That decision is about the stop and start race; the rule is `ADR-035` Decision 3 | Corrected in the row |
+| Two rows carried to `TASK-050` were already closed | They read as open work | Struck through with the evidence, see Milestone 5 |
+| The `TC-192` to `TC-198` table in `04-test-strategy.md` had no header row | It did not render as a table | Header row added |
+
+**Deferred.** Confirmed, and outside these three rows.
+
+| Item | Why it is not done here | Owner |
+|---|---|---|
+| **A retry after a salvage merges into the salvaged card.** Every attempt shares one `cardId`, the loop drops a retry's `begin` while the card is up, and `reduceCards` keys lines by index. An attempt that streams "A0" and fails, followed by a retry that streams "B0" and "B1", leaves the overlay showing "A0" and "B1": two answers on one card, with the retry's first bullet dropped. The transcript records "B0" and "B1" | Reproduced by driving `CMP-15`'s real pushes through the real `reduceCards`. Pre-existing since `TASK-044`. The documents do not decide what the overlay should do: replace the salvage with the retry (a cancel and a fresh `begin`, which the hold buffer then paces), keep the salvage and drop the retry's lines, or not retry after a salvage at all | Needs a decision |
+| The sweep of the twenty-eight rows still carried to `TASK-050` | See Milestone 5. Four of them are IPC contract changes | Follow-up |
+| The language-model catalog (`ADR-050`) has no requirement id and no test case id | Its tests in `tests/unit/llm-catalog.test.ts` trace to nothing, so `scripts/traceability.py` cannot notice them going missing. `FR-116` to `FR-118` and `TC-192` to `TC-198` are the pattern | Follow-up |
+| `accentForeground` in `App.tsx` has no test | The black or white choice on the accent is correct in code and unpinned | Follow-up |
+| The two Runtime STT catalog checks at the end of `07-release-checklist.md` are loose checkboxes after section 4 | They are not `MW` rows, so `npm run check:release` does not require them of a release record | TASK-051 |
+
+**Possible risks.** Unproven.
+
+- `saveProviderKey` still starts the LLM catalog refresh with `void`, as the
+  handler did. The refresh catches each provider's failure itself, so a
+  rejection needs `onUpdated` or `result()` to throw; the global handler would
+  log it (`NFR-009`).
+- After a clean empty retry, the overlay card takes the empty stream's
+  `'nonconforming'` status while the entry keeps the salvage's own status.
+  Deliberate, because the entry's status describes the bullets it records, but
+  the two can differ.
+- Two tests pin `index.ts` by reading its source. A reformat can fail them
+  without a defect; it cannot make them pass over one.
+
+**Blockers.** None for this work. The build plan's only open acceptance work is
+still `TASK-051`'s manual release checklist, which needs Windows hardware.

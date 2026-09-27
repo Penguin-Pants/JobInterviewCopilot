@@ -28,6 +28,7 @@ import { ConfigStore } from './config.js';
 import { CostMeter } from './cost.js';
 import { HotkeyManager } from './hotkeys.js';
 import { IpcRouter, push } from './ipc/router.js';
+import { saveProviderKey, type KeySaveDeps } from './key-save.js';
 import { LiveSessionLoop } from './live.js';
 import { getLogger, initLogger } from './logger.js';
 import { OverlayGate, type GatedMessage } from './overlay-gate.js';
@@ -1264,6 +1265,19 @@ function assertProfile(profileId: string): string {
  */
 const KEY_VALIDATION_DEADLINE_MS = 10_000;
 
+/** What `secrets:set` reaches besides the vault (`CH-103`, FR-026, FR-117). */
+function keySaveDeps(): KeySaveDeps {
+  return {
+    vault: secrets,
+    validate: validateWithinDeadline,
+    sttCatalog,
+    llmCatalog,
+    health,
+    servesLlm: (credentialId) => findLlmProvider(credentialId) !== null,
+    warn: (message, detail) => getLogger().warn(message, detail),
+  };
+}
+
 async function validateWithinDeadline(
   credentialId: CredentialId,
   key: string,
@@ -1327,28 +1341,12 @@ function registerIpcHandlers(): void {
   router.handle('llmCatalog:get', () => llmCatalog.get());
   router.handle('llmCatalog:refresh', () => llmCatalog.refresh());
   router.handle('catalog:stt', ({ force }) => sttCatalog.get(force));
-  router.handle('secrets:set', async ({ provider, key }) => {
-    const result = await secrets.set(provider, key, validateWithinDeadline);
-    // A saved, validated key is the only thing that clears CONFIG_REQUIRED for
-    // that credential (FR-026, ADR-024). Checked on the result, because a key
-    // that failed validation was never saved and changes nothing.
-    if (result.ok) {
-      try {
-        sttCatalog.invalidate(provider);
-      } catch (error) {
-        // The key is already safely stored. A cache-cleanup filesystem error
-        // must not report that save as failed; memory is invalidated and the
-        // next catalog request will refresh it for this process.
-        getLogger().warn('STT catalog cache invalidation could not be persisted', error);
-      }
-      health.noteKeySaved(provider);
-      if (findLlmProvider(provider)) {
-        llmCatalog.invalidate(provider);
-        void llmCatalog.refresh();
-      }
-    }
-    return result;
-  });
+  // The steps a validated save triggers live in `key-save.ts`, where they are
+  // tested; this file cannot be imported by a test (FR-026, FR-117). The
+  // collaborators are read per call, as the handler always read them.
+  router.handle('secrets:set', ({ provider, key }) =>
+    saveProviderKey(keySaveDeps(), provider, key),
+  );
 
   router.handle('hotkey:rebind', ({ action, accelerator }) => {
     const result = hotkeys.rebind(action, accelerator);
