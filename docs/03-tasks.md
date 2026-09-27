@@ -2332,3 +2332,104 @@ or is a document correction.
 
 **Blockers.** None for this work. The build plan's only open acceptance work is
 still `TASK-051`'s manual release checklist, which needs Windows hardware.
+
+## Follow-up sweep, 2026-09-27
+
+**Status: COMPLETE, 2026-09-27.** Two pieces of follow-up work, taken up
+because the only open phase, Milestone 5, is still blocked on Windows hardware
+(see its status above):
+
+1. The one decision the Milestone 6 follow-ups deferred: what the overlay shows
+   when a retry answers after a salvage. The product owner chose to replace
+   the salvage, recorded as `ADR-053`.
+2. The sweep of the twenty-eight rows carried to `TASK-050` with no active
+   owner (see Milestone 5).
+
+No runtime dependency, no requirement and no IPC contract changed.
+
+`npm run typecheck`, `npm run lint`, `npm run format:check`, `npm run
+licenses`, `npm run trace`, `npm run build`, `npm run smoke:main`, `npm run
+check:release` and 1117 unit and integration tests pass, at 96.55 percent line
+coverage against an 80 percent floor. `src/main/live.ts` is at 97.84 percent of
+lines. The Playwright E2E suite runs on the Windows runner only. Of the
+controls this work changed, it asserts that Save provider and model settings is
+disabled for a backup conflict and a live session, which still use `disabled`,
+and it clicks that button once. The gate changes none of that.
+
+| Item | What changed | Verified by |
+|---|---|---|
+| A retry after a salvage merged into the salvaged card (`ADR-053`) | `CMP-15` holds a retry's `begin` while the salvage is up and sends it at the retry's first bullet, with a card id of its own, `card-<generationId>#<attempt>`. `reduceCards` replaces the card and the hold buffer restarts the `FR-115` minimum hold for the replacement. `OverlayGate` needed no change: it already replays only the newest card. A retry that produces nothing leaves the salvage, as before | "replaces the salvage with each retry that produces bullets" and the updated "does not strand a card" in `live-loop.test.ts`, and "restarts the hold when the shown generation replaces its own card" in `hold-buffer.test.ts`. All three fail on the old code. "replays only the replacement card after a retry replaced the salvage" in `overlay-surface.test.ts` pins the gate |
+| A prompt-assembly failure spent the retry ladder (carried from `TASK-044`) | `CMP-15` assembles the prompt before the health machine runs, and a failure abandons that one turn with no provider call | "abandons the turn when the prompt cannot be assembled, without a provider call" in `live-loop.test.ts`, which fails on the old code |
+| Five action buttons had no in-flight guard (carried from `TASK-042`) | `useInFlight` in `src/renderer/dashboard/inFlight.ts`, one convention for all five. It refuses a second run while one is pending and marks the button `aria-disabled`, which keeps keyboard focus where `disabled` would drop it | `dashboard-actions.test.ts` for the gate and `guardrails.test.ts` for the wiring. Twelve of the thirteen pins fail on the old code; the thirteenth keeps the type select ungated. Also the check in the built app below |
+| The drop zone's highlight flickered during a drag (carried from `TASK-042`) | `dragLeftZone` ends the highlight only when `relatedTarget` is outside the zone or absent | The same three |
+| The other twenty-five carried rows | Twenty-one closed with a reason and four kept open as numbered follow-ups, each where it stands | The rows themselves |
+
+**Checked in the built app.** The unit suite has no DOM and the E2E suite
+skips off Windows, so the built app was also driven by hand on Linux under
+Xvfb with Playwright's Electron driver, once on this branch and once on `main`.
+`config:set` was slowed to 500 ms in the main process so that three key presses
+landed inside one round trip.
+
+| Check | `main` | This branch |
+|---|---|---|
+| `config:set` calls from Enter, Enter and Space on Save thresholds, and on Save provider and model settings | 3 each | 1 each |
+| One more press after the answer | Saves again | Saves again |
+| Keyboard focus after the presses | On the button | On the button |
+| Highlight changes on the drop zone over a drag that crosses its button twice | 16 | 2 |
+
+A separate probe in Chromium 141 showed why the busy state is `aria-disabled`:
+disabling a focused button moves focus to the page body, and enabling it again
+does not bring focus back.
+
+**Found and fixed during this work.**
+
+| Defect | Consequence | Fix |
+|---|---|---|
+| **The first version of the guard bound `busy` to `disabled`** | Chromium moves focus off a focused control that becomes disabled and does not return it, so pressing Enter on Save thresholds, Apply or Save provider and model settings left a keyboard user with no focus (`NFR-010`) | `aria-disabled` while busy, absent at rest, and styled like `disabled` |
+| **The first version gave a document row one gate for all three controls** | A retry holds its gate for the whole conversion, so Remove document was locked during it. The type select changes on each arrow key, so gating it refused or reverted keyboard choices | A gate for each button. The select is not gated |
+| Row 1529 said a repeated `doc:delete` "at worst raises an error" | `deleteDocument` returns when the record is gone, so the repeat was a no-op | Corrected where the row stands |
+| A proposed fix for the consent card row withheld the consent push after a dismissal | The overlay reports ready only once the consent text has arrived and painted (`ADR-016`), so a rebuilt overlay would never report ready | Not taken. The row is closed by design, with that reason |
+
+**Follow-ups, in order.** Kept open where they stand, with "Follow-up" as the
+owner:
+
+1. `noteCleanBoundary` at real turn boundaries, so a recovered primary is
+   switched back to (`ADR-009`). No contract change. Carried from `TASK-044`.
+2. Abort a key validation once its deadline has passed. No contract change.
+   Carried from `TASK-042`.
+3. Attribute every health state to the credential that caused it. Needs a
+   `CH-202` payload decision. Carried from `TASK-042`.
+4. Refuse a session start when the interviewer would not be heard (`FR-044`).
+   Needs a fifth `CH-112` refusal and capture started before the transcript.
+   Carried from `TASK-044`.
+
+The three rows the Milestone 6 follow-ups left open still stand: the
+language-model catalog's missing requirement and test case ids,
+`accentForeground`'s test, and the release checklist's loose checkboxes
+(`TASK-051`).
+
+**Deferred.** Confirmed, and outside this work.
+
+| Item | Why it is not done here | Owner |
+|---|---|---|
+| Create profile, the embedding model retry and the key check still bind their in-flight state to `disabled` | Pre-existing, and not among the twenty-eight rows. Each drops keyboard focus the way the first version of this guard did. Create profile also relies on its disabled submit button to stop a second implicit submission from the name field, so moving it onto the gate needs that path covered too | Follow-up |
+
+**Possible risks.** Unproven.
+
+- `aria-disabled` does not stop a click on its own; the gate does. The source
+  pins require each of the five buttons to run through its gate, but a new
+  button that copied the attribute without the gate would look busy and still
+  act.
+- The in-app check ran on Linux under Xvfb, not on Windows. The Windows E2E
+  suite does not press a busy button twice.
+- `CMP-15` checks the prompt with the primary's choice. `buildMessages`
+  ignores the choice today, so the check covers every attempt. A per-model
+  prompt would change that, and then a backup attempt could still fail on a
+  prompt nobody checked.
+- Between a failed attempt's `end` and the retry's first bullet, the salvage
+  stands as a finished card, and a retry that answers then replaces it. That is
+  the decision `ADR-053` records. A user can still read the salvage as the
+  final answer for as long as one retry takes.
+
+**Blockers.** None for this work. The build plan's only open acceptance work is
+still `TASK-051`'s manual release checklist, which needs Windows hardware.
