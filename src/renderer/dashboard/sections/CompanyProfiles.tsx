@@ -12,6 +12,7 @@ import { DEFAULT_PROMPT_ID, DEFAULT_PROMPT_NAME, promptName } from '../../../sha
 import type { DocType, DocumentRecord, Profile, Settings } from '../../../shared/types.js';
 import { call } from '../call.js';
 import { formatBytes } from '../format.js';
+import { useInFlight } from '../inFlight.js';
 import type { DocProgress, ModelState, SessionState } from '../state.js';
 
 const DOC_TYPES: { value: DocType | 'auto'; label: string }[] = [
@@ -361,7 +362,9 @@ export function CompanyProfiles({
           e.preventDefault();
           setDropTarget(true);
         }}
-        onDragLeave={() => setDropTarget(false)}
+        onDragLeave={(e) => {
+          if (dragLeftZone(e.currentTarget, e.relatedTarget)) setDropTarget(false);
+        }}
         onDrop={onDrop}
       >
         <p>Drag Markdown, PDF or Word files here to add them to this profile.</p>
@@ -451,6 +454,19 @@ function ModelGate({ model }: { model: ModelState | null }): JSX.Element | null 
   );
 }
 
+/**
+ * Whether a `dragleave` on the drop zone means the drag has left it (TASK-050,
+ * ADR-037).
+ *
+ * `dragleave` also fires on the zone when the pointer crosses onto one of its
+ * own children, with that child as `relatedTarget`. Clearing the highlight on
+ * every one made it flicker off until the next `dragover` put it back. A drag
+ * that leaves the window has no `relatedTarget`, and that is leaving.
+ */
+export function dragLeftZone(zone: Pick<Node, 'contains'>, next: EventTarget | null): boolean {
+  return next === null || !zone.contains(next as Node);
+}
+
 function DocumentRow({
   doc,
   progress,
@@ -461,22 +477,31 @@ function DocumentRow({
   onChanged: () => Promise<void>;
 }): JSX.Element {
   const [error, setError] = useState<string | null>(null);
+  const retrying = useInFlight();
+  const removing = useInFlight();
   const state = progress?.state ?? doc.state;
 
   /**
    * Every document action answers the same way: reload on success, show the
    * reason on failure. Written once, because three copies of the same
    * `.then` block is three places for the error branch to be dropped from.
+   *
+   * The two buttons each run behind an in-flight gate of their own. A fast
+   * second click on Try again queued a second conversion pass behind the first,
+   * and one on Remove document sent a delete for a row that was already gone.
+   * They do not share one: a retry can take as long as the conversion, and
+   * Remove document stays available during it, as it always was. The type
+   * select is not gated at all, because arrow keys change a closed select one
+   * value at a time and each change is a new intent.
    */
-  const run = <C extends 'doc:setType' | 'doc:retry' | 'doc:delete'>(
+  const run = async <C extends 'doc:setType' | 'doc:retry' | 'doc:delete'>(
     channel: C,
     payload: Parameters<typeof call<C>>[1],
-  ): void => {
+  ): Promise<void> => {
     setError(null);
-    void call(channel, payload).then(async (result) => {
-      if (!result.ok) setError(result.message);
-      else await onChanged();
-    });
+    const result = await call(channel, payload);
+    if (!result.ok) setError(result.message);
+    else await onChanged();
   };
 
   return (
@@ -502,7 +527,7 @@ function DocumentRow({
         data-testid={`document-type-${doc.id}`}
         value={doc.docTypeSource === 'user' ? doc.docType : 'auto'}
         onChange={(e) =>
-          run('doc:setType', {
+          void run('doc:setType', {
             docId: doc.id,
             profileId: doc.profileId,
             docType: e.target.value as DocType | 'auto',
@@ -525,7 +550,10 @@ function DocumentRow({
           <button
             type="button"
             data-testid={`document-retry-${doc.id}`}
-            onClick={() => run('doc:retry', { docId: doc.id, profileId: doc.profileId })}
+            aria-disabled={retrying.busy || undefined}
+            onClick={() =>
+              void retrying.run(() => run('doc:retry', { docId: doc.id, profileId: doc.profileId }))
+            }
           >
             Try again
           </button>
@@ -535,7 +563,10 @@ function DocumentRow({
       <button
         type="button"
         data-testid={`document-delete-${doc.id}`}
-        onClick={() => run('doc:delete', { docId: doc.id, profileId: doc.profileId })}
+        aria-disabled={removing.busy || undefined}
+        onClick={() =>
+          void removing.run(() => run('doc:delete', { docId: doc.id, profileId: doc.profileId }))
+        }
       >
         Remove document
       </button>

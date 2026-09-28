@@ -2300,3 +2300,33 @@ attempt's outcome", which Milestone 6 made false, and records the key-save path
 and the STT catalog's states. `TC-196` gains the save that starts a credential
 replacement, and `TC-003` asserts that the STT catalog's schema and type agree
 on the states.
+
+### ADR-053 — A retry's answer replaces a salvage, on a card of its own
+
+**Decided 2026-09-27 by the product owner**, closing the Milestone 6 follow-up
+row that needed a decision (`03-tasks.md`).
+
+**Context.** Every attempt of a generation shared one card id,
+`card-<generationId>`. The loop dropped a retry's `begin` while a card was on
+screen, and `reduceCards` keys a card's lines by index and keeps the first line
+it gets for an index. Every attempt's lines restart at index 0, so a retry after
+a salvage merged into the salvaged card: an attempt that streamed "A0" and
+failed, followed by a retry that streamed "B0" and "B1", rendered "A0" and
+"B1". The transcript recorded "B0" and "B1". Three options were put to the
+owner: replace the salvage with the retry's answer, keep the salvage and drop
+the retry's lines, or not retry after a salvage.
+
+**Decision.** Replace. `CMP-15` holds a retry's `begin` while a card is up, and
+the retry's **first bullet** sends it with a card id of its own,
+`card-<generationId>#<attempt>`, before the bullet itself. A `begin` for a new
+card id replaces the held card in one commit (`ADR-047`), so there is no idle
+card between the two and never a second card. At the first bullet, not at the
+`begin`: a retry that fails with nothing to show still keeps the salvage
+(`ADR-052`).
+
+**Consequence.** The overlay and the transcript show the same answer. No IPC
+contract changes: `cardId` is already a free string on `CH-207` and `CH-208`.
+The hold buffer restarts `FR-115`'s hold when the shown generation replaces its
+own card, because that card is newly visible; otherwise the next question could
+replace the retry's answer at once. `OverlayGate` already treats every `begin`
+as a new card, so a rebuilt overlay is replayed the replacement alone.

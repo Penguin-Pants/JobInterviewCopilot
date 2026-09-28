@@ -280,6 +280,32 @@ describe('the overlay readiness gate', () => {
     ]);
   });
 
+  /**
+   * ADR-053. A retry's answer replaces a salvage with a card of its own, for
+   * the same generation. A rebuilt overlay is replayed that card alone:
+   * replaying the salvage first would rebuild the merged card.
+   */
+  it('replays only the replacement card after a retry replaced the salvage', () => {
+    const g = gate();
+    g.gate.noteReady();
+    g.gate.send(begin('gen-1'));
+    g.gate.send(line('gen-1', 'salvage'));
+    const replacement: GatedMessage = {
+      channel: 'suggestion:begin',
+      payload: { generationId: 'gen-1', cardId: 'card-gen-1#2', question: 'q' },
+    };
+    const retryLine: GatedMessage = {
+      channel: 'suggestion:line',
+      payload: { generationId: 'gen-1', cardId: 'card-gen-1#2', line: 'retry', index: 0 },
+    };
+    g.gate.send(replacement);
+    g.gate.send(retryLine);
+
+    g.gate.noteClosed();
+    g.gate.noteReady();
+    expect(g.sent.slice(4)).toEqual([replacement, retryLine]);
+  });
+
   it('reports what the current renderer has not been sent', () => {
     const g = gate();
     g.gate.send(begin('gen-1'));

@@ -36,6 +36,11 @@ import type {
   TokenUsage,
 } from '../../src/main/ai/llm.js';
 import type { GatedMessage } from '../../src/main/overlay-gate.js';
+import {
+  reduceCards,
+  type CardEvent,
+  type SuggestionCard,
+} from '../../src/renderer/overlay/cards.js';
 
 const PROFILE_ID = 'p1';
 
@@ -542,6 +547,55 @@ describe('a backup the health machine believes in but the loop cannot use', () =
 });
 
 describe('answering a turn', () => {
+  /**
+   * A chunk the prompt cannot render is a fault in the notes, not in the
+   * provider. `buildMessages` ran inside the adapter's `generate`, so the throw
+   * reached the health machine as a retryable failure and spent the whole
+   * retry ladder against a healthy key. It is assembled outside the machine
+   * now, and the turn is abandoned the way a failed retrieval is (ADR-035).
+   */
+  it('abandons the turn when the prompt cannot be assembled, without a provider call', async () => {
+    const broken = {
+      chunk: {
+        id: 'c1',
+        docId: 'd1',
+        profileId: PROFILE_ID,
+        index: 0,
+        text: 'shipped the thing',
+        headerPath: null as unknown as string[],
+        docType: 'resume' as const,
+        sourceFile: 'resume.md',
+        tokenCount: 3,
+      },
+      score: 0.9,
+    };
+    let llmRuns = 0;
+    const generate = vi.fn(() => Promise.resolve(outcome()));
+    const { loop, errors, settled, appended } = makeLoop({
+      retrieve: () => Promise.resolve([broken]),
+      runFor: (capability, fn) => {
+        if (capability === 'llm') llmRuns += 1;
+        return fn('primary');
+      },
+      generate,
+    });
+    await loop.start(PROFILE_ID);
+
+    loop.onFire(turn());
+    await loop.whenSettled();
+
+    // Nothing reached the health machine, so a healthy key is not blamed.
+    expect(llmRuns).toBe(0);
+    expect(generate).not.toHaveBeenCalled();
+    expect(errors.map((e) => e.message)).toEqual([
+      'the prompt could not be assembled, so this turn is not answered',
+    ]);
+    expect(appended).toEqual([]);
+    // The machine is freed, or the next question would never fire.
+    expect(settled).toEqual(['g1']);
+    await loop.stop();
+  });
+
   it('abandons the turn when no language model is usable, and says so', async () => {
     const { loop, errors, settled } = makeLoop({
       resolveLlmProvider: () => {
@@ -676,7 +730,7 @@ describe('answering a turn', () => {
 
     const statuses: string[] = [];
     let call = 0;
-    const { loop, pushes } = makeLoop({
+    const { loop, pushes, messages } = makeLoop({
       appendSuggestion: (entry) => {
         statuses.push(entry.status);
         return Promise.resolve(1);
@@ -709,14 +763,20 @@ describe('answering a turn', () => {
     loop.onFire(turn({ firedAt }));
     await loop.whenSettled();
 
-    // One begin, both attempts' lines, and the real end: nothing is suppressed
-    // and no card is left on screen with no way to clear it.
+    // Both attempts' lines and the real end: nothing is suppressed and no card
+    // is left on screen with no way to clear it. The retry's bullet replaces
+    // the salvage on a card of its own (ADR-053).
     expect(pushes).toEqual([
       'suggestion:begin',
       'suggestion:line',
+      'suggestion:begin',
       'suggestion:line',
       'suggestion:end',
     ]);
+    expect(messages[2]).toEqual({
+      channel: 'suggestion:begin',
+      payload: { generationId: 'g1', cardId: 'card-g1#2', question: 'q' },
+    });
     expect(statuses).toEqual(['complete']);
 
     await loop.stop();
@@ -1086,6 +1146,57 @@ describe('answering a turn', () => {
      * salvage's lines, so the entry keeps them too, with the status that
      * describes them rather than the empty stream's `'nonconforming'`.
      */
+    /**
+     * ADR-053. A retry that does produce bullets replaces the salvage.
+     *
+     * Every attempt's lines restart at index 0, and `reduceCards` keeps a
+     * card's first line for an index. Sent to the salvaged card, "B0" was
+     * dropped against "A0" and "B1" landed beside it: two answers on one card,
+     * and not the one the transcript records. Driven through the real reducer,
+     * so what is asserted is what the overlay renders.
+     */
+    it('replaces the salvage with each retry that produces bullets', async () => {
+      const { loop, messages, appended } = makeLoop({
+        runFor: ladder('primary', 'primary', 'primary'),
+        generate: scripted([
+          { lines: ['A0'], fails: true },
+          { lines: ['B0'], fails: true },
+          { lines: ['C0', 'C1'], fails: false },
+        ]),
+      });
+      await loop.start(PROFILE_ID);
+
+      loop.onFire(turn());
+      await loop.whenSettled();
+
+      let cards: SuggestionCard[] = [];
+      for (const message of messages) {
+        const kind = message.channel.replace('suggestion:', '') as 'begin' | 'line' | 'end';
+        cards = reduceCards(cards, { kind, payload: message.payload } as CardEvent);
+      }
+      expect(cards).toEqual([
+        {
+          cardId: 'card-g1#3',
+          generationId: 'g1',
+          question: 'q',
+          lines: [
+            { index: 0, text: 'C0' },
+            { index: 1, text: 'C1' },
+          ],
+          status: 'complete',
+        },
+      ]);
+      // Each replacement is a card of its own, so no two share an id.
+      const begun = messages
+        .filter((m) => m.channel === 'suggestion:begin')
+        .map((m) => (m.payload as { cardId: string }).cardId);
+      expect(begun).toEqual(['card-g1', 'card-g1#2', 'card-g1#3']);
+      // The overlay and the transcript now show the same answer.
+      expect(appended).toMatchObject([{ bullets: ['C0', 'C1'], status: 'complete' }]);
+
+      await loop.stop();
+    });
+
     it('keeps the salvage when a clean retry produces nothing', async () => {
       const { loop, appended } = makeLoop({
         runFor: ladder('primary', 'primary'),

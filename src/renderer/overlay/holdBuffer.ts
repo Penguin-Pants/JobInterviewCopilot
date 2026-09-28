@@ -61,6 +61,10 @@ export class HoldBuffer {
     const id = event.payload.generationId;
     if (id === this.shownId) {
       this.dispatch(event);
+      // A begin for the shown generation is a card of its own replacing the
+      // one on screen: a retry's answer taking over a salvage (ADR-053). It is
+      // newly visible, so the hold that protects it starts now (FR-115).
+      if (event.kind === 'begin') this.shownAt = this.now();
       if (event.kind === 'end' && event.payload.status === 'cancelled') {
         this.shownId = null;
         // The hold protects the card on screen, and there is none now. A

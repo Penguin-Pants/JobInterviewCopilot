@@ -186,8 +186,9 @@ export async function runGeneration(
   signal: AbortSignal,
   events: GenerationEvents,
 ): Promise<GenerationOutcome> {
-  // One card per generation. A cancelled generation's card is replaced, never
-  // appended to, which is how FR-054 removes the partial output.
+  // The generation's card. A cancelled generation's card is replaced, never
+  // appended to, which is how FR-054 removes the partial output. A retry that
+  // replaces a salvage gets a card id of its own from `CMP-15` (ADR-053).
   const cardId = `card-${req.generationId}`;
   const bullets: string[] = [];
   const usage: TokenUsage = { inputTokens: 0, outputTokens: 0 };

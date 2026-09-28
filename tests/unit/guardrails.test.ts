@@ -1220,3 +1220,93 @@ describe('TASK-042 the main-process half of the Dashboard', () => {
     expect(body).not.toMatch(/extensions: \['/);
   });
 });
+
+/**
+ * TASK-050, carried rows fixed in the follow-up sweep. `dashboard-actions.test.ts`
+ * asserts the gate and the drag rule. These pin that the components call them,
+ * which no test in this suite can drive: the Dashboard has no DOM here.
+ */
+describe('TASK-050 Dashboard actions run one at a time', () => {
+  const dashboard = join(process.cwd(), 'src', 'renderer', 'dashboard');
+  const read = (file: string): string => readFileSync(join(dashboard, 'sections', file), 'utf8');
+
+  /** The JSX element that carries `marker`, from its opening tag to its closing tag. */
+  function element(text: string, tag: string, marker: string): string {
+    const at = text.indexOf(marker);
+    expect(at, `${marker} is not rendered`).toBeGreaterThan(-1);
+    const start = text.lastIndexOf(`<${tag}`, at);
+    const end = text.indexOf(`</${tag}>`, at);
+    return text.slice(start, end);
+  }
+
+  const guarded: { file: string; marker: string; gate: string; runs: string }[] = [
+    {
+      file: 'CostAndUsage.tsx',
+      marker: '"save-thresholds"',
+      gate: 'saving',
+      runs: 'saving.run(saveThresholds)',
+    },
+    {
+      file: 'Hotkeys.tsx',
+      marker: '`hotkey-apply-',
+      gate: 'applying',
+      runs: 'applying.run(() => apply(action))',
+    },
+    {
+      file: 'ProviderSetup.tsx',
+      marker: '"save-providers"',
+      gate: 'saving',
+      runs: 'saving.run(save)',
+    },
+    {
+      file: 'CompanyProfiles.tsx',
+      marker: '`document-retry-',
+      gate: 'retrying',
+      runs: "retrying.run(() => run('doc:retry'",
+    },
+    {
+      file: 'CompanyProfiles.tsx',
+      marker: '`document-delete-',
+      gate: 'removing',
+      runs: "removing.run(() => run('doc:delete'",
+    },
+  ];
+
+  for (const { file, marker, gate, runs } of guarded) {
+    const name = marker.replace(/["`]/g, '');
+
+    it(`runs ${name} through its gate`, () => {
+      const text = read(file);
+      expect(text).toContain(`const ${gate} = useInFlight();`);
+      expect(element(text, 'button', marker)).toContain(runs);
+    });
+
+    /**
+     * Not `disabled`: Chromium moves focus off a focused control that becomes
+     * disabled and does not give it back, so a keyboard user who pressed Enter
+     * lost their place (NFR-010). The gate refuses the second run by itself.
+     */
+    it(`marks ${name} busy with aria-disabled, which keeps keyboard focus`, () => {
+      const button = element(read(file), 'button', marker);
+      expect(button).toContain(`aria-disabled={${gate}.busy || undefined}`);
+      expect(button).not.toMatch(/(?<!aria-)disabled=\{[^}]*busy/);
+    });
+  }
+
+  it('leaves the document type select ungated, as each change is a new intent', () => {
+    const select = element(read('CompanyProfiles.tsx'), 'select', '`document-type-');
+    expect(select).not.toMatch(/disabled=|\.run\(/);
+  });
+
+  it('styles a busy button like a disabled one', () => {
+    const css = readFileSync(join(dashboard, 'styles.css'), 'utf8');
+    expect(css).toMatch(/button:disabled,\s*button\[aria-disabled='true'\] \{/);
+    expect(css).toContain("button:hover:not(:disabled, [aria-disabled='true'])");
+  });
+
+  it('ends the drop highlight only when the drag has left the zone', () => {
+    const zone = element(read('CompanyProfiles.tsx'), 'div', '"drop-zone"');
+    expect(zone).toContain('dragLeftZone(e.currentTarget, e.relatedTarget)');
+    expect(zone).not.toContain('onDragLeave={() => setDropTarget(false)}');
+  });
+});
