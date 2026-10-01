@@ -7,3 +7,6 @@ test-results/
 playwright-report/
 .vite/
 *.log
+.env
+.env.*
+!.env.example
