@@ -483,6 +483,46 @@ describe('NFR-009 app lifecycle handlers are registered before slow startup work
 });
 
 /**
+ * TC-009 regression: `second-instance` is registered at module load, before
+ * bootstrap has built the config store or the first Dashboard. A second launch
+ * in that window built an orphan Dashboard or read `config` before it existed,
+ * and the rejection was dropped by a bare `void`.
+ */
+describe('TC-009 a second launch waits for bootstrap', () => {
+  const source = (): string => readFileSync('src/main/index.ts', 'utf8');
+
+  it('the second-instance handler awaits bootstrap and catches its own failure', () => {
+    const text = source();
+    const start = text.indexOf("app.on('second-instance'");
+    expect(start).toBeGreaterThan(-1);
+    const handler = text.slice(start, text.indexOf('});', start));
+    expect(handler).toContain('bootstrapReady');
+    expect(handler).toContain('.catch(');
+    expect(handler).not.toMatch(/void focusOrRecreateDashboard\(\);/);
+  });
+
+  it('bootstrap marks itself ready only once the windows exist', () => {
+    const text = source();
+    const bootstrap = text.slice(
+      text.indexOf('async function bootstrap('),
+      text.indexOf('async function startKnowledgeBase('),
+    );
+    const ready = bootstrap.indexOf('resolveBootstrapReady(true)');
+    expect(ready).toBeGreaterThan(-1);
+    expect(ready).toBeGreaterThan(bootstrap.indexOf('await createOverlayWindow('));
+  });
+
+  it('a bootstrap that fails with no window tells the user and quits', () => {
+    const text = source();
+    const failure = text.slice(text.indexOf('void bootstrap().catch('));
+    const body = failure.slice(0, failure.indexOf('async function bootstrap('));
+    expect(body).toContain('resolveBootstrapReady(false)');
+    expect(body).toContain('dialog.showErrorBox(');
+    expect(body).toContain('app.quit()');
+  });
+});
+
+/**
  * TASK-040 regressions found by the Codex review on the pull request. Each is a
  * property of how bootstrap wires the Session Manager, so each is asserted
  * against `index.ts` rather than against a component that cannot see the wiring.

@@ -39,6 +39,17 @@ function sessionsDir(profileId = PROFILE.id): string {
   return join(userData, 'profiles', profileId, 'sessions');
 }
 
+/** The manager's live transcript handle, with `write` replaceable by a test. */
+type HandleWrite = (
+  data: Buffer | string,
+  offset?: number,
+  length?: number,
+  position?: number,
+) => Promise<{ bytesWritten: number }>;
+function writableHandle(m: SessionManager): { write: HandleWrite } {
+  return (m as unknown as { handle: { write: HandleWrite } }).handle;
+}
+
 beforeEach(() => {
   userData = mkdtempSync(join(tmpdir(), 'icp-session-'));
 });
@@ -181,9 +192,9 @@ describe('TC-106 crash recovery', () => {
   it('one unreadable session does not stop the others being recovered', async () => {
     const dir = sessionsDir();
     await mkdir(dir, { recursive: true });
-    // A line that is not the last one and is not parseable: a writer defect,
-    // not a crash, so this session throws and the other still recovers.
-    await writeFile(join(dir, 'bad.ndjson'), 'not json\n{"seq":1}\n', 'utf8');
+    // A transcript that cannot be read at all (EISDIR), so this session throws
+    // and the other still recovers.
+    await mkdir(join(dir, 'bad.ndjson'));
     await writeFile(
       join(dir, 'good.ndjson'),
       `${JSON.stringify({ seq: 0, kind: 'turn', source: 'interviewer', text: 'q', at: 'T0' })}\n`,
@@ -322,11 +333,34 @@ describe('TC-135 torn write and lock recovery', () => {
     await m.stop();
   });
 
-  it('a malformed line that is not the last one is a defect, not a crash', async () => {
+  it('a malformed line that is not the last one is skipped and counted (ADR-054)', async () => {
     const dir = sessionsDir();
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, 'x.ndjson'), 'garbage\n{"seq":1,"kind":"turn"}\n', 'utf8');
-    await expect(readNdjson(join(dir, 'x.ndjson'))).rejects.toThrow(/not the last line/);
+    const parsed = await readNdjson(join(dir, 'x.ndjson'));
+    expect(parsed.entries.map((e) => e.seq)).toEqual([1]);
+    expect(parsed.skippedLines).toBe(1);
+  });
+
+  it('recovers a transcript with a fused line mid-file and reports what it skipped', async () => {
+    const dir = sessionsDir();
+    await mkdir(dir, { recursive: true });
+    const turn = (seq: number, text: string): string =>
+      JSON.stringify({ seq, kind: 'turn', source: 'interviewer', text, at: 'T' });
+    // What a short write followed by a good append used to leave behind.
+    const fused = turn(1, 'torn').slice(0, 20) + turn(2, 'fused');
+    await writeFile(join(dir, 'f.ndjson'), `${turn(0, 'kept')}\n${fused}\n${turn(3, 'end')}\n`);
+
+    const errors: unknown[] = [];
+    const recovered = await new SessionManager({
+      userDataDir: userData,
+      onError: (message, detail) => errors.push({ message, detail }),
+    }).recover([PROFILE]);
+
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]?.entries.map((e) => e.seq)).toEqual([0, 3]);
+    expect(JSON.stringify(errors)).toMatch(/"skippedLines":1/);
+    expect(await readdir(dir)).toEqual(['f.json']);
   });
 });
 
@@ -417,15 +451,15 @@ describe('session durability regressions', () => {
     await m.appendTurn('interviewer', 'before');
 
     // Force one write to fail, the way a transient ENOSPC would.
-    const handle = (m as unknown as { handle: { write: (s: string) => Promise<unknown> } }).handle;
+    const handle = writableHandle(m);
     const realWrite = handle.write.bind(handle);
     let failed = false;
-    handle.write = (line: string) => {
+    handle.write = (...args) => {
       if (!failed) {
         failed = true;
         return Promise.reject(new Error('ENOSPC'));
       }
-      return realWrite(line);
+      return realWrite(...args);
     };
 
     await expect(m.appendTurn('interviewer', 'the failed one')).rejects.toThrow('ENOSPC');
@@ -434,7 +468,72 @@ describe('session durability regressions', () => {
     await expect(m.appendTurn('interviewer', 'after')).resolves.toBe(2);
     const raw = await readFile(join(sessionsDir(), 's1.ndjson'), 'utf8');
     expect(raw).toContain('after');
-    await m.stop();
+    const session = await m.stop();
+    expect(session?.entries.map((e) => (e.kind === 'turn' ? e.text : ''))).toEqual([
+      'before',
+      'after',
+    ]);
+  });
+
+  /**
+   * Regression: the result of `write()` was ignored, so a short write (ENOSPC)
+   * left half a line, and the next good append fused onto it mid-file. Reading
+   * then threw on every compaction and every recovery, so the session could
+   * never end and the app failed recovery on every launch.
+   */
+  it('a write that fails part way leaves only whole lines on disk', async () => {
+    const m = manager();
+    await m.start(request());
+    await m.appendTurn('interviewer', 'before');
+
+    const handle = writableHandle(m);
+    const realWrite = handle.write.bind(handle);
+    let calls = 0;
+    handle.write = (data, offset = 0, length, position) => {
+      calls += 1;
+      const buffer = typeof data === 'string' ? Buffer.from(data) : data;
+      const want = length ?? buffer.length - offset;
+      // A short write, then the disk fills.
+      if (calls === 1) return realWrite(buffer, offset, Math.floor(want / 2), position);
+      if (calls === 2) return Promise.reject(new Error('ENOSPC'));
+      return realWrite(buffer, offset, want, position);
+    };
+
+    await expect(m.appendTurn('interviewer', 'the torn one')).rejects.toThrow('ENOSPC');
+    await expect(m.appendTurn('interviewer', 'after')).resolves.toBe(2);
+
+    const raw = await readFile(join(sessionsDir(), 's1.ndjson'), 'utf8');
+    for (const line of raw.split('\n').filter(Boolean)) {
+      expect(() => JSON.parse(line)).not.toThrow();
+    }
+    const session = await m.stop();
+    expect(session?.entries.map((e) => (e.kind === 'turn' ? e.text : ''))).toEqual([
+      'before',
+      'after',
+    ]);
+  });
+
+  it('a short write is completed rather than leaving half a line', async () => {
+    const m = manager();
+    await m.start(request());
+
+    const handle = writableHandle(m);
+    const realWrite = handle.write.bind(handle);
+    // Every write takes at most three bytes, as a congested disk may. The old
+    // code passed a string, so either form is accepted.
+    handle.write = (data, offset = 0, length, position) => {
+      const buffer = typeof data === 'string' ? Buffer.from(data) : data;
+      const want = length ?? buffer.length - offset;
+      return realWrite(buffer, offset, Math.min(3, want), position);
+    };
+
+    await m.appendTurn('interviewer', 'slowly');
+    await m.appendTurn('interviewer', 'and again');
+    const session = await m.stop();
+    expect(session?.entries.map((e) => (e.kind === 'turn' ? e.text : ''))).toEqual([
+      'slowly',
+      'and again',
+    ]);
   });
 
   it('a crash-recovered session keeps its profile label and its real start time', async () => {

@@ -11,7 +11,7 @@
  * which is the type-level guarantee `TC-107` asserts rather than a check this
  * file performs (`FR-101`, NFR-002).
  */
-import { open, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { constants, open, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -201,6 +201,12 @@ export class SessionManager {
    * (`FR-106`, TC-134).
    */
   private writeChain: Promise<void> = Promise.resolve();
+  /**
+   * The transcript's length after its last complete line. Every line is written
+   * at this offset, so a later line overwrites what a failed one left behind
+   * rather than fusing onto it (ADR-054).
+   */
+  private goodLength = 0;
 
   constructor(options: SessionManagerOptions) {
     this.userDataDir = options.userDataDir;
@@ -260,7 +266,7 @@ export class SessionManager {
       // with no transcript, which recovery ignores, rather than a transcript
       // with no idea which profile it belongs to.
       await writeFile(metaPath(dir, id), JSON.stringify(meta), 'utf8');
-      this.handle = await open(join(dir, `${id}.ndjson`), 'a');
+      await this.openTranscript(join(dir, `${id}.ndjson`));
     } catch (err) {
       await rm(lockPath(this.userDataDir), { force: true });
       throw err;
@@ -294,8 +300,8 @@ export class SessionManager {
     const line = `${JSON.stringify({ seq, ...entry } as TranscriptEntry)}\n`;
     const handle = this.handle;
 
-    // One `write()` of one complete line, so a crash can lose a line but cannot
-    // tear one (FR-107).
+    // One complete line per entry, so a crash can lose a line but cannot tear
+    // one (FR-107). `writeLine` finishes a short write and undoes a failed one.
     //
     // The chain is continued from a settled predecessor rather than from its
     // success. Attaching to `.then` alone poisons it: one rejected write skips
@@ -304,14 +310,64 @@ export class SessionManager {
     // nothing. The caller still sees its own write's failure, because that is
     // the promise returned.
     const write = this.writeChain.then(
-      () => handle.write(line),
-      () => handle.write(line),
+      () => this.writeLine(handle, line),
+      () => this.writeLine(handle, line),
     );
     this.writeChain = write.then(
       () => undefined,
       () => undefined,
     );
     return write.then(() => seq);
+  }
+
+  /**
+   * Open a transcript and record where its last whole line ends.
+   *
+   * Not `'a'`. Append mode ignores the write position, and on Windows it also
+   * opens without the right to truncate, so a failed write could not be undone.
+   */
+  private async openTranscript(path: string, reopening = false): Promise<void> {
+    this.handle = await open(path, constants.O_WRONLY | constants.O_CREAT);
+    const size = (await this.handle.stat()).size;
+    // On a reopen the known offset wins, because the size can include a torn
+    // tail. It can only be smaller if the file was replaced meanwhile.
+    this.goodLength = reopening ? Math.min(this.goodLength, size) : size;
+  }
+
+  /**
+   * Write one whole line at the end of the last whole line (FR-107, ADR-054).
+   *
+   * `write()` may write fewer bytes than asked, so it is called until the line
+   * is done. On a failure the file is truncated back to its last whole line.
+   * If that fails too, the next line still starts at that offset and
+   * overwrites the partial one. A partial line has no newline, so whatever is
+   * left of it after a shorter line is a torn tail, which the reader drops.
+   * The old single `write()` ignored `bytesWritten`: a short write left half a
+   * line, the next append fused onto it, and the transcript became unreadable.
+   */
+  private async writeLine(handle: FileHandle, line: string): Promise<void> {
+    const bytes = Buffer.from(line, 'utf8');
+    try {
+      let done = 0;
+      while (done < bytes.length) {
+        const { bytesWritten } = await handle.write(
+          bytes,
+          done,
+          bytes.length - done,
+          this.goodLength + done,
+        );
+        if (bytesWritten <= 0) throw new Error('The transcript write made no progress.');
+        done += bytesWritten;
+      }
+    } catch (err) {
+      try {
+        await handle.truncate(this.goodLength);
+      } catch (truncateErr) {
+        this.onError('could not undo a failed transcript write', { err: truncateErr });
+      }
+      throw err;
+    }
+    this.goodLength += bytes.length;
   }
 
   /** A transcript turn. Text only: the type cannot express audio (FR-101). */
@@ -356,7 +412,7 @@ export class SessionManager {
     const dir = sessionsDir(this.userDataDir, active.profileId);
     let session: Session;
     try {
-      session = await compactSession({
+      session = await this.compact({
         dir,
         id: active.id,
         profileId: active.profileId,
@@ -367,9 +423,9 @@ export class SessionManager {
         usage: this.usage,
       });
     } catch (err) {
-      // Re-open for append so a retry can still add to the transcript, and keep
-      // the lock: the session is not over until its transcript is safe.
-      this.handle = await open(join(dir, `${active.id}.ndjson`), 'a');
+      // Re-open so a retry can still add to the transcript, and keep the lock:
+      // the session is not over until its transcript is safe.
+      await this.openTranscript(join(dir, `${active.id}.ndjson`), true);
       throw err;
     }
 
@@ -439,6 +495,7 @@ export class SessionManager {
     }
 
     const parsed = await readNdjson(ndjsonPath);
+    this.reportSkipped(id, parsed.skippedLines);
 
     // The sidecar is the authority on the three things the transcript cannot
     // carry. Its absence is not fatal: the folder names the profile, and the
@@ -459,6 +516,19 @@ export class SessionManager {
     await rm(ndjsonPath, { force: true });
     await rm(metaPath(dir, id), { force: true });
     return session;
+  }
+
+  /** Compact, and report any malformed lines the read skipped (ADR-054). */
+  private async compact(request: CompactRequest): Promise<Session> {
+    const { session, skippedLines } = await compactSession(request);
+    this.reportSkipped(request.id, skippedLines);
+    return session;
+  }
+
+  private reportSkipped(id: string, skippedLines: number): void {
+    if (skippedLines > 0) {
+      this.onError('malformed transcript lines were skipped', { id, skippedLines });
+    }
   }
 
   /**
@@ -498,7 +568,9 @@ interface CompactRequest {
   usage: UsageRecord;
 }
 
-async function compactSession(request: CompactRequest): Promise<Session> {
+async function compactSession(
+  request: CompactRequest,
+): Promise<{ session: Session; skippedLines: number }> {
   const parsed = await readNdjson(join(request.dir, `${request.id}.ndjson`));
   const session: Session = {
     id: request.id,
@@ -512,7 +584,7 @@ async function compactSession(request: CompactRequest): Promise<Session> {
   };
   await writeSessionJson(request.dir, session);
   await rm(join(request.dir, `${request.id}.ndjson`), { force: true });
-  return session;
+  return { session, skippedLines: parsed.skippedLines };
 }
 
 /**
@@ -532,15 +604,19 @@ interface ParsedNdjson {
   profileId: string;
   profileNameSnapshot: string;
   startedAt: string | null;
+  /** Malformed lines before the last one, skipped rather than fatal (ADR-054). */
+  skippedLines: number;
 }
 
 /**
  * Reads an `.ndjson` transcript, discarding an unparseable final line
  * (`FR-107`, TC-135).
  *
- * Only the **final** line may be discarded. A torn line anywhere else would
- * mean the writer did not write whole lines, which is a defect rather than a
- * crash, and silently dropping it would hide that.
+ * A torn final line is the crash signature and is dropped silently. A malformed
+ * line anywhere else is skipped and counted, and the caller reports the count.
+ * It used to throw, which made one bad line cost the whole interview: the
+ * session could never be compacted and recovery failed on every launch
+ * (ADR-054).
  */
 export async function readNdjson(path: string): Promise<ParsedNdjson> {
   let raw: string;
@@ -552,13 +628,20 @@ export async function readNdjson(path: string): Promise<ParsedNdjson> {
     // compaction wrote an empty `.json` and then deleted the `.ndjson` that
     // still held every entry.
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { entries: [], profileId: '', profileNameSnapshot: '', startedAt: null };
+      return {
+        entries: [],
+        profileId: '',
+        profileNameSnapshot: '',
+        startedAt: null,
+        skippedLines: 0,
+      };
     }
     throw err;
   }
 
   const lines = raw.split('\n').filter((line) => line.trim() !== '');
   const entries: TranscriptEntry[] = [];
+  let skippedLines = 0;
 
   for (let i = 0; i < lines.length; i += 1) {
     const entry = parseEntry(lines[i] ?? '');
@@ -567,8 +650,7 @@ export async function readNdjson(path: string): Promise<ParsedNdjson> {
       continue;
     }
     // A torn tail is the crash signature: the process died mid-write.
-    if (i === lines.length - 1) break;
-    throw new Error(`Transcript line ${String(i + 1)} is malformed, and it is not the last line.`);
+    if (i < lines.length - 1) skippedLines += 1;
   }
 
   // Order is `seq` order, not file order (ADR-018).
@@ -578,6 +660,7 @@ export async function readNdjson(path: string): Promise<ParsedNdjson> {
     profileId: '',
     profileNameSnapshot: '',
     startedAt: entries[0]?.at ?? null,
+    skippedLines,
   };
 }
 

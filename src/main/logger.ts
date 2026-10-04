@@ -49,6 +49,19 @@ export function redact(value: unknown, seen = new WeakSet<object>()): unknown {
 
   if (Array.isArray(value)) return value.map((v) => redact(v, seen));
 
+  // Walked key by key, binary data becomes one log field per byte, which puts
+  // audio into main.log (NFR-002, docs/03-tasks.md Definition of Done). Only
+  // its size is useful in a diagnostic.
+  if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
+    return `[binary ${String(value.byteLength)} bytes]`;
+  }
+  // These have no own enumerable keys, so the walk below would print `{}`.
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? 'Invalid Date' : value.toISOString();
+  }
+  if (value instanceof Map) return `[Map size ${String(value.size)}]`;
+  if (value instanceof Set) return `[Set size ${String(value.size)}]`;
+
   if (value instanceof Error) {
     return {
       name: value.name,
@@ -88,6 +101,8 @@ export interface LoggerOptions {
 export class Logger {
   private readonly dir: string;
   private readonly toConsole: boolean;
+  /** Set after the first failed write, so the stderr notice is printed once. */
+  private fileFailed = false;
 
   constructor(options: LoggerOptions) {
     this.dir = options.dir;
@@ -123,8 +138,19 @@ export class Logger {
     renameSync(this.file, join(this.dir, 'main.log.1'));
   }
 
+  /**
+   * Never throws (NFR-009). Callers log from catch blocks and from the global
+   * fault handler, so a full disk or a Windows EBUSY on main.log used to throw
+   * a second error out of the handler of the first. A rotation failure is
+   * skipped and retried on the next line. A failed append sends the line to
+   * stderr instead, with a one-time notice.
+   */
   log(level: LogLevel, message: string, ...args: unknown[]): void {
-    this.rotateIfNeeded();
+    try {
+      this.rotateIfNeeded();
+    } catch {
+      // The line still goes to the current file. Rotation is retried next time.
+    }
     const parts = [new Date().toISOString(), level.toUpperCase(), stringify(message)];
     for (const a of args) parts.push(stringify(a));
     const line = `${parts.join(' ')}\n`;
@@ -132,8 +158,19 @@ export class Logger {
     // Written synchronously on purpose. The log is the diagnostic record when
     // the app dies, so a line buffered in a stream and lost on a crash is worse
     // than the cost of the sync write at this volume (NFR-009).
-    appendFileSync(this.file, line, 'utf8');
-    if (this.toConsole) process.stdout.write(line);
+    let written = true;
+    try {
+      appendFileSync(this.file, line, 'utf8');
+    } catch (err) {
+      written = false;
+      if (!this.fileFailed) {
+        this.fileFailed = true;
+        const code = (err as NodeJS.ErrnoException).code ?? 'unknown error';
+        writeQuietly(process.stderr, `main.log is not writable (${code}); logging to stderr\n`);
+      }
+    }
+    if (this.toConsole) writeQuietly(process.stdout, line);
+    else if (!written) writeQuietly(process.stderr, line);
   }
 
   debug(m: string, ...a: unknown[]): void {
@@ -151,6 +188,15 @@ export class Logger {
 
   /** No-op: writes are synchronous, so there is nothing buffered to flush. */
   close(): void {}
+}
+
+/** A console write that cannot throw, for example on a closed pipe (EPIPE). */
+function writeQuietly(stream: NodeJS.WriteStream, text: string): void {
+  try {
+    stream.write(text);
+  } catch {
+    // Nowhere is left to report it.
+  }
 }
 
 let singleton: Logger | null = null;

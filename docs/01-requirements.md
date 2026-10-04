@@ -611,7 +611,8 @@ replacing generation is appended. (ADR-018)
 
 **FR-107** Each transcript entry must be written as one call of one complete line
 ending in a newline. Compaction must discard an unparseable final line and
-recover the rest. When both a `.json` and a `.ndjson` exist for one session, the
+recover the rest. A malformed line before the last one must be skipped and
+reported, never fatal (ADR-054). When both a `.json` and a `.ndjson` exist for one session, the
 `.json` wins and the `.ndjson` is deleted. (ADR-018)
 
 **FR-108** A session lock file must prevent a second session across process
