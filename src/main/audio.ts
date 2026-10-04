@@ -76,6 +76,11 @@ export class AudioSupervisor {
   /** High-water mark, so a test can assert the bound held over a whole run. */
   private peakInFlight = 0;
   private running = false;
+  /**
+   * Bumped by every start and stop, so a restart that settles after its
+   * capture ended can tell it is stale and leave the newer state alone.
+   */
+  private run = 0;
 
   constructor(options: AudioSupervisorOptions) {
     this.worker = options.worker;
@@ -106,6 +111,7 @@ export class AudioSupervisor {
   async start(): Promise<void> {
     if (this.running) throw new Error('audio capture is already running');
     this.running = true;
+    this.run += 1;
     for (const source of SOURCES) this.setState(source, 'starting');
     try {
       await this.worker.start(SOURCES);
@@ -212,10 +218,15 @@ export class AudioSupervisor {
     status.restarts += 1;
     status.error = reason;
     this.setState(source, 'starting');
+    const run = this.run;
     try {
       await this.worker.start([source]);
     } catch (err) {
-      this.markUnavailable(source, `${reason} (restart failed: ${describe(err)})`);
+      // Stopped, or stopped and started again, while the restart loaded. The
+      // failure belongs to a capture that no longer exists.
+      if (this.running && run === this.run) {
+        this.markUnavailable(source, `${reason} (restart failed: ${describe(err)})`);
+      }
     }
     return true;
   }
@@ -265,6 +276,7 @@ export class AudioSupervisor {
   async stop(): Promise<void> {
     if (!this.running) return;
     this.running = false;
+    this.run += 1;
     await this.worker.stop();
     await this.worker.destroy();
     for (const source of SOURCES) {

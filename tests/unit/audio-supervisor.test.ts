@@ -177,6 +177,50 @@ describe('TC-044 stream restart', () => {
     expect(status.restarts).toBe(1);
   });
 
+  it('ignores a restart that fails after capture has stopped', async () => {
+    const seen: string[] = [];
+    const supervisor = new AudioSupervisor({
+      worker,
+      onChunk: () => {},
+      onStreamState: (source, status) => seen.push(`${source}:${status.state}`),
+    });
+    await supervisor.start();
+    let failRestart: (err: Error) => void = () => {};
+    worker.start = () =>
+      new Promise<void>((_resolve, reject) => {
+        failRestart = reject;
+      });
+
+    const restart = supervisor.handleStreamEnded('candidate', 'worker crashed');
+    await supervisor.stop();
+    seen.length = 0;
+    failRestart(new Error('the worker window closed while it loaded'));
+    await restart;
+
+    // The session is over. A stale failure must not put the badge back in error.
+    expect(supervisor.statusFor('candidate').state).toBe('idle');
+    expect(seen).toEqual([]);
+  });
+
+  it('ignores a restart that fails after a new capture has started', async () => {
+    const supervisor = new AudioSupervisor({ worker, onChunk: () => {} });
+    await supervisor.start();
+    let failRestart: (err: Error) => void = () => {};
+    worker.start = () =>
+      new Promise<void>((_resolve, reject) => {
+        failRestart = reject;
+      });
+
+    const restart = supervisor.handleStreamEnded('candidate', 'worker crashed');
+    await supervisor.stop();
+    worker.start = async () => {};
+    await supervisor.start();
+    failRestart(new Error('the worker window closed while it loaded'));
+    await restart;
+
+    expect(supervisor.statusFor('candidate').state).toBe('starting');
+  });
+
   it('reports a start that fails as an error on both streams', async () => {
     const supervisor = new AudioSupervisor({ worker, onChunk: () => {} });
     worker.start = async () => {

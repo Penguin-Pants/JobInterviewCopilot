@@ -346,4 +346,16 @@ describe('renderer crash recovery', () => {
       'reloadOnRendererCrash(overlayWindow',
     );
   });
+
+  it('replays the audio state to a reloaded Dashboard', () => {
+    // A reloaded renderer starts with an empty early-push cache, so the badge
+    // stayed blank until the next stream transition unless the load replays it.
+    const source = readFileSync('src/main/index.ts', 'utf8');
+    const wiring = source.slice(
+      source.indexOf('function wireDashboardWindow'),
+      source.indexOf('function wireOverlayWindow'),
+    );
+    const onLoad = wiring.slice(wiring.indexOf("'did-finish-load'"));
+    expect(onLoad.slice(0, onLoad.indexOf('});'))).toContain('pushAudioState()');
+  });
 });
