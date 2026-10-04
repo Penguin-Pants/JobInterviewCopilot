@@ -1260,7 +1260,7 @@ sides. Payloads are validated with `zod` at the router (`CMP-10`). An invalid
 payload is rejected and logged, never passed through.
 
 Which window may use which channel is declared once, in `INVOKE_ACCESS` and
-`PUSH_ACCESS` in the same file (`ADR-054`). Each preload keeps a literal copy,
+`PUSH_ACCESS` in the same file (`ADR-057`). Each preload keeps a literal copy,
 because a sandboxed preload cannot load a chunk it shares with another preload,
 and a test loads each preload and holds its copy equal to the table. The router
 checks every invoke against the table again, before the payload: the sending `webContents` must be the Dashboard or the overlay, the

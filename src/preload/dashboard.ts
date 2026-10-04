@@ -19,7 +19,7 @@ import type { InvokeChannel, PushChannel, PushPayload } from '../shared/ipc.js';
  * Both lists are copies of `INVOKE_ACCESS` and `PUSH_ACCESS` in
  * `shared/ipc.ts`, held equal by `ipc-sender.test.ts`. A copy, because a
  * sandboxed preload cannot load a chunk it shares with another preload. The
- * main-process router enforces the table again by sender (ADR-054).
+ * main-process router enforces the table again by sender (ADR-057).
  */
 const ALLOWED_INVOKE: readonly InvokeChannel[] = [
   'config:get',

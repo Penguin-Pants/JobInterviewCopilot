@@ -1301,11 +1301,11 @@ describe('TASK-050 Dashboard actions run one at a time', () => {
 });
 
 /**
- * Audit regression (ADR-054): the packaged binary had no Electron fuses, so
+ * Audit regression (ADR-057): the packaged binary had no Electron fuses, so
  * `ELECTRON_RUN_AS_NODE` or `NODE_OPTIONS` could run arbitrary code with the
  * app's identity, and the app could be loaded from outside its archive.
  */
-describe('ADR-054 the packaged binary flips its fuses', () => {
+describe('ADR-057 the packaged binary flips its fuses', () => {
   const builder = readFileSync('electron-builder.yml', 'utf8');
   const fuses = /^electronFuses:\n((?:[ ]{2}.*\n)+)/m.exec(builder)?.[1] ?? '';
 

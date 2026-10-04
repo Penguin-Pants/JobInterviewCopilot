@@ -2331,7 +2331,7 @@ own card, because that card is newly visible; otherwise the next question could
 replace the retry's answer at once. `OverlayGate` already treats every `begin`
 as a new card, so a rebuilt overlay is replayed the replacement alone.
 
-### ADR-054 — Trust boundaries: the main process checks who sent each message
+### ADR-057: Trust boundaries: the main process checks who sent each message
 
 **Decided 2026-10-04** while fixing audit findings on the IPC boundary.
 

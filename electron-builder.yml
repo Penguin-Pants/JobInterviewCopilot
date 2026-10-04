@@ -25,7 +25,7 @@ asarUnpack:
   - '**/node_modules/@img/**'
   - '**/node_modules/chokidar/**'
   - '**/node_modules/readdirp/**'
-# Electron fuses, flipped in the packaged binary only (ADR-054). They close
+# Electron fuses, flipped in the packaged binary only (ADR-057). They close
 # ways to run code in this process that skip the app's own entry point.
 #
 #   - runAsNode off: ELECTRON_RUN_AS_NODE no longer turns the signed binary into

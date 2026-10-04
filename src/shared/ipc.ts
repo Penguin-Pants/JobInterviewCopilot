@@ -868,7 +868,7 @@ export const INVOKE_CHANNEL_NAMES = Object.keys(invokeChannels) as InvokeChannel
 export const PUSH_CHANNEL_NAMES = Object.keys(pushChannels) as PushChannel[];
 
 /* ------------------------------------------------------------------ *
- * Which window may use which channel (FR-086, CMP-10, ADR-054)
+ * Which window may use which channel (FR-086, CMP-10, ADR-057)
  * ------------------------------------------------------------------ */
 
 /**
