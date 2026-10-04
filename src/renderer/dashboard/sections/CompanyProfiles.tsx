@@ -25,7 +25,7 @@ import { KB_CEILING } from '../../../shared/defaults.js';
 import { DEFAULT_PROMPT_ID, DEFAULT_PROMPT_NAME, promptName } from '../../../shared/prompts.js';
 import type { DocType, DocumentRecord, Profile, Settings } from '../../../shared/types.js';
 import { call } from '../call.js';
-import { focusLater } from '../focus.js';
+import { focusLater, focusWithin } from '../focus.js';
 import { formatBytes } from '../format.js';
 import { useInFlight } from '../inFlight.js';
 import type { DocProgress, ModelState, SessionState } from '../state.js';
@@ -148,7 +148,7 @@ export function CompanyProfiles({
    * a session starting must not pull focus from wherever the user is.
    */
   function closeDelete(focusId: string): void {
-    const hadFocus = dialog.current?.contains(document.activeElement) ?? false;
+    const hadFocus = focusWithin(document.activeElement, [dialog.current]);
     setPendingDelete(null);
     if (hadFocus) focusLater(focusId);
   }

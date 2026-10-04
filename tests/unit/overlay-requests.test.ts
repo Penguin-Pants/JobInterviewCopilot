@@ -6,7 +6,7 @@
  * `sizeRequests.ts` for the resize grip.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { invokeLogged, retryWithBackoff } from '../../src/renderer/overlay/invoke.js';
+import { invokeLogged, reportReady, retryWithBackoff } from '../../src/renderer/overlay/invoke.js';
 import { createSizeRequests, type Size } from '../../src/renderer/overlay/sizeRequests.js';
 
 afterEach(() => {
@@ -95,6 +95,67 @@ describe('readiness is retried, because without it no suggestion arrives (FR-008
     });
     expect(ok).toBe(false);
     expect(attempt).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * FR-006, FR-008, ADR-016. A readiness report names the session it is for, and
+ * a retry stops the moment a newer `state:session` push names another one. A
+ * retry left running reached the main process after it had closed the gate for
+ * the next interview, before the renewed reminder had painted.
+ */
+describe('readiness is reported for one session only (FR-008)', () => {
+  it('names the session in every attempt', async () => {
+    const invoke = stubInvoke(async () => ({ ok: true }));
+    await reportReady('session-1', {
+      attempts: 3,
+      firstDelayMs: 100,
+      wait: async () => undefined,
+      latestSessionId: () => 'session-1',
+    });
+    expect(invoke).toHaveBeenCalledWith('overlay:ready', { sessionId: 'session-1' });
+  });
+
+  it('stops retrying once a newer push names another session', async () => {
+    let latest: string | null = 'session-1';
+    const invoke = stubInvoke(async () => {
+      // The next session's push lands while this attempt is answered.
+      latest = 'session-2';
+      return { __ipcError: true, channel: 'overlay:ready', message: 'stale' };
+    });
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const ok = await reportReady('session-1', {
+      attempts: 5,
+      firstDelayMs: 100,
+      wait: async () => undefined,
+      latestSessionId: () => latest,
+    });
+    expect(ok).toBe(false);
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry a report the main process refused for another session', async () => {
+    const invoke = stubInvoke(async () => ({ refused: 'another-session' }));
+    const ok = await reportReady(null, {
+      attempts: 5,
+      firstDelayMs: 100,
+      wait: async () => undefined,
+      latestSessionId: () => null,
+    });
+    expect(ok).toBe(false);
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends nothing for a session that has already ended', async () => {
+    const invoke = stubInvoke(async () => ({ ok: true }));
+    const ok = await reportReady('session-1', {
+      attempts: 5,
+      firstDelayMs: 100,
+      wait: async () => undefined,
+      latestSessionId: () => null,
+    });
+    expect(ok).toBe(false);
+    expect(invoke).not.toHaveBeenCalled();
   });
 });
 

@@ -2437,8 +2437,9 @@ still `TASK-051`'s manual release checklist, which needs Windows hardware.
 ## Renderer UX audit, 2026-10-04
 
 **Status: COMPLETE, 2026-10-04.** Fixes for confirmed findings of an audit of
-the Dashboard and overlay renderers. No requirement, no IPC contract and no
-guardrail changed. Each fix keeps the screen as calm as it was: the only new
+the Dashboard and overlay renderers. No requirement and no guardrail changed.
+One IPC contract changed: `CH-122` `overlay:ready` now names its session (see
+the review follow-up rows below and `02-architecture.md`). Each fix keeps the screen as calm as it was: the only new
 step a user sees is the transcript delete confirmation.
 
 | Item | What changed | Verified by |
@@ -2452,6 +2453,9 @@ step a user sees is the transcript delete confirmation.
 | Keyboard resize stepped from a viewport that lagged its requests, and a drag sent a request per pointer move (`FR-081`) | `overlay/sizeRequests.ts` sends at most one size per frame, the newest, with one in flight, and the keyboard steps from the size last asked for until nothing is pending | `overlay-requests.test.ts` |
 | Two quick prompt changes in Company Profiles dropped one (`FR-027`) | `createPromptSelection` merges each change with those before it and ignores a reload that answers while a write is pending | `dashboard-actions.test.ts` |
 | An empty cost threshold was saved as $0 (`FR-109`) | `parseThresholds` treats an empty field as invalid and shows the existing message | `dashboard-actions.test.ts` |
+| Review follow-up. Keep it and Escape still closed the transcript delete dialog while `session:delete` was in flight, which looked like a cancel, and a second row could open its own dialog that the first delete's answer then closed (`FR-110`) | While the delete is in flight, Keep it and every row's Delete transcript are `aria-disabled` and do nothing, and Escape does not close the dialog. A settled delete closes only its own dialog. One rule, `pendingDeleteAfter`, decides every change | `dashboard-actions.test.ts`, and a `guardrails.test.ts` pin that every route goes through it |
+| Review follow-up. A settled transcript delete moved focus to the heading even when the user had moved on during the round trip (`NFR-010`) | Focus moves only when it is still in the dialog or on the deleted row. `focusWithin` in `dashboard/focus.ts` is the one rule, and the profile dialog uses it too | `dashboard-actions.test.ts` |
+| Review follow-up. A late `overlay:ready` or a retry from the previous session could reach the main process after `OverlayGate.reset` and before the renewed reminder had painted, and open the next interview's gate early (`FR-006`, `FR-008`, `ADR-016`) | `CH-122` names its session. The gate records the session at each `reset` and refuses a report for any other one. `reportReady` in `overlay/invoke.ts` stops its retry as soon as a newer `state:session` push names another session, or when the main process refuses it | `overlay-surface.test.ts`, `overlay-requests.test.ts`, `ipc-contract.test.ts` |
 
 **Not run here.** The Playwright E2E suite runs on the Windows runner only.
 `toBeDisabled()` counts `aria-disabled`, so its existing assertions on Start,

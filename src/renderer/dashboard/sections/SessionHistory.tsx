@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useRef, useState, type JSX } from 'react';
 import type { Profile, Session, SessionSummary } from '../../../shared/types.js';
 import { call } from '../call.js';
-import { focusLater } from '../focus.js';
+import { focusLater, focusWithin } from '../focus.js';
 import { formatTimestamp, formatUsd } from '../format.js';
 import { useInFlight } from '../inFlight.js';
 
@@ -24,10 +24,45 @@ function deleteButtonId(sessionId: string): string {
   return `session-delete-button-${sessionId}`;
 }
 
+function rowId(sessionId: string): string {
+  return `session-row-${sessionId}`;
+}
+
 export const TRANSCRIPT_PRIVACY_TEXT =
   'Session transcripts are saved on this computer as unencrypted local text files and are kept ' +
   'until you delete them. There is no retention window and no encryption at rest. No audio is ' +
   'ever saved.';
+
+/** What happens to the transcript delete confirmation (FR-110). */
+export type TranscriptDeleteEvent =
+  | { kind: 'ask'; summary: SessionSummary }
+  | { kind: 'keep' }
+  | { kind: 'settled'; sessionId: string };
+
+/**
+ * The confirmation on screen after `event`, given whether a delete is in
+ * flight (FR-110, NFR-010).
+ *
+ * While `session:delete` is pending, Keep it and Escape do not close the
+ * dialog and no row can open another one. Closed, the dialog looked like a
+ * cancel while the delete went on. Replaced, the first delete's answer then
+ * closed the newer confirmation the user was reading. A settled delete closes
+ * only its own confirmation, so that cannot happen by another route either.
+ */
+export function pendingDeleteAfter(
+  current: SessionSummary | null,
+  busy: boolean,
+  event: TranscriptDeleteEvent,
+): SessionSummary | null {
+  switch (event.kind) {
+    case 'ask':
+      return busy ? current : event.summary;
+    case 'keep':
+      return busy ? current : null;
+    case 'settled':
+      return current?.id === event.sessionId ? null : current;
+  }
+}
 
 export interface SessionHistoryProps {
   profiles: Profile[];
@@ -111,10 +146,38 @@ export function SessionHistory({ profiles, sessionRevision }: SessionHistoryProp
    */
   const [pendingDelete, setPendingDelete] = useState<SessionSummary | null>(null);
   const deleting = useInFlight();
+  const dialog = useRef<HTMLDivElement | null>(null);
 
-  function cancelDelete(): void {
-    if (pendingDelete) focusLater(deleteButtonId(pendingDelete.id));
-    setPendingDelete(null);
+  function askToDelete(summary: SessionSummary): void {
+    setPendingDelete((current) =>
+      pendingDeleteAfter(current, deleting.busy, { kind: 'ask', summary }),
+    );
+  }
+
+  function keep(): void {
+    if (!pendingDelete) return;
+    const next = pendingDeleteAfter(pendingDelete, deleting.busy, { kind: 'keep' });
+    if (next === pendingDelete) return;
+    focusLater(deleteButtonId(pendingDelete.id));
+    setPendingDelete(next);
+  }
+
+  /**
+   * Closes the confirmation of a settled delete and puts focus somewhere that
+   * still exists (NFR-010). Moved only when focus is still in the dialog or on
+   * the deleted row, the same rule the profile dialog uses: a user who moved
+   * on during the round trip keeps their place.
+   */
+  function settle(sessionId: string, focusId: string): void {
+    const hadFocus = focusWithin(document.activeElement, [
+      dialog.current,
+      document.getElementById(rowId(sessionId)),
+    ]);
+    // `true`, because the delete still holds its gate until `remove` returns.
+    setPendingDelete((current) =>
+      pendingDeleteAfter(current, true, { kind: 'settled', sessionId }),
+    );
+    if (hadFocus) focusLater(focusId);
   }
 
   async function remove(sessionId: string): Promise<void> {
@@ -122,14 +185,12 @@ export function SessionHistory({ profiles, sessionRevision }: SessionHistoryProp
     const result = await call('session:delete', { sessionId });
     if (!result.ok) {
       setError(result.message);
-      focusLater(deleteButtonId(sessionId));
-      setPendingDelete(null);
+      settle(sessionId, deleteButtonId(sessionId));
       return;
     }
     if (opened?.id === sessionId) setOpened(null);
-    setPendingDelete(null);
     // The row is gone, so focus goes to the section heading.
-    focusLater(HEADING_ID);
+    settle(sessionId, HEADING_ID);
     await reload();
   }
 
@@ -195,7 +256,11 @@ export function SessionHistory({ profiles, sessionRevision }: SessionHistoryProp
                   // buttons gave a screen reader no way to tell them apart.
                   const started = formatTimestamp(summary.startedAt);
                   return (
-                    <li key={summary.id} data-testid={`session-${summary.id}`}>
+                    <li
+                      key={summary.id}
+                      id={rowId(summary.id)}
+                      data-testid={`session-${summary.id}`}
+                    >
                       <span data-testid={`session-started-${summary.id}`}>{started}</span>
                       <span>{summary.entryCount} entries</span>
                       <span>{formatUsd(summary.estimatedUsd)}</span>
@@ -218,7 +283,10 @@ export function SessionHistory({ profiles, sessionRevision }: SessionHistoryProp
                         id={deleteButtonId(summary.id)}
                         data-testid={`session-delete-${summary.id}`}
                         aria-label={`Delete transcript of the session started ${started}`}
-                        onClick={() => setPendingDelete(summary)}
+                        // While a delete is in flight no other confirmation
+                        // opens over it (FR-110).
+                        aria-disabled={deleting.busy || undefined}
+                        onClick={() => askToDelete(summary)}
                       >
                         Delete transcript
                       </button>
@@ -233,12 +301,13 @@ export function SessionHistory({ profiles, sessionRevision }: SessionHistoryProp
 
       {pendingDelete ? (
         <div
+          ref={dialog}
           role="alertdialog"
           aria-labelledby="session-delete-confirm-heading"
           aria-describedby="session-delete-confirm-text"
           data-testid="session-delete-confirm"
           onKeyDown={(e) => {
-            if (e.key === 'Escape') cancelDelete();
+            if (e.key === 'Escape') keep();
           }}
         >
           <h3 id="session-delete-confirm-heading">
@@ -259,9 +328,12 @@ export function SessionHistory({ profiles, sessionRevision }: SessionHistoryProp
           <button
             type="button"
             data-testid="session-delete-confirm-no"
-            // Focused on open, so the keyboard lands on the safe choice.
+            // Focused on open, so the keyboard lands on the safe choice. It
+            // cannot cancel a delete that has already started, so it says so
+            // rather than closing as if it had (FR-110).
             autoFocus
-            onClick={cancelDelete}
+            aria-disabled={deleting.busy || undefined}
+            onClick={keep}
           >
             Keep it
           </button>

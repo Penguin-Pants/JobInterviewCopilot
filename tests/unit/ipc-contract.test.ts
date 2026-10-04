@@ -25,6 +25,26 @@ describe('TC-002 payload validation', () => {
     expect(schema.safeParse({ action: 'togglePause', accelerator: 'F1' }).success).toBe(true);
   });
 
+  /**
+   * FR-008, ADR-016. Readiness names the session it was reported for, so the
+   * main process can refuse a late report from the previous session. `null`
+   * is the report before any session, or after one has stopped.
+   */
+  it('requires overlay:ready to name the session it is for', () => {
+    const schema = invokeChannels['overlay:ready'].payload;
+    expect(schema.safeParse(undefined).success).toBe(false);
+    expect(schema.safeParse({}).success).toBe(false);
+    expect(schema.safeParse({ sessionId: 'session-1' }).success).toBe(true);
+    expect(schema.safeParse({ sessionId: null }).success).toBe(true);
+  });
+
+  it('answers a refused overlay:ready rather than failing it', () => {
+    const schema = invokeChannels['overlay:ready'].response;
+    expect(schema.safeParse({ ok: true }).success).toBe(true);
+    expect(schema.safeParse({ refused: 'another-session' }).success).toBe(true);
+    expect(schema.safeParse({ refused: 'anything' }).success).toBe(false);
+  });
+
   it('every declared channel has both a payload and a response schema', () => {
     for (const [name, spec] of Object.entries(invokeChannels)) {
       expect(spec.payload, `${name} payload`).toBeDefined();

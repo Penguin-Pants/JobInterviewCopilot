@@ -300,7 +300,7 @@ describe('a generation reaching an overlay that is not ready yet', () => {
     );
 
     expect(sent).toHaveLength(0);
-    gate.noteReady();
+    gate.noteReady(null);
     expect(sent.map((m) => m.channel)).toEqual([
       'suggestion:begin',
       'suggestion:line',

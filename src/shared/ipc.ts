@@ -484,8 +484,22 @@ export const invokeChannels = {
       displayId: z.string(),
     }),
   },
-  /** Overlay reports it has mounted and rendered the consent card (FR-008, ADR-016). */
-  'overlay:ready': { id: 'CH-122', payload: z.void(), response: ok },
+  /**
+   * Overlay reports it has mounted and rendered the consent card (FR-008, ADR-016).
+   *
+   * The payload names the session the card was rendered for, the `sessionId`
+   * of the last `state:session` push (CH-201). The main process refuses a
+   * report for any other session, so a late report from the previous interview
+   * cannot open the next interview's gate before its reminder has painted.
+   *
+   * The refusal is an answer, not a failure: the race it closes is expected,
+   * and a thrown error would be logged as a handler fault.
+   */
+  'overlay:ready': {
+    id: 'CH-122',
+    payload: z.object({ sessionId: z.string().nullable() }),
+    response: z.union([ok, z.object({ refused: z.literal('another-session') })]),
+  },
   /**
    * Re-process a document in `error` without re-importing it (FR-079, ADR-030).
    *

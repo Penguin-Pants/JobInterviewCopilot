@@ -56,3 +56,39 @@ export async function retryWithBackoff(
     delay *= 2;
   }
 }
+
+export interface ReadyReportOptions extends RetryOptions {
+  /** The `sessionId` of the newest `state:session` push, read at each attempt. */
+  latestSessionId: () => string | null;
+}
+
+/**
+ * Reports `overlay:ready` for one session, retried while it is still wanted
+ * (FR-006, FR-008, ADR-016).
+ *
+ * The report names its session, and the retry stops the moment a newer
+ * `state:session` push names another one. The React cleanup that cancels a
+ * superseded report runs only after the renderer has rendered the push, and a
+ * retry that fired before that reached the main process after it had closed
+ * the gate for the next interview, before the renewed reminder had painted.
+ * The main process refuses such a report too. A refusal is final, because
+ * the main process has moved on from that session and will not move back.
+ */
+export async function reportReady(
+  sessionId: string | null,
+  { latestSessionId, cancelled = () => false, ...retry }: ReadyReportOptions,
+): Promise<boolean> {
+  let refused = false;
+  return retryWithBackoff(
+    async () => {
+      const result = await call('overlay:ready', { sessionId });
+      if (!result.ok) {
+        console.warn(`[overlay] overlay:ready failed: ${result.message}`);
+        return false;
+      }
+      refused = 'refused' in result.value;
+      return !refused;
+    },
+    { ...retry, cancelled: () => cancelled() || refused || latestSessionId() !== sessionId },
+  );
+}

@@ -247,7 +247,12 @@ describe('ADR-016 consent renders before readiness is reported', () => {
   it('the renderer waits for the consent text before reporting ready', () => {
     const source = readFileSync('src/renderer/overlay/Overlay.tsx', 'utf8');
     expect(source).toMatch(/if \(consent === null[^)]*\) return;/);
-    expect(source).toContain("invokeLogged('overlay:ready')");
+    expect(source).toContain('reportReady(readyFor.sessionId');
+  });
+
+  it('the renderer stops a readiness retry as soon as a push names another session', () => {
+    const source = readFileSync('src/renderer/overlay/Overlay.tsx', 'utf8');
+    expect(source).toContain("latestSessionId: () => lastSeen('state:session')?.sessionId ?? null");
   });
 
   it('main pushes the consent text on load rather than in reply to ready', () => {
@@ -1132,8 +1137,8 @@ describe('TASK-044 live loop wiring', () => {
    * not produced one.
    */
   it('clears the overlay gate at both ends of a session', () => {
-    expect(handlerBody('session:start')).toContain('overlayGate.reset()');
-    expect(handlerBody('session:stop')).toContain('overlayGate.reset()');
+    expect(handlerBody('session:start')).toContain('overlayGate.reset(active.id)');
+    expect(handlerBody('session:stop')).toContain('overlayGate.reset(null)');
   });
 
   /**
@@ -1422,9 +1427,30 @@ describe('NFR-010 Dashboard confirmations and announcements', () => {
     expect(text).toContain('aria-describedby="session-delete-confirm-text"');
     // The row button only opens the dialog. Only the dialog deletes.
     expect(text).toMatch(
-      /`session-delete-\$\{summary\.id\}`[^<]*?onClick=\{\(\) => setPendingDelete\(summary\)\}/,
+      /`session-delete-\$\{summary\.id\}`[^<]*?onClick=\{\(\) => askToDelete\(summary\)\}/,
     );
     expect(text).toMatch(/data-testid="session-delete-confirm-yes"[^<]*?remove\(/);
+  });
+
+  it('cannot cancel or replace a transcript delete that is in flight', () => {
+    const text = section('SessionHistory.tsx');
+    // Every way to open, keep or close the dialog goes through the rule
+    // `dashboard-actions.test.ts` asserts.
+    expect(text).not.toMatch(/setPendingDelete\((null|summary)\)/);
+    expect(text).toMatch(/if \(e\.key === 'Escape'\) keep\(\);/);
+    expect(text).toMatch(
+      /data-testid="session-delete-confirm-no"[^<]*?aria-disabled=\{deleting\.busy \|\| undefined\}[^<]*?onClick=\{keep\}/,
+    );
+    expect(text).toMatch(
+      /`session-delete-\$\{summary\.id\}`[^<]*?aria-disabled=\{deleting\.busy \|\| undefined\}/,
+    );
+  });
+
+  it('moves focus after a dialog closes only when the user is still there', () => {
+    for (const file of ['SessionHistory.tsx', 'CompanyProfiles.tsx']) {
+      expect(section(file), file).toMatch(/const hadFocus = focusWithin\(document\.activeElement/);
+    }
+    expect(section('SessionHistory.tsx')).not.toMatch(/^\s*focusLater\(HEADING_ID\);/m);
   });
 
   it('names each row button after its session', () => {

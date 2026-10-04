@@ -7,6 +7,7 @@
  * and the drop zone actually call it.
  */
 import { describe, expect, it, vi } from 'vitest';
+import { focusWithin } from '../../src/renderer/dashboard/focus.js';
 import { createInFlightGate } from '../../src/renderer/dashboard/inFlight.js';
 import {
   announcedPercent,
@@ -15,7 +16,9 @@ import {
 } from '../../src/renderer/dashboard/sections/CompanyProfiles.js';
 import { parseThresholds } from '../../src/renderer/dashboard/sections/CostAndUsage.js';
 import { withStoredBinding } from '../../src/renderer/dashboard/sections/Hotkeys.js';
+import { pendingDeleteAfter } from '../../src/renderer/dashboard/sections/SessionHistory.js';
 import { DEFAULT_PROMPT_ID } from '../../src/shared/prompts.js';
+import type { SessionSummary } from '../../src/shared/types.js';
 
 /** A promise the test settles by hand, so "still pending" is a real state. */
 function deferred(): { promise: Promise<void>; resolve: () => void; reject: (e: Error) => void } {
@@ -217,5 +220,61 @@ describe('the model download is announced in steps (NFR-010)', () => {
     expect([0, 1, 24.9, 25, 49, 50, 74, 75, 99, 100].map(announcedPercent)).toEqual([
       0, 0, 0, 25, 25, 50, 50, 75, 75, 100,
     ]);
+  });
+});
+
+describe('a transcript delete in flight cannot be cancelled or replaced (FR-110)', () => {
+  function summary(id: string): SessionSummary {
+    return {
+      id,
+      profileId: 'profile-a',
+      profileNameSnapshot: 'Acme',
+      startedAt: '2026-10-04T10:00:00.000Z',
+      endedAt: '2026-10-04T10:30:00.000Z',
+      entryCount: 3,
+      estimatedUsd: 0,
+      endReason: 'user',
+    };
+  }
+
+  it('opens the confirmation for a row and closes it on Keep it when nothing is deleting', () => {
+    const asked = pendingDeleteAfter(null, false, { kind: 'ask', summary: summary('s-1') });
+    expect(asked?.id).toBe('s-1');
+    expect(pendingDeleteAfter(asked, false, { kind: 'keep' })).toBeNull();
+  });
+
+  it('keeps the confirmation open on Keep it while its delete is in flight', () => {
+    // Closed here, the dialog looked like a cancel while the delete went on.
+    const open = summary('s-1');
+    expect(pendingDeleteAfter(open, true, { kind: 'keep' })).toBe(open);
+  });
+
+  it('opens no other confirmation while a delete is in flight', () => {
+    const open = summary('s-1');
+    expect(pendingDeleteAfter(open, true, { kind: 'ask', summary: summary('s-2') })).toBe(open);
+  });
+
+  it('lets a settled delete close only its own confirmation', () => {
+    const newer = summary('s-2');
+    expect(pendingDeleteAfter(newer, false, { kind: 'settled', sessionId: 's-1' })).toBe(newer);
+    expect(pendingDeleteAfter(newer, false, { kind: 'settled', sessionId: 's-2' })).toBeNull();
+  });
+});
+
+describe('a closing dialog moves focus only when the user is still there (NFR-010)', () => {
+  const node = {} as Node;
+  const holding = { contains: (n: Node | null) => n === node };
+  const elsewhere = { contains: () => false };
+
+  it('moves focus when it is inside one of the regions', () => {
+    expect(focusWithin(node, [elsewhere, holding])).toBe(true);
+  });
+
+  it('leaves focus alone when the user moved it out of every region', () => {
+    expect(focusWithin(node, [elsewhere, null, undefined])).toBe(false);
+  });
+
+  it('leaves focus alone when nothing has focus', () => {
+    expect(focusWithin(null, [{ contains: () => true }])).toBe(false);
   });
 });

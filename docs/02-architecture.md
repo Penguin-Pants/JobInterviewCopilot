@@ -1276,7 +1276,7 @@ payload is rejected and logged, never passed through.
 | CH-119 | `overlay:savePosition` | `{ x, y, displayId }` | `{ ok: true }` |
 | CH-120 | `consent:dismiss` | none | `{ ok: true }` |
 | CH-121 | `overlay:reset` | none | `{ ok: true, x, y, displayId }` |
-| CH-122 | `overlay:ready` | none | `{ ok: true }` |
+| CH-122 | `overlay:ready` | `{ sessionId }` | `{ ok: true } \| { refused: 'another-session' }` |
 | CH-123 | `doc:retry` | `{ docId, profileId }` | `DocumentRecord` |
 | CH-124 | `model:ensure` | none | `ModelDownloadState` |
 | CH-125 | `doc:pickFiles` | `{ profileId }` | `DocumentRecord[]` |
@@ -1319,6 +1319,18 @@ in Milestone 0 and are recorded here for the first time. The rest are new:
   a file on disk, and `webUtils` is reachable from a preload only. It is
   optional on `CopilotBridge` and absent from the overlay preload, which accepts
   no drops.
+
+**Changes made in the renderer UX audit follow-up (ADR-016, DoD 9).**
+
+- `CH-122` `overlay:ready` names the session its consent card was rendered
+  for: the `sessionId` of the last `CH-201` push, or `null` when no session
+  runs. `OverlayGate.reset` records the session that starts or `null` when one
+  stops, and the gate refuses a report for any other session with
+  `{ refused: 'another-session' }`. Without it, a late report or retry from the
+  previous interview could arrive after the reset and before the renewed
+  reminder had painted, and open the next interview's gate early. The renderer
+  also stops a retry as soon as a newer `CH-201` push names another session.
+  The refusal is an answer, not a thrown error, because the race is expected.
 
 ### Main to renderer, push (`webContents.send`)
 
