@@ -26,6 +26,13 @@ export class FakeEmbedder implements Embedder {
   unavailableReason: string | null = null;
   /** How many times the model gate asked for the model. */
   ensureReadyCalls = 0;
+  /** True once the model is in memory. `ready` alone only says it is on disk. */
+  loaded = false;
+  /**
+   * Loads and embeds in order. A load the query pays for itself, as the real
+   * embedder's `embed` does on a cold model, is logged as `'cold-load'`.
+   */
+  readonly log: ('load' | 'cold-load' | 'embed')[] = [];
 
   constructor(
     private readonly modelInfo: EmbeddingModelInfo = {
@@ -48,6 +55,8 @@ export class FakeEmbedder implements Embedder {
     this.ensureReadyCalls += 1;
     if (this.unavailableReason) throw new Error(this.unavailableReason);
     this.ready = true;
+    if (!this.loaded) this.log.push('load');
+    this.loaded = true;
   }
 
   /** How many texts have been embedded across every call. */
@@ -72,6 +81,9 @@ export class FakeEmbedder implements Embedder {
 
   async embed(texts: string[]): Promise<Float32Array[]> {
     this.calls.push([...texts]);
+    if (!this.loaded) this.log.push('cold-load');
+    this.loaded = true;
+    this.log.push('embed');
     if (this.failNext) {
       const err = this.failNext;
       this.failNext = null;

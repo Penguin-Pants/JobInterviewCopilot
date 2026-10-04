@@ -1,6 +1,8 @@
-import { existsSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { convertToMarkdown } from '../../src/main/rag/convert.js';
+import { KB_CEILING, KB_INGEST_LIMITS } from '../../src/shared/defaults.js';
 import { buildDocx, buildPdf } from '../fakes/documents.js';
 import { makeHarness, NOTES_MD, RESUME_MD, withProfile } from '../fakes/rag-harness.js';
 import type { Chunk } from '../../src/shared/types.js';
@@ -10,8 +12,12 @@ import type { Chunk } from '../../src/shared/types.js';
  * TC-060, TC-062, TC-063, TC-069, TC-070, TC-073, TC-074, TC-149.
  */
 
-function chunksOf(harness: ReturnType<typeof makeHarness>, profileId: string, docId: string) {
-  return harness.engine.store.readChunkSet(profileId, docId)?.chunks as Chunk[] | undefined;
+async function chunksOf(
+  harness: ReturnType<typeof makeHarness>,
+  profileId: string,
+  docId: string,
+): Promise<Chunk[] | undefined> {
+  return (await harness.engine.store.readChunkSet(profileId, docId))?.chunks;
 }
 
 describe('TC-060 format ingest', () => {
@@ -214,7 +220,7 @@ describe('TC-069 and TC-070 the embedding cache', () => {
     await h.engine.processFile(profile.id, record!.originalPath);
 
     expect(h.embedder.embeddedCount).toBeGreaterThan(0);
-    expect(h.engine.store.readChunkSet(profile.id, record!.id)).not.toBeNull();
+    expect(await h.engine.store.readChunkSet(profile.id, record!.id)).not.toBeNull();
   });
 });
 
@@ -227,7 +233,7 @@ describe('TC-073, TC-074 and TC-149 doc-type override', () => {
     expect(record!.docType).toBe('resume');
     expect(record!.docTypeSource).toBe('auto');
 
-    const before = h.engine.store.readChunkSet(profile.id, record!.id)!;
+    const before = (await h.engine.store.readChunkSet(profile.id, record!.id))!;
     h.embedder.reset();
 
     const updated = await h.engine.setDocType(profile.id, record!.id, 'company-notes');
@@ -235,7 +241,7 @@ describe('TC-073, TC-074 and TC-149 doc-type override', () => {
     expect(h.embedder.calls).toEqual([]);
     expect(updated!.docType).toBe('company-notes');
     expect(updated!.docTypeSource).toBe('user');
-    const after = h.engine.store.readChunkSet(profile.id, record!.id)!;
+    const after = (await h.engine.store.readChunkSet(profile.id, record!.id))!;
     expect(after.chunks.every((c) => c.docType === 'company-notes')).toBe(true);
     // The vectors are untouched: doc type is metadata, not an embedding input.
     expect([...after.vectors]).toEqual([...before.vectors]);
@@ -257,9 +263,9 @@ describe('TC-073, TC-074 and TC-149 doc-type override', () => {
     expect(after.state).toBe('ready');
     expect(after.docType).toBe('job-description');
     expect(after.docTypeSource).toBe('user');
-    expect(chunksOf(h, profile.id, record!.id)!.every((c) => c.docType === 'job-description')).toBe(
-      true,
-    );
+    expect(
+      (await chunksOf(h, profile.id, record!.id))!.every((c) => c.docType === 'job-description'),
+    ).toBe(true);
   });
 
   it('resetting to auto re-runs the guess without re-embedding', async () => {
@@ -275,7 +281,9 @@ describe('TC-073, TC-074 and TC-149 doc-type override', () => {
     expect(h.embedder.calls).toEqual([]);
     expect(reset!.docTypeSource).toBe('auto');
     expect(reset!.docType).toBe('resume');
-    expect(chunksOf(h, profile.id, record!.id)!.every((c) => c.docType === 'resume')).toBe(true);
+    expect((await chunksOf(h, profile.id, record!.id))!.every((c) => c.docType === 'resume')).toBe(
+      true,
+    );
   });
 
   it('a document in error retries from the Dashboard without re-import', async () => {
@@ -291,7 +299,7 @@ describe('TC-073, TC-074 and TC-149 doc-type override', () => {
     expect(retried!.state).toBe('ready');
     expect(retried!.errorMessage).toBeNull();
     expect(retried!.id).toBe(record!.id);
-    expect(h.engine.store.readChunkSet(profile.id, record!.id)).not.toBeNull();
+    expect(await h.engine.store.readChunkSet(profile.id, record!.id)).not.toBeNull();
   });
 
   it('setDocType and retryDocument return null for an unknown document', async () => {
@@ -362,9 +370,9 @@ describe('races between an ingest and the user', () => {
     expect(after.docTypeSource).toBe('user');
     expect(after.docType).toBe('job-description');
     expect(after.state).toBe('ready');
-    expect(chunksOf(h, profile.id, docId)!.every((c) => c.docType === 'job-description')).toBe(
-      true,
-    );
+    expect(
+      (await chunksOf(h, profile.id, docId))!.every((c) => c.docType === 'job-description'),
+    ).toBe(true);
   });
 
   it('does not resurrect a document deleted during its FIRST ingest', async () => {
@@ -520,6 +528,204 @@ describe('one bad file never aborts a batch or a launch', () => {
     // so the user clicked Create again and got a duplicate.
     const profile = await h.engine.createProfile('Acme');
     expect(h.engine.listProfiles().map((p) => p.id)).toEqual([profile.id]);
+  });
+});
+
+describe('a delete that lands during conversion', () => {
+  /** A converter that waits at the gate, so a delete lands mid-conversion. */
+  function holdAtConvert(fail: Error | null = null): {
+    convert: typeof convertToMarkdown;
+    atConvert: Promise<void>;
+    release: () => void;
+  } {
+    let reached = (): void => {};
+    const atConvert = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    let release = (): void => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const convert: typeof convertToMarkdown = async (bytes, format, signal) => {
+      reached();
+      await held;
+      if (fail) throw fail;
+      return convertToMarkdown(bytes, format, signal);
+    };
+    return { convert, atConvert, release };
+  }
+
+  it('does not bring back a .md deleted while it converted', async () => {
+    const gate = holdAtConvert();
+    const h = makeHarness({ convert: gate.convert });
+    const profile = await withProfile(h);
+    const path = h.writeKbFile(profile.id, 'a.md', RESUME_MD);
+
+    const ingesting = h.engine.processFile(profile.id, path);
+    await gate.atConvert;
+    const docId = h.engine.store.get(profile.id)!.documents[0]!.id;
+    await h.engine.deleteDocument(profile.id, docId);
+    gate.release();
+    await ingesting;
+
+    // `publish` inserted a missing id, so the deleted document came back,
+    // was embedded and was published `ready`.
+    expect(h.engine.store.get(profile.id)!.documents).toEqual([]);
+    expect(h.embedder.calls).toEqual([]);
+    expect(await h.engine.query(profile.id, 'Acme Corp', 3)).toEqual([]);
+  });
+
+  it('does not bring back a .pdf deleted while it converted', async () => {
+    const gate = holdAtConvert();
+    const h = makeHarness({ convert: gate.convert });
+    const profile = await withProfile(h);
+    const path = h.writeKbFile(
+      profile.id,
+      'notes.pdf',
+      buildPdf(['# Company', 'Founded in 2015 and headquartered in Berlin.']),
+    );
+
+    const ingesting = h.engine.processFile(profile.id, path);
+    await gate.atConvert;
+    const docId = h.engine.store.get(profile.id)!.documents[0]!.id;
+    await h.engine.deleteDocument(profile.id, docId);
+    gate.release();
+    await ingesting;
+
+    expect(h.engine.store.get(profile.id)!.documents).toEqual([]);
+    expect(existsSync(h.engine.store.derivedMarkdownPath(profile.id, docId))).toBe(false);
+    expect(h.embedder.calls).toEqual([]);
+  }, 30000);
+
+  it('does not bring back an error row for a document deleted before it failed', async () => {
+    const gate = holdAtConvert(new Error('parser crashed'));
+    const h = makeHarness({ convert: gate.convert });
+    const profile = await withProfile(h);
+    const path = h.writeKbFile(profile.id, 'a.md', RESUME_MD);
+
+    const ingesting = h.engine.processFile(profile.id, path);
+    await gate.atConvert;
+    const docId = h.engine.store.get(profile.id)!.documents[0]!.id;
+    await h.engine.deleteDocument(profile.id, docId);
+    gate.release();
+    await ingesting;
+
+    expect(h.engine.store.get(profile.id)!.documents).toEqual([]);
+  });
+});
+
+describe('ingest limits (ADR-054)', () => {
+  it('rejects a file above the hard cap with a row, without reading it', async () => {
+    const h = makeHarness();
+    const profile = await withProfile(h);
+    const path = h.writeKbFile(profile.id, 'huge.md', '');
+    truncateSync(path, KB_INGEST_LIMITS.maxFileBytes + 1);
+
+    await h.engine.processFile(profile.id, path);
+
+    const [record] = h.engine.store.get(profile.id)!.documents;
+    expect(record!.state).toBe('error');
+    expect(record!.errorMessage).toMatch(/larger than the 50 MB limit/);
+    expect(h.embedder.calls).toEqual([]);
+  });
+
+  it('still processes a document above the 2 MB re-embed ceiling (FR-068)', async () => {
+    const h = makeHarness();
+    const profile = await withProfile(h);
+    const line = 'Acme Corp shipped the billing pipeline on time.\n';
+    const body = `# Notes\n\n${line.repeat(Math.ceil((KB_CEILING.maxBytes + 1) / line.length))}`;
+    const path = h.writeKbFile(profile.id, 'big.md', body);
+
+    await h.engine.processFile(profile.id, path);
+
+    expect(h.engine.store.get(profile.id)!.documents[0]!.state).toBe('ready');
+  }, 60000);
+
+  it('fails a conversion that outlives the timeout instead of hanging', async () => {
+    let signalled = false;
+    const h = makeHarness({
+      conversionTimeoutMs: 20,
+      convert: (_bytes, _format, signal) =>
+        new Promise((_resolve, reject) => {
+          signal?.addEventListener('abort', () => {
+            signalled = true;
+            reject(new Error('aborted'));
+          });
+        }),
+    });
+    const profile = await withProfile(h);
+    const path = h.writeKbFile(profile.id, 'stuck.pdf', buildPdf(['# Company']));
+
+    await h.engine.processFile(profile.id, path);
+
+    const [record] = h.engine.store.get(profile.id)!.documents;
+    expect(record!.state).toBe('error');
+    expect(record!.errorMessage).toMatch(/took too long/);
+    // The parser is told to stop, so its worker does not run on unseen.
+    expect(signalled).toBe(true);
+    // And the path is free: a retry runs rather than queueing behind a hang.
+    expect((await h.engine.retryDocument(profile.id, record!.id))!.state).toBe('error');
+  });
+});
+
+describe('error rows name no path (NFR-003, Definition of Done)', () => {
+  it('a copy failure reports the errno, not the message with the source path', async () => {
+    const h = makeHarness();
+    const profile = await withProfile(h);
+    const missing = join(h.dir, 'sources', 'gone.md');
+
+    const [record] = await h.engine.importDocuments(profile.id, [missing]);
+
+    expect(record!.state).toBe('error');
+    expect(record!.errorMessage).toMatch(/\(ENOENT\)/);
+    expect(record!.errorMessage).not.toContain(h.dir);
+  });
+
+  it('an unexpected ingest failure reports no path either', async () => {
+    const h = makeHarness();
+    const profile = await withProfile(h);
+    const path = h.writeKbFile(profile.id, 'a.md', RESUME_MD);
+    // The `embedding` transition fails the way an antivirus lock on the
+    // profile.json rename does. Node puts the absolute path in the message.
+    const realUpdate = h.engine.store.updateDocument.bind(h.engine.store);
+    let calls = 0;
+    h.engine.store.updateDocument = ((...args: Parameters<typeof realUpdate>) => {
+      calls += 1;
+      if (calls === 1) {
+        throw Object.assign(new Error(`EPERM: operation not permitted, rename '${path}.tmp'`), {
+          code: 'EPERM',
+        });
+      }
+      return realUpdate(...args);
+    }) as typeof realUpdate;
+
+    await h.engine.processFile(profile.id, path);
+
+    const [record] = h.engine.store.get(profile.id)!.documents;
+    expect(record!.state).toBe('error');
+    expect(record!.errorMessage).toMatch(/EPERM/);
+    expect(record!.errorMessage).not.toContain(h.dir);
+  });
+
+  it('two concurrent imports of one file name both succeed', async () => {
+    const h = makeHarness();
+    const profile = await withProfile(h);
+    const source = h.writeSourceFile('resume.md', RESUME_MD);
+
+    // Both picked `resume.md`, and the loser's COPYFILE_EXCL failure was
+    // reported as an error row instead of moving on to the next free name.
+    const [first, second] = await Promise.all([
+      h.engine.importDocuments(profile.id, [source]),
+      h.engine.importDocuments(profile.id, [source]),
+    ]);
+
+    expect([first![0]!.state, second![0]!.state]).toEqual(['ready', 'ready']);
+    expect(
+      h.engine.store
+        .get(profile.id)!
+        .documents.map((d) => d.originalFileName)
+        .sort(),
+    ).toEqual(['resume (1).md', 'resume.md']);
   });
 });
 

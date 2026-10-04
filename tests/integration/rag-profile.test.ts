@@ -1,14 +1,18 @@
 import {
+  cpSync,
   existsSync,
   mkdirSync as mkdirSyncReal,
   readdirSync,
   readFileSync,
+  renameSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { makeHarness, NOTES_MD, RESUME_MD } from '../fakes/rag-harness.js';
+import { RagEngine } from '../../src/main/rag.js';
+import { FakeEmbedder } from '../fakes/embedder.js';
+import { makeHarness, ManualWatcher, NOTES_MD, RESUME_MD } from '../fakes/rag-harness.js';
 
 /**
  * TASK-020. TC-160 profile deletion cascade (FR-069).
@@ -252,5 +256,133 @@ describe('TC-160 profile deletion cascade', () => {
 
     expect(h.engine.store.get(id)).toBeNull();
     expect(h.engine.listProfiles().map((p) => p.id)).toEqual([]);
+  });
+
+  it('keeps the real name when a truncated index is recovered and then written', async () => {
+    const h = makeHarness();
+    const profile = await h.engine.createProfile('Acme Interview');
+    await h.engine.importDocuments(profile.id, [h.writeSourceFile('resume.md', RESUME_MD)]);
+    const file = join(h.engine.store.profileDir(profile.id), 'profile.json');
+    const full = readFileSync(file, 'utf8');
+
+    // Cut inside `documents`, after the name and the creation time.
+    writeFileSync(file, full.slice(0, full.indexOf('"documents"') + 20));
+
+    expect(h.engine.store.get(profile.id)!.name).toBe('Acme Interview');
+    // Reconciliation writes the index. The placeholder name used to be written
+    // with it, and the real name was then gone for good.
+    await h.engine.reconcile(profile.id);
+    const after = h.engine.store.get(profile.id)!;
+    expect(after.name).toBe('Acme Interview');
+    expect(after.createdAt).toBe(profile.createdAt);
+    expect(after.documents).toHaveLength(1);
+  });
+
+  it('uses the placeholder only when no name can be read back', async () => {
+    const h = makeHarness();
+    const profile = await h.engine.createProfile('Acme');
+    writeFileSync(join(h.engine.store.profileDir(profile.id), 'profile.json'), '{ broken');
+
+    expect(h.engine.store.get(profile.id)!.name).toBe('Recovered profile');
+  });
+
+  it('a profile folder copied under a new id addresses its own folder', async () => {
+    const h = makeHarness();
+    const original = await h.engine.createProfile('Original');
+    await h.engine.importDocuments(original.id, [h.writeSourceFile('resume.md', RESUME_MD)]);
+    const copyId = '11111111-2222-4333-8444-555555555555';
+    cpSync(h.engine.store.profileDir(original.id), h.engine.store.profileDir(copyId), {
+      recursive: true,
+    });
+
+    const copy = h.engine.store.get(copyId)!;
+    // The copy's profile.json still names the original id. Trusting it sent
+    // every write for the copy into the original's folder.
+    expect(copy.id).toBe(copyId);
+    expect(copy.documents.every((d) => d.profileId === copyId)).toBe(true);
+    expect(copy.documents[0]!.originalPath).toBe(join(h.engine.store.kbDir(copyId), 'resume.md'));
+
+    await h.engine.reconcile(copyId);
+    expect(h.engine.store.get(original.id)!.name).toBe('Original');
+    expect(h.engine.store.get(copyId)!.documents).toHaveLength(1);
+  });
+
+  it('drops an invalid document row instead of failing reconciliation', async () => {
+    const h = makeHarness();
+    const profile = await h.engine.createProfile('Acme');
+    await h.engine.importDocuments(profile.id, [h.writeSourceFile('resume.md', RESUME_MD)]);
+    const file = join(h.engine.store.profileDir(profile.id), 'profile.json');
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as { documents: unknown[] };
+    parsed.documents.unshift(null, { id: 'not-a-uuid' }, 42);
+    parsed.documents.push({
+      ...(parsed.documents[3] as object),
+      id: '11111111-2222-4333-8444-555555555555',
+      originalFileName: '../../escape.md',
+    });
+    writeFileSync(file, JSON.stringify(parsed));
+
+    const documents = h.engine.store.get(profile.id)!.documents;
+    expect(documents).toHaveLength(1);
+    expect(documents[0]!.originalFileName).toBe('resume.md');
+    // A null row made `.find` throw out of reconcile and out of `start`.
+    await expect(h.engine.reconcile(profile.id)).resolves.toBeUndefined();
+    expect(h.engine.store.get(profile.id)!.documents).toHaveLength(1);
+  });
+});
+
+describe('a moved userData keeps its index (ADR-014)', () => {
+  it('rebases document paths, keeps overrides and re-embeds nothing', async () => {
+    const h = makeHarness();
+    const profile = await h.engine.createProfile('Acme');
+    const [md] = await h.engine.importDocuments(profile.id, [
+      h.writeSourceFile('resume.md', RESUME_MD),
+    ]);
+    const [notes] = await h.engine.importDocuments(profile.id, [
+      h.writeSourceFile('notes.md', NOTES_MD),
+    ]);
+    await h.engine.setDocType(profile.id, md!.id, 'job-description');
+    await h.engine.stop();
+
+    const moved = `${h.dir}-moved`;
+    renameSync(h.dir, moved);
+    const embedder = new FakeEmbedder();
+    const engine = new RagEngine({
+      userDataDir: moved,
+      embedder,
+      watcherFactory: () => new ManualWatcher(),
+    });
+    const kb = engine.store.kbDir(profile.id);
+
+    await engine.reconcile(profile.id);
+
+    const documents = engine.store.get(profile.id)!.documents;
+    expect(documents.map((d) => d.id).sort()).toEqual([md!.id, notes!.id].sort());
+    const resume = documents.find((d) => d.id === md!.id)!;
+    expect(resume.originalPath).toBe(join(kb, 'resume.md'));
+    expect(resume.docType).toBe('job-description');
+    expect(resume.docTypeSource).toBe('user');
+    // Every record matched its file, so nothing was dropped and re-embedded.
+    expect(embedder.calls).toEqual([]);
+
+    await engine.deleteDocument(profile.id, md!.id);
+    expect(existsSync(join(kb, 'resume.md'))).toBe(false);
+  });
+
+  it('rebases the derived Markdown path of a converted document', async () => {
+    const h = makeHarness();
+    const profile = await h.engine.createProfile('Acme');
+    const [record] = await h.engine.importDocuments(profile.id, [
+      h.writeSourceFile('resume.md', RESUME_MD),
+    ]);
+    const file = join(h.engine.store.profileDir(profile.id), 'profile.json');
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as {
+      documents: { derivedMarkdownPath: string | null; sourceFormat: string }[];
+    };
+    parsed.documents[0]!.derivedMarkdownPath = 'C:/old/install/derived/x.md';
+    writeFileSync(file, JSON.stringify(parsed));
+
+    expect(h.engine.store.findDocument(profile.id, record!.id)!.derivedMarkdownPath).toBe(
+      h.engine.store.derivedMarkdownPath(profile.id, record!.id),
+    );
   });
 });

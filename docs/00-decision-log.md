@@ -2330,3 +2330,34 @@ The hold buffer restarts `FR-115`'s hold when the shown generation replaces its
 own card, because that card is newly visible; otherwise the next question could
 replace the retry's answer at once. `OverlayGate` already treats every `begin`
 as a new card, so a rebuilt overlay is replayed the replacement alone.
+
+### ADR-054 — A hard per-file ingest cap and a conversion timeout
+
+**Decided 2026-10-04** while fixing the knowledge base audit findings.
+
+**Context.** `FR-068`'s 2 MB and 200-chunk ceiling bounds a timing promise
+only: a document above it still processes. Nothing bounded what one file may
+cost. The whole file was read into memory, then read again by the converter,
+and `pdf-parse` had no timeout. A very large or hostile PDF could exhaust the
+main process's memory (`NFR-004`), or leave its document in `converting` for the
+rest of the process, with every later pass for that path queued behind it.
+
+**Decision.** Two hard limits, in `KB_INGEST_LIMITS` in `src/shared/defaults.ts`,
+separate from `KB_CEILING`:
+
+1. **50 MB per file.** The file is checked with `stat` before it is read, and the
+   length is checked again after the read. A file above the cap gets an `error`
+   row that names the limit. 50 MB is 25 times the ceiling, so a resume, a job
+   description or a long PDF of company notes with images stays well inside it,
+   and `FR-068`'s "above the ceiling the document is still processed" still
+   holds for every document between 2 MB and 50 MB.
+2. **120 seconds per conversion.** A conversion that runs longer fails its
+   document with an `error` row. The converter gets an `AbortSignal`, and a PDF
+   parse destroys its pdfjs worker on abort.
+
+The file is read once, and those bytes are both hashed and converted, so the
+cache key always describes the content that was converted.
+
+**Consequence.** `withinReembedCeiling`, which only tests called, is removed;
+the tests compare against `KB_CEILING` directly. The Dashboard's retry action
+works on both new error rows as on any other. `TC-163` covers both limits.

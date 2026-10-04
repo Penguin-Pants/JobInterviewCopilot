@@ -376,8 +376,8 @@ async function bootstrap(): Promise<void> {
   installPermissionHandler((contents) => audioHost.owns(contents));
 
   // The knowledge base engine (CMP-06). Constructing it is cheap and touches no
-  // network: the embedding model is only loaded when a document is ingested
-  // (ADR-011).
+  // network: the embedding model is loaded when a document is ingested, or
+  // from disk by `warmModel`, never here (ADR-011).
   rag = new RagEngine({
     userDataDir: userData,
     onDocumentProgress: (docId, state, percent) =>
@@ -544,6 +544,9 @@ async function startKnowledgeBase(): Promise<void> {
     // exist, and `rag.start()` reconciles every document behind it.
     markProfilesReady();
     await rag.start();
+    // In the background: a cached model then loads now rather than inside the
+    // first question's budget. It never downloads (NFR-001, ADR-011).
+    void rag.warmModel(config.get().activeProfileId);
   } catch (err) {
     getLogger().error('the knowledge base failed to start', err);
   } finally {
@@ -1588,6 +1591,10 @@ function registerIpcHandlers(): void {
       // boundary that same card would be replayed to the next interview
       // before it had produced anything of its own (ADR-036).
       overlayGate.reset();
+
+      // Again at session start, for a profile switched to since launch. A
+      // no-op when the model is already in memory (NFR-001, ADR-011).
+      if (profile) void rag.warmModel(profile.id);
 
       // The overlay is created hidden and shown for the session, as section
       // 5.1 sequences it. `showInactive` so the interviewer's window keeps

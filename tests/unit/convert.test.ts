@@ -1,6 +1,3 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   ConversionError,
@@ -16,16 +13,6 @@ import { buildDocx, buildPdf } from '../fakes/documents.js';
  * TASK-020. The pure half of the converter, plus the failure paths that turn a
  * parser error into a Dashboard sentence (TC-060, TC-063).
  */
-
-function tmp(): string {
-  return mkdtempSync(join(tmpdir(), 'icp-convert-'));
-}
-
-function write(name: string, contents: string | Buffer): string {
-  const path = join(tmp(), name);
-  writeFileSync(path, contents);
-  return path;
-}
 
 describe('sourceFormatFor', () => {
   it('maps the supported extensions, case-insensitively', () => {
@@ -102,38 +89,32 @@ describe('stripPageSeparators', () => {
 describe('convertToMarkdown failure paths (TC-063)', () => {
   it('reads .md as-is, byte for byte', async () => {
     const source = '# Heading\n\nBody with  odd   spacing.\n';
-    const result = await convertToMarkdown(write('a.md', source), 'md');
+    const result = await convertToMarkdown(Buffer.from(source), 'md');
     expect(result).toEqual({ markdown: source, extractionQuality: 'native' });
   });
 
   it('turns a corrupt PDF into a ConversionError with a sentence', async () => {
-    const path = write('broken.pdf', Buffer.from('%PDF-1.4\nnot actually a pdf'));
+    const bytes = Buffer.from('%PDF-1.4\nnot actually a pdf');
 
-    await expect(convertToMarkdown(path, 'pdf')).rejects.toBeInstanceOf(ConversionError);
-    await expect(convertToMarkdown(path, 'pdf')).rejects.toThrow(/PDF text extraction failed/);
+    await expect(convertToMarkdown(bytes, 'pdf')).rejects.toBeInstanceOf(ConversionError);
+    await expect(convertToMarkdown(bytes, 'pdf')).rejects.toThrow(/PDF text extraction failed/);
   }, 30000);
 
   it('names the scanned-PDF case rather than reporting an empty document', async () => {
     // A valid PDF with no text operators: what a scan without OCR looks like.
-    const path = write('scanned.pdf', buildPdf([]));
-
-    await expect(convertToMarkdown(path, 'pdf')).rejects.toThrow(/no text layer/i);
+    await expect(convertToMarkdown(buildPdf([]), 'pdf')).rejects.toThrow(/no text layer/i);
   }, 30000);
 
   it('turns a corrupt DOCX into a ConversionError', async () => {
-    const path = write('broken.docx', Buffer.from('PK not a real zip'));
+    const bytes = Buffer.from('PK not a real zip');
 
-    await expect(convertToMarkdown(path, 'docx')).rejects.toBeInstanceOf(ConversionError);
-    await expect(convertToMarkdown(path, 'docx')).rejects.toThrow(/DOCX conversion failed/);
+    await expect(convertToMarkdown(bytes, 'docx')).rejects.toBeInstanceOf(ConversionError);
+    await expect(convertToMarkdown(bytes, 'docx')).rejects.toThrow(/DOCX conversion failed/);
   }, 30000);
 
   it('names an empty DOCX rather than producing an empty document', async () => {
-    const path = write('empty.docx', buildDocx([{ text: '' }]));
-
-    await expect(convertToMarkdown(path, 'docx')).rejects.toThrow(/contains no text/i);
+    await expect(convertToMarkdown(buildDocx([{ text: '' }]), 'docx')).rejects.toThrow(
+      /contains no text/i,
+    );
   }, 30000);
-
-  it('rejects a missing file rather than returning empty Markdown', async () => {
-    await expect(convertToMarkdown(join(tmp(), 'nope.md'), 'md')).rejects.toThrow();
-  });
 });

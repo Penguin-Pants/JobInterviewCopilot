@@ -1,4 +1,3 @@
-import { readFile } from 'node:fs/promises';
 import { extname } from 'node:path';
 import type { DocumentRecord } from '../../shared/types.js';
 
@@ -178,29 +177,24 @@ async function loadDocxConverter(): Promise<DocxConverter> {
 }
 
 /**
- * Read a source document and produce Markdown (FR-060, FR-061, TC-060, TC-062).
+ * Produce Markdown from a source document's bytes (FR-060, FR-061, TC-060, TC-062).
+ *
+ * Takes the bytes rather than a path. The caller already read the file to hash
+ * it, and a second read here could see a different file than the one hashed,
+ * so the cache key would describe content that was never converted.
+ *
+ * `signal` stops a PDF parse the caller gave up on, so a stuck pdfjs worker does
+ * not keep running after its document has failed (ADR-054).
  *
  * Throws {@link ConversionError} rather than a raw parser error, so a Dashboard
  * row shows a sentence instead of a stack frame. The caller turns that into
  * `state: 'error'`; this function never decides a document's state (TC-063).
  */
 export async function convertToMarkdown(
-  path: string,
+  bytes: Buffer,
   format: SourceFormat,
+  signal?: AbortSignal,
 ): Promise<ConversionResult> {
-  // Reading sat outside every try, so ENOENT, EACCES and EISDIR surfaced raw and
-  // the caller rendered `Conversion failed: ENOENT: no such file or directory,
-  // open '...'` into a Dashboard row, absolute path and all.
-  let bytes: Buffer;
-  try {
-    bytes = await readFile(path);
-  } catch (err) {
-    // The errno, not the message: a Node fs message embeds the absolute path,
-    // and this string is rendered in the Dashboard.
-    const code = (err as NodeJS.ErrnoException).code ?? 'unknown error';
-    throw new ConversionError(`Could not read the file (${code}).`);
-  }
-
   if (format === 'md') {
     return { markdown: bytes.toString('utf8'), extractionQuality: 'native' };
   }
@@ -208,6 +202,8 @@ export async function convertToMarkdown(
   if (format === 'pdf') {
     const PdfParse = await loadPdfParse();
     const parser = new PdfParse({ data: new Uint8Array(bytes) });
+    const stop = (): void => void parser.destroy().catch(() => undefined);
+    signal?.addEventListener('abort', stop, { once: true });
     let text: string;
     try {
       const result = await parser.getText();
@@ -222,6 +218,7 @@ export async function convertToMarkdown(
     } finally {
       // The parser owns a pdfjs worker. Leaking one per import would keep the
       // process alive after the user closes the app.
+      signal?.removeEventListener('abort', stop);
       await parser.destroy().catch(() => undefined);
     }
     if (text.trim().length === 0) {

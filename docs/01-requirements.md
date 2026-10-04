@@ -363,7 +363,9 @@ supported ceiling of 2 MB and 200 chunks, the change must be reflected in query
 results within 5 seconds of the file system settling. Above the ceiling the
 document is still processed, the 5-second target does not apply, and the
 Dashboard shows progress for that document. The ceiling must be stated in the
-Dashboard, not just in this document.
+Dashboard, not just in this document. Separately, a file above the hard per-file
+cap of 50 MB is not read, and a conversion that runs longer than 120 seconds is
+stopped; both end in an `error` row the Dashboard shows. (ADR-054)
 
 **FR-069** Every document must belong to exactly one profile. Deleting a profile
 must delete, from disk, its documents in `kb/`, its derived Markdown, its chunk

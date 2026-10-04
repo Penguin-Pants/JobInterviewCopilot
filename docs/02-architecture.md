@@ -279,10 +279,10 @@ the watcher starts and resets any document left in a non-terminal state.
 
 ```ts
 interface Profile {
-  id: string;            // uuid v4
+  id: string;            // uuid v4, the folder name; never read from the file
   name: string;
   createdAt: string;     // ISO 8601
-  kbPath: string;        // absolute
+  kbPath: string;        // absolute, recomputed on every read
   documents: DocumentRecord[];
 }
 
@@ -290,9 +290,9 @@ interface DocumentRecord {
   id: string;                  // uuid v4
   profileId: string;
   originalFileName: string;
-  originalPath: string;        // inside kb/
+  originalPath: string;        // kb/<originalFileName>, recomputed on every read
   sourceFormat: 'md' | 'pdf' | 'docx';
-  derivedMarkdownPath: string | null;   // null when sourceFormat === 'md'
+  derivedMarkdownPath: string | null;   // null when sourceFormat === 'md'; else recomputed on read
   docType: DocType;
   docTypeSource: 'auto' | 'user';       // a user override is never re-guessed
   contentHash: string;                  // sha256 of original bytes
