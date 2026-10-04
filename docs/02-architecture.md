@@ -275,7 +275,10 @@ credential for exactly this reason (ADR-017).
 which documents exist. `profile.json` is a derived index. A file that appears in
 `kb/` outside `doc:import` is adopted, not ignored. A file that disappears takes
 its record, chunks and vectors with it. A startup reconciliation pass runs before
-the watcher starts and resets any document left in a non-terminal state.
+the watcher starts and resets any document left in a non-terminal state. The
+pass ends by removing derived files that no record owns. When `profile.json`
+exists but cannot be read, every write is refused, so the pass does nothing and
+is tried again after 5 s, 30 s, 2 min and 10 min, then left to the next launch.
 
 ```ts
 interface Profile {
@@ -2051,7 +2054,9 @@ src/
       prompt.ts        TASK-031, section 6 assembled once for both providers
     overlay-gate.ts    FR-008, ADR-016, the overlay readiness buffer
     rag.ts             CMP-06 facade
-    rag/convert.ts     TASK-020, pdf-parse and mammoth to Markdown
+    rag/convert.ts     TASK-020, runs each conversion in a worker thread (ADR-055)
+    rag/convert-worker.ts  TASK-020, the worker entry, bundled as its own file
+    rag/extract.ts     TASK-020, pdf-parse and mammoth to Markdown
     rag/chunk.ts       TASK-021, pure and deterministic
     rag/embed.ts       TASK-022, @xenova/transformers, cache key, model gate
     rag/store.ts       TASK-020/022/024, profiles, chunks, vectors, the top-k scan

@@ -1,37 +1,42 @@
 import { extname } from 'node:path';
-import type { DocumentRecord } from '../../shared/types.js';
+import { Worker } from 'node:worker_threads';
+import convertWorkerPath from './convert-worker?modulePath';
+import {
+  ConversionError,
+  extractMarkdown,
+  type ConversionResult,
+  type ConvertReply,
+  type ConvertRequest,
+  type SourceFormat,
+} from './extract.js';
 
 /**
- * Document import and conversion (TASK-020, FR-060, FR-061).
+ * Document import and conversion (TASK-020, FR-060, FR-061, ADR-055).
  *
  * `.md` is ingested as-is: no derived file is written and `derivedMarkdownPath`
  * stays null. `.pdf` goes through `pdf-parse` and `.docx` through `mammoth`,
  * each producing Markdown written to `derived/<docId>.md`.
  *
- * Both converters are loaded lazily, at the first conversion of that format.
- * They pull large trees, `pdf-parse` a PDF parser and `mammoth` a zip reader,
- * and neither is on the path of a user who only ever drops Markdown in. Loading
- * them at module scope would put that cost on every app start.
+ * Both parsers run in a worker thread, one thread per conversion, and the
+ * parsers live in `extract.ts`. A parse in the main thread could not be bounded:
+ * mammoth takes no abort signal, and a parse that does not yield also starves
+ * the timer that should stop it. On timeout the engine aborts, and the worker
+ * is terminated, so no parse keeps running after its document has failed or
+ * beside a retry of the same file. It also keeps a long PDF off the thread that
+ * answers questions (NFR-001).
+ *
+ * Both parsers are loaded lazily, inside the worker, at the first conversion of
+ * that format, so a user who only ever drops Markdown in never loads them.
  */
 
-export type SourceFormat = DocumentRecord['sourceFormat'];
-/** Whether the text came out of the file natively or heuristically (FR-061). */
-export type ExtractionQuality = DocumentRecord['extractionQuality'];
-
-/** One converted document (FR-060, FR-061). */
-export interface ConversionResult {
-  markdown: string;
-  /** `'best-effort'` for PDF, whose layout recovery is heuristic (FR-061, TC-062). */
-  extractionQuality: ExtractionQuality;
-}
-
-/** Raised when a file cannot be converted. Carries a message fit for a Dashboard row. */
-export class ConversionError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'ConversionError';
-  }
-}
+export {
+  ConversionError,
+  pdfTextToMarkdown,
+  stripPageSeparators,
+  type ConversionResult,
+  type ExtractionQuality,
+  type SourceFormat,
+} from './extract.js';
 
 const EXTENSIONS: Record<string, SourceFormat> = {
   '.md': 'md',
@@ -53,128 +58,10 @@ export function sourceFormatFor(fileName: string): SourceFormat | null {
   return EXTENSIONS[extname(fileName).toLowerCase()] ?? null;
 }
 
-const LIST_ITEM = /^\s*([-*\u2022]|\d+[.)])\s+/;
-const HEADING = /^#{1,6}\s/;
+/** Starts one conversion worker. Injected by a test that needs a worker it controls. */
+export type SpawnConvertWorker = () => Worker;
 
-/**
- * Turn a PDF's extracted text into Markdown (FR-060, FR-061).
- *
- * Two repairs, both because a PDF stores glyph positions and not structure:
- *
- * 1. **Rejoin hard wraps.** A sentence laid out over three display lines arrives
- *    as three lines. Left alone, each becomes its own paragraph and the
- *    chunker's soft split on blank lines has nothing but single-line paragraphs
- *    to work with.
- * 2. **Restore paragraph breaks.** A PDF has no blank lines to lose, because a
- *    blank line draws no glyphs, so pdfjs never reports one. A line that ends a
- *    sentence is therefore treated as ending a paragraph, which is what gives
- *    the chunker a boundary to split on at all (FR-062).
- */
-export function pdfTextToMarkdown(text: string): string {
-  const normalized = text.replace(/\r\n?/g, '\n').replace(/\f/g, '\n\n');
-  const joined: string[] = [];
-
-  for (const raw of normalized.split('\n')) {
-    const line = raw.trim();
-    const previous = joined[joined.length - 1];
-
-    const previousIsOpen =
-      previous !== undefined &&
-      previous.length > 0 &&
-      // A line ending in sentence punctuation or a colon was a real break, not a
-      // wrap. Rejoining those would run distinct entries together.
-      !/[.!?:;]$/.test(previous) &&
-      !LIST_ITEM.test(previous) &&
-      // A heading is never continued by the line under it. Folding the first
-      // body line into the heading would destroy the section boundary the
-      // chunker splits on, which is the structure FR-062 depends on.
-      !HEADING.test(previous);
-
-    if (line.length === 0 || LIST_ITEM.test(line) || HEADING.test(line) || !previousIsOpen) {
-      joined.push(line);
-      continue;
-    }
-    joined[joined.length - 1] = `${previous} ${line}`;
-  }
-
-  const spaced: string[] = [];
-  for (const line of joined) {
-    const previous = spaced[spaced.length - 1];
-    const needsBreak =
-      previous !== undefined &&
-      previous.length > 0 &&
-      line.length > 0 &&
-      /[.!?]$/.test(previous) &&
-      !LIST_ITEM.test(previous) &&
-      !LIST_ITEM.test(line);
-    if (needsBreak) spaced.push('');
-    spaced.push(line);
-  }
-
-  return collapseBlankRuns(spaced.join('\n'));
-}
-
-/**
- * pdf-parse's page separator, appended to `TextResult.text` but not to a page's
- * own text. It is chrome, not content: embedding it would put "-- 1 of 3 --" in
- * a vector and in a retrieved chunk the user reads.
- */
-const PAGE_SEPARATOR = /^\s*--\s*\d+\s+of\s+\d+\s*--\s*$/gm;
-
-/** Remove pdf-parse's page chrome from a concatenated text (FR-060). */
-export function stripPageSeparators(text: string): string {
-  return text.replace(PAGE_SEPARATOR, '');
-}
-
-/** Two blank lines in a row is a paragraph break; more is noise from the source. */
-function collapseBlankRuns(markdown: string): string {
-  return markdown.replace(/\n{3,}/g, '\n\n').trim();
-}
-
-/**
- * The pdf-parse v2 surface this app uses.
- *
- * v2 replaced v1's `pdfParse(buffer)` function with a `PDFParse` class that owns
- * a pdfjs worker, so the parser must be destroyed after use or the worker keeps
- * the process alive. Declared locally rather than imported: pulling the real
- * declarations drags `pdfjs-dist`'s types into every compile of the main
- * process for two members.
- */
-interface PdfParseConstructor {
-  new (options: { data: Uint8Array }): {
-    getText(): Promise<{ text: string; pages?: { num: number; text: string }[] }>;
-    destroy(): Promise<void>;
-  };
-}
-
-async function loadPdfParse(): Promise<PdfParseConstructor> {
-  const mod: unknown = await import('pdf-parse');
-  const namespace = (mod as { default?: unknown }).default ?? mod;
-  const candidate = (namespace as { PDFParse?: unknown }).PDFParse;
-  if (typeof candidate !== 'function') {
-    throw new ConversionError('pdf-parse did not export a PDFParse class.');
-  }
-  return candidate as PdfParseConstructor;
-}
-
-type DocxConverter = (input: { buffer: Buffer }) => Promise<{ value: string }>;
-
-/**
- * mammoth's Markdown converter.
- *
- * Cast because mammoth's own `.d.ts` declares `convertToHtml` and
- * `extractRawText` but not `convertToMarkdown`, which its `lib/index.js` does
- * export. The runtime check below is what actually guards the call.
- */
-async function loadDocxConverter(): Promise<DocxConverter> {
-  const mod: unknown = await import('mammoth');
-  const namespace = (mod as { default?: unknown }).default ?? mod;
-  const convert = (namespace as { convertToMarkdown?: unknown }).convertToMarkdown;
-  if (typeof convert !== 'function') {
-    throw new ConversionError('mammoth did not export convertToMarkdown.');
-  }
-  return convert as DocxConverter;
-}
+const spawnConvertWorker: SpawnConvertWorker = () => new Worker(convertWorkerPath);
 
 /**
  * Produce Markdown from a source document's bytes (FR-060, FR-061, TC-060, TC-062).
@@ -183,8 +70,8 @@ async function loadDocxConverter(): Promise<DocxConverter> {
  * it, and a second read here could see a different file than the one hashed,
  * so the cache key would describe content that was never converted.
  *
- * `signal` stops a PDF parse the caller gave up on, so a stuck pdfjs worker does
- * not keep running after its document has failed (ADR-055).
+ * `signal` stops the conversion: its worker is terminated (ADR-055). A signal
+ * that is already aborted starts nothing.
  *
  * Throws {@link ConversionError} rather than a raw parser error, so a Dashboard
  * row shows a sentence instead of a stack frame. The caller turns that into
@@ -195,51 +82,69 @@ export async function convertToMarkdown(
   format: SourceFormat,
   signal?: AbortSignal,
 ): Promise<ConversionResult> {
-  if (format === 'md') {
-    return { markdown: bytes.toString('utf8'), extractionQuality: 'native' };
-  }
+  if (signal?.aborted) throw stoppedError();
+  // Markdown needs no parser, and reading it as UTF-8 cannot hang.
+  if (format === 'md') return extractMarkdown(bytes, format);
+  return runConversionWorker(spawnConvertWorker, bytes, format, signal);
+}
 
-  if (format === 'pdf') {
-    const PdfParse = await loadPdfParse();
-    const parser = new PdfParse({ data: new Uint8Array(bytes) });
-    const stop = (): void => void parser.destroy().catch(() => undefined);
-    signal?.addEventListener('abort', stop, { once: true });
-    let text: string;
-    try {
-      const result = await parser.getText();
-      // Per-page text is preferred over the concatenated string: the latter has
-      // pdf-parse's "-- 1 of 3 --" separators mixed in. The fallback strips them
-      // rather than trusting a future version to keep emitting `pages`.
-      text = result.pages?.length
-        ? result.pages.map((page) => page.text).join('\n\n')
-        : stripPageSeparators(result.text);
-    } catch (err) {
-      throw new ConversionError(`PDF text extraction failed: ${(err as Error).message}`);
-    } finally {
-      // The parser owns a pdfjs worker. Leaking one per import would keep the
-      // process alive after the user closes the app.
-      signal?.removeEventListener('abort', stop);
-      await parser.destroy().catch(() => undefined);
+/**
+ * Run one conversion in a worker thread and stop the thread when it is done
+ * (ADR-055).
+ *
+ * The promise settles only once the thread has been terminated, after a reply
+ * or after an abort, so a caller that sees it settle knows no parse is still
+ * running. The thread is terminated after a reply too, because the worker
+ * keeps its message port open.
+ *
+ * The signal is checked, and its listener added, in the same synchronous step
+ * that starts the thread. An abort before that point does not replay its
+ * event, so a listener added after an await would miss it, and the parse would
+ * start after its document had already failed.
+ */
+export function runConversionWorker(
+  spawn: SpawnConvertWorker,
+  bytes: Buffer,
+  format: SourceFormat,
+  signal?: AbortSignal,
+): Promise<ConversionResult> {
+  return new Promise<ConversionResult>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(stoppedError());
+      return;
     }
-    if (text.trim().length === 0) {
-      throw new ConversionError(
-        'No text could be extracted from this PDF. A scanned PDF has no text layer.',
-      );
-    }
-    // 'best-effort' is unconditional for PDF, even when extraction went well:
-    // the label describes the method, not this file's luck (FR-061).
-    return { markdown: pdfTextToMarkdown(text), extractionQuality: 'best-effort' };
-  }
+    const worker = spawn();
+    let settled = false;
+    const finish = (settle: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', onAbort);
+      void worker.terminate().then(settle, settle);
+    };
+    const onAbort = (): void => finish(() => reject(stoppedError()));
+    signal?.addEventListener('abort', onAbort, { once: true });
 
-  const convert = await loadDocxConverter();
-  let value: string;
-  try {
-    value = (await convert({ buffer: bytes })).value;
-  } catch (err) {
-    throw new ConversionError(`DOCX conversion failed: ${(err as Error).message}`);
-  }
-  if (value.trim().length === 0) {
-    throw new ConversionError('The DOCX file contains no text.');
-  }
-  return { markdown: collapseBlankRuns(value), extractionQuality: 'native' };
+    worker.once('message', (reply: ConvertReply) =>
+      finish(() => {
+        if (reply.ok) resolve(reply.result);
+        else
+          reject(reply.conversion ? new ConversionError(reply.message) : new Error(reply.message));
+      }),
+    );
+    // A raw error, not a ConversionError: the engine logs it and the row says
+    // only "Conversion failed.", because a load failure can name a path.
+    worker.once('error', (err) => finish(() => reject(err)));
+    worker.once('exit', (code) =>
+      finish(() =>
+        reject(new ConversionError(`The converter stopped unexpectedly (code ${code}).`)),
+      ),
+    );
+
+    const request: ConvertRequest = { bytes, format };
+    worker.postMessage(request);
+  });
+}
+
+function stoppedError(): ConversionError {
+  return new ConversionError('Conversion was stopped.');
 }

@@ -93,7 +93,29 @@ export interface RagEngineOptions {
   convert?: typeof convertToMarkdown;
   /** How long one conversion may run before its document fails. Lowered in tests (ADR-055). */
   conversionTimeoutMs?: number;
+  /** Injected so a test fires the reconciliation retry by hand (ADR-014). */
+  timers?: Partial<EngineTimers>;
 }
+
+/** The two timer calls the engine makes, injectable like the trigger's. */
+export interface EngineTimers {
+  setTimeout(fn: () => void, ms: number): unknown;
+  clearTimeout(handle: unknown): void;
+}
+
+const REAL_TIMERS: EngineTimers = {
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (handle) => {
+    clearTimeout(handle as ReturnType<typeof setTimeout>);
+  },
+};
+
+/**
+ * The waits before each new reconciliation attempt for a profile whose index
+ * could not be read (ADR-014). Bounded: an index that stays unreadable for
+ * about a quarter of an hour is left to the next launch, and the log says so.
+ */
+const RECONCILE_RETRY_MS = [5_000, 30_000, 120_000, 600_000] as const;
 
 /**
  * The knowledge base engine (CMP-06, TASK-020 to TASK-025).
@@ -127,8 +149,12 @@ export class RagEngine {
    * PDF, whose parse outlasts the watcher's 500 ms debounce.
    */
   private readonly inFlight = new Map<string, Promise<void>>();
+  private readonly timers: EngineTimers;
+  /** The pending reconciliation retry per profile, and how many came before it. */
+  private readonly retries = new Map<string, { handle: unknown; attempt: number }>();
 
   constructor(private readonly options: RagEngineOptions) {
+    this.timers = { ...REAL_TIMERS, ...options.timers };
     this.modelsRoot = join(options.userDataDir, 'models');
     mkdirSync(this.modelsRoot, { recursive: true });
 
@@ -188,6 +214,7 @@ export class RagEngine {
   }
 
   async stop(): Promise<void> {
+    for (const profileId of [...this.retries.keys()]) this.cancelRetry(profileId);
     this.queue.dispose();
     await this.watcher.closeAll();
   }
@@ -252,13 +279,13 @@ export class RagEngine {
   /**
    * Load a cached model into memory before the first question (NFR-001, ADR-011).
    *
-   * `index.ts` calls this at startup and at session start for the active
-   * profile. Reconciliation never loads the model when every document is a
+   * `index.ts` calls this at startup, on `profile:activate`, and at session
+   * start, where it is awaited before the live loop starts. Reconciliation never loads the model when every document is a
    * cache hit, so without this the first question's `embed` loaded ONNX and the
    * tokenizer inside the question-to-suggestion budget.
    *
    * Never downloads: a model that is not on disk is left to the Dashboard's
-   * retry action (ADR-026). Never throws, so a caller can fire and forget.
+   * retry action (ADR-026). Never throws, so a caller may await it or not.
    */
   async warmModel(profileId: string): Promise<void> {
     if (!this.embedder.isReady()) return;
@@ -297,6 +324,7 @@ export class RagEngine {
    * would queue a removal against a profile that no longer exists.
    */
   async deleteProfile(profileId: string): Promise<void> {
+    this.cancelRetry(profileId);
     await this.watcher.unwatch(profileId);
     // A profile that does not exist, and an id that is not a uuid at all, are
     // both a no-op rather than a throw: deleting something already gone is the
@@ -336,6 +364,22 @@ export class RagEngine {
             fileName,
             join(this.store.kbDir(profileId), fileName),
             `Unsupported file type. Supported: ${SUPPORTED_EXTENSIONS.join(', ')}.`,
+          ),
+        );
+        continue;
+      }
+
+      // Checked on the source, before the copy. `processFile` checks again,
+      // but by then a multi-gigabyte file was already copied into userData,
+      // which is the cost the cap exists to avoid (ADR-055). A stat failure is
+      // left to the copy below, which reports its errno.
+      if (await isAboveFileCap(source)) {
+        records.push(
+          this.storeErrorRecord(
+            profileId,
+            fileName,
+            join(this.store.kbDir(profileId), fileName),
+            tooLargeMessage(),
           ),
         );
         continue;
@@ -516,13 +560,12 @@ export class RagEngine {
 
     // Cache hit: same bytes, same chunker, same model, and a readable pair on
     // disk. Zero embedding calls (FR-067, TC-069).
-    if (
-      existing &&
-      existing.state === 'ready' &&
-      existing.embeddingKey === embeddingKey &&
-      (await this.store.readChunkSet(profileId, docId)) !== null
-    ) {
-      return;
+    if (existing && existing.state === 'ready' && existing.embeddingKey === embeddingKey) {
+      const cached = await this.store.readChunkSet(profileId, docId);
+      if (cached !== null) {
+        this.adoptCachedChunks(profileId, docId, path, embeddingKey, cached);
+        return;
+      }
     }
 
     // The tokenizer and the vectors both need the model, so ingestion waits for
@@ -667,11 +710,49 @@ export class RagEngine {
   }
 
   /**
+   * Make a cached pair's chunk metadata name this profile and this document.
+   *
+   * A profile folder copied under a new id has its records rebased on read,
+   * but its `chunks.json` still names the original profile. The bytes and the
+   * model match, so the pair is a cache hit, and `query` on the copy returned
+   * chunks that claimed to belong to the original. Only metadata is rewritten:
+   * the vectors do not depend on either id, so nothing is re-embedded (FR-067,
+   * FR-069).
+   */
+  private adoptCachedChunks(
+    profileId: string,
+    docId: string,
+    path: string,
+    embeddingKey: string,
+    cached: ChunkSet,
+  ): void {
+    if (cached.chunks.every((c) => c.profileId === profileId && c.docId === docId)) return;
+    // Re-read after the chunk read's await, as `setDocType` does. A delete or a
+    // re-embed during it must not be overwritten with this older pair.
+    const current = this.findByPath(profileId, path);
+    if (!current || current.id !== docId || current.embeddingKey !== embeddingKey) return;
+    const chunks = cached.chunks.map((chunk, index) => ({
+      ...chunk,
+      id: `${docId}#${index}`,
+      profileId,
+      docId,
+      docType: current.docType,
+    }));
+    if (this.store.writeChunkSet(profileId, docId, chunks, cached.vectors)) {
+      this.invalidate(profileId);
+    }
+  }
+
+  /**
    * Convert, failing rather than waiting forever (ADR-055).
    *
    * A parse with no bound left its document in `converting` for the rest of the
    * process, and `inFlight` queued every later pass for that path behind it. On
-   * timeout the converter is told to stop, so a PDF parser releases its worker.
+   * timeout the signal aborts, and the real converter terminates the worker
+   * thread the parse runs in, so no parse runs on after its document failed or
+   * beside a retry. The timer runs in this thread and the parse does not, so a
+   * busy parse cannot delay it. The race stays for an injected converter that
+   * ignores the signal.
    */
   private async convertWithTimeout(bytes: Buffer, format: SourceFormat): Promise<ConversionResult> {
     const limitMs = this.options.conversionTimeoutMs ?? KB_INGEST_LIMITS.conversionTimeoutMs;
@@ -784,9 +865,13 @@ export class RagEngine {
     const set = await this.store.readChunkSet(profileId, docId);
     // Checked again after the read. A delete during it must not get its chunk
     // files back, and a re-embed during it wrote a newer pair, already carrying
-    // this type, that the stale one read here must not replace.
+    // this type, that the stale one read here must not replace. The type is
+    // compared too: a second type change during the read keeps the embedding
+    // key, and this older request finishing last wrote its type into the
+    // chunks while the record showed the newer one. That request writes the
+    // chunks itself (FR-064, FR-079).
     const now = this.store.findDocument(profileId, docId);
-    if (set && now && now.embeddingKey === updated.embeddingKey) {
+    if (set && now && now.embeddingKey === updated.embeddingKey && now.docType === docType) {
       this.store.writeChunkSet(
         profileId,
         docId,
@@ -876,6 +961,15 @@ export class RagEngine {
   async reconcile(profileId: string): Promise<void> {
     const profile = this.store.get(profileId);
     if (!profile) return;
+    // An index that exists but cannot be read refuses every write, so this
+    // pass would convert and embed every document only to discard each
+    // result, and the watcher's `ignoreInitial` meant nothing retried them for
+    // the rest of the process. Wait and run the pass again instead (ADR-014).
+    if (this.store.isIndexUnreadable(profileId)) {
+      this.scheduleRetry(profileId);
+      return;
+    }
+    this.cancelRetry(profileId);
     const kbDir = this.store.kbDir(profileId);
     mkdirSync(kbDir, { recursive: true });
 
@@ -943,6 +1037,39 @@ export class RagEngine {
       }
       await this.processFile(profileId, path);
     }
+
+    // Last, once every adoption has stored its record (FR-069, ADR-014).
+    this.store.pruneDerived(profileId);
+  }
+
+  /** Run {@link reconcile} again later for a profile whose index could not be read. */
+  private scheduleRetry(profileId: string): void {
+    const previous = this.retries.get(profileId);
+    if (previous?.handle != null) return; // One is already waiting.
+    const attempt = previous?.attempt ?? 0;
+    const delay = RECONCILE_RETRY_MS[attempt];
+    if (delay === undefined) {
+      this.retries.delete(profileId);
+      this.options.onError?.('the profile index stayed unreadable, so it was not reconciled', {
+        profileId,
+      });
+      return;
+    }
+    const handle = this.timers.setTimeout(() => {
+      // Cleared first, so the pass below can schedule the next attempt.
+      this.retries.set(profileId, { handle: null, attempt: attempt + 1 });
+      this.reconcile(profileId).catch((err: unknown) => {
+        this.options.onError?.('could not reconcile a profile', { err, profileId });
+      });
+    }, delay);
+    this.retries.set(profileId, { handle, attempt });
+  }
+
+  /** Cancel a profile's pending retry and forget its attempt count. */
+  private cancelRetry(profileId: string): void {
+    const retry = this.retries.get(profileId);
+    if (retry?.handle != null) this.timers.clearTimeout(retry.handle);
+    this.retries.delete(profileId);
   }
 
   /* ---------------------------------------------------------------- *
@@ -1203,6 +1330,15 @@ function percentFor(state: DocumentState): number {
 function errnoOf(err: unknown): string {
   const code = (err as NodeJS.ErrnoException | null)?.code;
   return typeof code === 'string' ? code : 'unknown error';
+}
+
+/** True when a file is above the hard per-file cap. False when it cannot be stat'ed (ADR-055). */
+async function isAboveFileCap(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).size > KB_INGEST_LIMITS.maxFileBytes;
+  } catch {
+    return false;
+  }
 }
 
 /** The row text for a file above the hard per-file cap (ADR-055). */

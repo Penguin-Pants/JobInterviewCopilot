@@ -1,4 +1,11 @@
-import { existsSync, readFileSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  symlinkSync,
+  truncateSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { convertToMarkdown } from '../../src/main/rag/convert.js';
@@ -457,6 +464,43 @@ describe('races between an ingest and the user', () => {
     expect(after.docTypeSource).toBe('auto');
   });
 
+  it('two overlapping type changes leave the chunks with the type the record shows', async () => {
+    const h = makeHarness();
+    const profile = await withProfile(h);
+    const [record] = await h.engine.importDocuments(profile.id, [
+      h.writeSourceFile('resume.md', RESUME_MD),
+    ]);
+    await h.engine.drain();
+
+    // The first request's chunk read finishes last. Both requests saw the same
+    // embedding key, so the key check let the stale type overwrite the newer one.
+    const realRead = h.engine.store.readChunkSet.bind(h.engine.store);
+    let release = (): void => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let reads = 0;
+    h.engine.store.readChunkSet = async (p: string, d: string) => {
+      reads += 1;
+      const call = reads;
+      const set = await realRead(p, d);
+      if (call === 1) await held;
+      return set;
+    };
+
+    const first = h.engine.setDocType(profile.id, record!.id, 'job-description');
+    const second = h.engine.setDocType(profile.id, record!.id, 'company-notes');
+    await second;
+    release();
+    await first;
+    h.engine.store.readChunkSet = realRead;
+
+    expect(h.engine.store.findDocument(profile.id, record!.id)!.docType).toBe('company-notes');
+    const chunks = await chunksOf(h, profile.id, record!.id);
+    expect(chunks!.length).toBeGreaterThan(0);
+    expect(chunks!.every((c) => c.docType === 'company-notes')).toBe(true);
+  });
+
   it('does not re-guess a doc type from a binary it cannot read as text', async () => {
     const h = makeHarness();
     const profile = await withProfile(h);
@@ -626,6 +670,22 @@ describe('ingest limits (ADR-055)', () => {
     const [record] = h.engine.store.get(profile.id)!.documents;
     expect(record!.state).toBe('error');
     expect(record!.errorMessage).toMatch(/larger than the 50 MB limit/);
+    expect(h.embedder.calls).toEqual([]);
+  });
+
+  it('refuses to import a file above the hard cap without copying it into kb/', async () => {
+    const h = makeHarness();
+    const profile = await withProfile(h);
+    const source = h.writeSourceFile('huge.md', '');
+    truncateSync(source, KB_INGEST_LIMITS.maxFileBytes + 1);
+
+    const [record] = await h.engine.importDocuments(profile.id, [source]);
+
+    expect(record!.state).toBe('error');
+    expect(record!.errorMessage).toMatch(/larger than the 50 MB limit/);
+    expect(record!.errorMessage).not.toContain(h.dir);
+    // The copy is the cost the cap exists to avoid.
+    expect(readdirSync(h.engine.store.kbDir(profile.id))).toEqual([]);
     expect(h.embedder.calls).toEqual([]);
   });
 

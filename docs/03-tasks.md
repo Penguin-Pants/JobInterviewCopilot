@@ -697,6 +697,12 @@ vague intention:
   treated a heading as an open line, so `# Experience` swallowed `Acme Corp` and
   the section boundary the chunker splits on was destroyed. Fixed and pinned by a
   case in `tests/unit/convert.test.ts`.
+- **Changed 2026-10-04 (ADR-055): conversion runs in a worker thread.** The
+  parsers moved to `src/main/rag/extract.ts`, and `convert.ts` runs each PDF or
+  DOCX conversion in a worker it terminates on timeout. In the main thread,
+  mammoth ignored the abort signal and kept running after its row failed, and a
+  PDF abort that landed while `pdf-parse` loaded was never seen. An import now
+  also refuses a file above 50 MB before copying it into `kb/`.
 - ~~**Deferred to TASK-042:** the Dashboard row that shows `extractionQuality:
   'best-effort'` with its hover explanation.~~ **Done in TASK-042.** The
   document row carries a "Best effort text" marker with the explanation on its

@@ -395,6 +395,18 @@ export class ProfileStore {
     return stamped;
   }
 
+  /**
+   * True when the profile's index exists but cannot be read right now (ADR-014).
+   *
+   * Every write is refused while this holds, so a reconciliation pass would
+   * convert and embed every document only to discard the result. The engine
+   * waits and tries the pass again instead.
+   */
+  isIndexUnreadable(profileId: string): boolean {
+    const profile = this.get(profileId);
+    return profile !== null && this.unreadable.has(profile);
+  }
+
   /** {@link get}, or null when writing the result back would overwrite an unreadable index. */
   private writable(profileId: string): Profile | null {
     const profile = this.get(profileId);
@@ -410,6 +422,38 @@ export class ProfileStore {
     }
     this.deleteChunkSet(profileId, docId);
     rmSync(this.derivedMarkdownPath(profileId, docId), { force: true });
+  }
+
+  /**
+   * Remove derived files that no record in the index owns (FR-069, ADR-014).
+   *
+   * A row dropped by {@link readDocuments} loses its record, and its file in
+   * `kb/` is adopted again under a new id. Nothing then names the old id, so
+   * its Markdown, chunks and vectors stayed in `derived/` forever.
+   *
+   * Synchronous from the listing to the last removal, so no ingest can run in
+   * between. An ingest stores its record before it writes a derived file, so a
+   * file listed here whose id is not in the index really is an orphan. Skipped
+   * when the index cannot be read, because its document list is then empty.
+   */
+  pruneDerived(profileId: string): void {
+    const profile = this.writable(profileId);
+    if (!profile) return;
+    const owned = new Set(profile.documents.map((d) => d.id));
+    const dir = this.derivedDir(profileId);
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      return; // No derived folder yet.
+    }
+    for (const entry of entries) {
+      // `<docId>.md`, `<docId>.chunks.json`, `<docId>.vectors.bin`, each with
+      // an optional `.tmp`. A name that is not ours is left alone.
+      const id = entry.slice(0, entry.indexOf('.'));
+      if (!SAFE_ID.test(id) || owned.has(id)) continue;
+      rmSync(join(dir, entry), { force: true });
+    }
   }
 
   /* ---------------------------------------------------------------- *

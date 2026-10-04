@@ -5,12 +5,14 @@ import {
   readdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
 import { join, relative } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { RagEngine } from '../../src/main/rag.js';
+import { buildPdf } from '../fakes/documents.js';
 import { FakeEmbedder } from '../fakes/embedder.js';
 import { makeHarness, ManualWatcher, NOTES_MD, RESUME_MD } from '../fakes/rag-harness.js';
 
@@ -307,6 +309,52 @@ describe('TC-160 profile deletion cascade', () => {
     expect(h.engine.store.get(copyId)!.documents).toHaveLength(1);
   });
 
+  it("a copied profile's chunks carry the copy's id, without a re-embed", async () => {
+    const h = makeHarness();
+    const original = await h.engine.createProfile('Original');
+    await h.engine.importDocuments(original.id, [h.writeSourceFile('resume.md', RESUME_MD)]);
+    const copyId = '11111111-2222-4333-8444-555555555555';
+    cpSync(h.engine.store.profileDir(original.id), h.engine.store.profileDir(copyId), {
+      recursive: true,
+    });
+    const embedCalls = h.embedder.calls.length;
+
+    // The records were rebased, but the copied chunks.json still named the
+    // original profile, and reconcile read the pair as a cache hit.
+    await h.engine.reconcile(copyId);
+    await h.engine.drain();
+
+    const hits = await h.engine.query(copyId, 'Acme Corp billing', 3);
+    expect(hits.length).toBeGreaterThan(0);
+    expect(hits.every((hit) => hit.chunk.profileId === copyId)).toBe(true);
+    // Only the query itself was embedded. The vectors do not depend on the id.
+    expect(h.embedder.calls.length).toBe(embedCalls + 1);
+  });
+
+  it('removes the derived files of a dropped row once its file is adopted again', async () => {
+    const h = makeHarness();
+    const profile = await h.engine.createProfile('Acme');
+    const [record] = await h.engine.importDocuments(profile.id, [
+      h.writeSourceFile('notes.pdf', buildPdf(['# Company', 'Founded in 2015 in Berlin.'])),
+    ]);
+    const store = h.engine.store;
+    expect(existsSync(store.chunksPath(profile.id, record!.id))).toBe(true);
+    const file = join(store.profileDir(profile.id), 'profile.json');
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as { documents: { state: string }[] };
+    parsed.documents[0]!.state = 'not-a-state';
+    writeFileSync(file, JSON.stringify(parsed));
+
+    await h.engine.reconcile(profile.id);
+
+    const [adopted] = store.get(profile.id)!.documents;
+    expect(adopted!.id).not.toBe(record!.id);
+    // Nothing owns these any more, and nothing else would ever remove them.
+    expect(existsSync(store.derivedMarkdownPath(profile.id, record!.id))).toBe(false);
+    expect(existsSync(store.chunksPath(profile.id, record!.id))).toBe(false);
+    expect(existsSync(store.vectorsPath(profile.id, record!.id))).toBe(false);
+    expect(existsSync(store.chunksPath(profile.id, adopted!.id))).toBe(true);
+  }, 30000);
+
   it('drops an invalid document row instead of failing reconciliation', async () => {
     const h = makeHarness();
     const profile = await h.engine.createProfile('Acme');
@@ -384,5 +432,115 @@ describe('a moved userData keeps its index (ADR-014)', () => {
     expect(h.engine.store.findDocument(profile.id, record!.id)!.derivedMarkdownPath).toBe(
       h.engine.store.derivedMarkdownPath(profile.id, record!.id),
     );
+  });
+});
+
+describe('an index unreadable at startup is reconciled once it reads again (ADR-014)', () => {
+  /** Timers a test fires by hand. */
+  function manualTimers(): {
+    timers: { setTimeout(fn: () => void, ms: number): unknown; clearTimeout(h: unknown): void };
+    pending: Map<number, { fn: () => void; ms: number }>;
+  } {
+    const pending = new Map<number, { fn: () => void; ms: number }>();
+    let next = 0;
+    return {
+      pending,
+      timers: {
+        setTimeout(fn, ms) {
+          next += 1;
+          pending.set(next, { fn, ms });
+          return next;
+        },
+        clearTimeout(handle) {
+          pending.delete(handle as number);
+        },
+      },
+    };
+  }
+
+  /** A profile whose `profile.json` is a directory: it exists and cannot be read. */
+  async function blockedProfile(): Promise<{ dir: string; id: string; restore: () => void }> {
+    const first = makeHarness();
+    const profile = await first.engine.createProfile('Acme');
+    await first.engine.stop();
+    // Added while the app was closed. Only reconciliation can adopt it, because
+    // the watcher starts with `ignoreInitial`.
+    first.writeKbFile(profile.id, 'resume.md', RESUME_MD);
+    const file = join(first.engine.store.profileDir(profile.id), 'profile.json');
+    const saved = readFileSync(file, 'utf8');
+    rmSync(file);
+    mkdirSyncReal(file);
+    return {
+      dir: first.dir,
+      id: profile.id,
+      restore: () => {
+        rmSync(file, { recursive: true });
+        writeFileSync(file, saved);
+      },
+    };
+  }
+
+  it('retries the pass and adopts the documents it could not write', async () => {
+    const blocked = await blockedProfile();
+    const clock = manualTimers();
+    const h = makeHarness({ userDataDir: blocked.dir, timers: clock.timers });
+
+    await h.engine.start();
+    expect(h.embedder.calls).toEqual([]);
+    expect(clock.pending.size).toBe(1);
+
+    blocked.restore();
+    const retry = [...clock.pending.values()][0];
+    clock.pending.clear();
+    retry!.fn();
+
+    await vi.waitFor(() => {
+      expect(h.engine.store.get(blocked.id)!.documents.map((d) => d.state)).toEqual(['ready']);
+    });
+    expect(clock.pending.size).toBe(0);
+    await h.engine.stop();
+  });
+
+  it('gives up after a bounded number of attempts and says so', async () => {
+    const blocked = await blockedProfile();
+    const clock = manualTimers();
+    const errors: string[] = [];
+    const h = makeHarness({
+      userDataDir: blocked.dir,
+      timers: clock.timers,
+      onError: (message) => errors.push(message),
+    });
+
+    await h.engine.start();
+    const gaveUp = 'the profile index stayed unreadable, so it was not reconciled';
+    const delays: number[] = [];
+    for (let attempt = 0; attempt < 20 && clock.pending.size > 0; attempt += 1) {
+      const [id, retry] = [...clock.pending][0]!;
+      clock.pending.delete(id);
+      delays.push(retry.ms);
+      retry.fn();
+      await vi.waitFor(() => {
+        expect(clock.pending.size > 0 || errors.includes(gaveUp)).toBe(true);
+      });
+    }
+
+    expect(delays.length).toBeGreaterThan(0);
+    expect(delays.length).toBeLessThan(10);
+    // Each wait is longer than the one before it.
+    expect([...delays].sort((a, b) => a - b)).toEqual(delays);
+    expect(clock.pending.size).toBe(0);
+    expect(errors).toContain(gaveUp);
+    await h.engine.stop();
+  });
+
+  it('stop cancels a pending retry', async () => {
+    const blocked = await blockedProfile();
+    const clock = manualTimers();
+    const h = makeHarness({ userDataDir: blocked.dir, timers: clock.timers });
+
+    await h.engine.start();
+    expect(clock.pending.size).toBe(1);
+    await h.engine.stop();
+    expect(clock.pending.size).toBe(0);
   });
 });

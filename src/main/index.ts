@@ -1592,10 +1592,6 @@ function registerIpcHandlers(): void {
       // before it had produced anything of its own (ADR-036).
       overlayGate.reset();
 
-      // Again at session start, for a profile switched to since launch. A
-      // no-op when the model is already in memory (NFR-001, ADR-011).
-      if (profile) void rag.warmModel(profile.id);
-
       // The overlay is created hidden and shown for the session, as section
       // 5.1 sequences it. `showInactive` so the interviewer's window keeps
       // focus: the overlay is a teleprompter, never a window to work in.
@@ -1623,6 +1619,12 @@ function registerIpcHandlers(): void {
       // sockets up takes long enough that a Dashboard told afterwards would
       // render the session as inactive for the whole of it (FR-088).
       pushSessionState();
+      // Awaited after the push and before the loop. Fired and forgotten, it
+      // raced the loop, and the first question could still pay the ONNX load
+      // inside its budget. It never downloads and never throws, and it is a
+      // no-op when the model is already in memory, which `profile:activate`
+      // and startup normally make true (NFR-001, ADR-011).
+      if (profile) await rag.warmModel(profile.id);
       await live.start(active.profileId);
 
       return { sessionId: active.id };
@@ -1743,6 +1745,9 @@ function registerIpcHandlers(): void {
   router.handle('profile:activate', ({ id }) => {
     assertProfile(id);
     config.set({ activeProfileId: id });
+    // In the background, so a session started next finds the model in memory.
+    // It never downloads (NFR-001, ADR-011).
+    void rag.warmModel(id);
     return { ok: true as const };
   });
 
