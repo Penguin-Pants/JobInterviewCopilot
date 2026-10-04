@@ -200,8 +200,18 @@ export class TriggerMachine {
    */
   private endpointPending = false;
   private endpointHoldHandle: unknown = null;
-  /** When the last turn was evaluated, so a late endpoint for it is not held. */
-  private lastEvaluatedAt: number | null = null;
+  /** A native endpoint arrived since the last evaluation, held or spent. */
+  private endpointSeen = false;
+  /**
+   * The last turn was evaluated by the local gap before its native endpoint
+   * arrived, and no interviewer speech has been heard since. An empty endpoint
+   * in this state ends the turn already evaluated, not a new one (FR-050).
+   *
+   * Correlated with what the provider sent, not with elapsed time. A time rule
+   * also dropped the endpoint of a rapid follow-up, whose `speech_stopped`
+   * comes before its own text in the OpenAI order.
+   */
+  private endpointOwed = false;
 
   private candidateTurns: string[] = [];
   /** The candidate segments accumulated for the turn being assembled. */
@@ -294,6 +304,10 @@ export class TriggerMachine {
     }
     if (this.state === 'IDLE' || this.state === 'PAUSED') return;
 
+    // New interviewer speech. An endpoint from now on ends this speech, so the
+    // evaluated turn's late endpoint is no longer expected.
+    if (event.text.trim() !== '') this.endpointOwed = false;
+
     if (event.isFinal) {
       this.turnText = appendSegment(this.turnText, event.text);
       this.lastFinalConfidence = event.confidence;
@@ -374,7 +388,8 @@ export class TriggerMachine {
     this.lastFinalConfidence = undefined;
     this.candidateText = '';
     this.candidateTurns = [];
-    this.lastEvaluatedAt = null;
+    this.endpointSeen = false;
+    this.endpointOwed = false;
     this.dropHeldEndpoint();
   }
 
@@ -401,16 +416,15 @@ export class TriggerMachine {
     // that ends with it, which is the order OpenAI's server VAD uses. Hold the
     // signal for the next final rather than discarding it, but only briefly.
     if (this.turnText === '') {
-      // Within one gap of the last evaluation, this endpoint ends the turn that
-      // was just evaluated. A next utterance cannot have been spoken and gone
-      // silent that fast. Held, it fired the next question's first words alone.
-      if (
-        this.lastEvaluatedAt !== null &&
-        Date.now() - this.lastEvaluatedAt < this.effectiveGapMs()
-      ) {
+      // The local gap ended the last turn first and nothing was said since, so
+      // this endpoint ends that turn. Held, it fired the next question's first
+      // words alone. It is spent here, so a later endpoint is held as usual.
+      if (this.endpointOwed) {
+        this.endpointOwed = false;
         return;
       }
       this.dropHeldEndpoint();
+      this.endpointSeen = true;
       this.endpointPending = true;
       this.endpointHoldHandle = this.timers.setTimeout(() => {
         this.endpointHoldHandle = null;
@@ -423,6 +437,7 @@ export class TriggerMachine {
     // a generation streams the state is `GENERATING`, and refusing there made
     // the second question of a pair wait out a full local gap after the
     // provider had already reported the silence (FR-050).
+    this.endpointSeen = true;
     this.clearGap();
     this.evaluateTurn();
   }
@@ -452,6 +467,8 @@ export class TriggerMachine {
     // whose own finals carry no `confidence` field (FR-113).
     this.lastFinalConfidence = undefined;
     this.dropHeldEndpoint();
+    this.endpointSeen = false;
+    this.endpointOwed = false;
     this.transition('PAUSED');
     this.onOverlayIdle?.();
   }
@@ -468,6 +485,8 @@ export class TriggerMachine {
     this.turnText = '';
     this.lastFinalConfidence = undefined;
     this.dropHeldEndpoint();
+    this.endpointSeen = false;
+    this.endpointOwed = false;
     this.transition('LISTENING');
   }
 
@@ -544,7 +563,9 @@ export class TriggerMachine {
     this.turnText = '';
     this.lastFinalConfidence = undefined;
     this.dropHeldEndpoint();
-    this.lastEvaluatedAt = Date.now();
+    // Only a turn the gap ended before any endpoint arrived can still get one.
+    this.endpointOwed = !this.endpointSeen;
+    this.endpointSeen = false;
 
     if (!passesTurnGuard(question, this.config)) {
       // A short turn is not an error and never reaches the overlay. Back to

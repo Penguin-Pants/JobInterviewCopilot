@@ -424,6 +424,45 @@ describe('Whisper requests are bounded, ordered and retried once', () => {
     expect(post).toHaveBeenCalledTimes(1);
   });
 
+  it('posts nothing more after a failure is raised, so the reopen closes at once', async () => {
+    let release: (() => void) | null = null;
+    const post = vi.fn<PostWav>(async () => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return { ok: false, status: 401, text: 'revoked' };
+    });
+    const s = new WhisperSttSession({ source: 'interviewer', choice: CHOICE, key: 'k', post });
+    // The live loop answers a stream failure by closing the session to reopen.
+    let closed: Promise<void> | null = null;
+    let closedDone = false;
+    s.on('error', () => {
+      closed = s.close().then(() => {
+        closedDone = true;
+      });
+    });
+    pushWindow(s, 1);
+    pushWindow(s, 2);
+    pushWindow(s, 3);
+    await vi.waitFor(() => {
+      expect(release).not.toBeNull();
+    });
+
+    release!();
+    await vi.waitFor(() => {
+      expect(closed).not.toBeNull();
+    });
+    // No timer advanced: close must not wait out WHISPER_CLOSE_TIMEOUT_MS.
+    await vi.waitFor(() => {
+      expect(closedDone).toBe(true);
+    });
+    pushWindow(s, 4);
+    await vi.advanceTimersByTimeAsync(WHISPER_CLOSE_TIMEOUT_MS);
+    expect(post).toHaveBeenCalledTimes(1);
+    // The windows dropped after the failure were never sent, so never billed.
+    expect(s.sentBytes).toBe(WHISPER_BUFFER_CHUNKS * 32000);
+  });
+
   it('aborts the request it times out, so the connection is released', async () => {
     let seen: AbortSignal | undefined;
     const { s } = session((_form, _key, signal) => {

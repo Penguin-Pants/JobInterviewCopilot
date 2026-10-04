@@ -1868,3 +1868,53 @@ describe('an aborted turn stops waiting out its backoff', () => {
     expect(errors.map((e) => e.message)).not.toContain('the language model failed');
   });
 });
+
+/**
+ * A salvaged card is on the overlay while the turn waits out its backoff. A
+ * newer turn aborts it there, so no later attempt runs to send the cancelled
+ * end that FR-054 uses to remove it. If the newer turn is then gated out or
+ * classified non-actionable, no new card replaces it either (ADR-047).
+ */
+describe('an aborted backoff clears the salvage it leaves on the overlay', () => {
+  it('sends a cancelled end for the card still up', async () => {
+    const registry = new ProviderHealthRegistry(
+      () => undefined,
+      () => () => Promise.resolve(false),
+      { sleep: () => new Promise<void>(() => undefined), random: () => 0.5 },
+    );
+    registry.bind({ capability: 'llm', primary: 'anthropic', backup: null });
+
+    const busy = new Error('busy') as ProviderError;
+    busy.class = 'server';
+    busy.providerId = 'anthropic';
+    busy.retryable = true;
+    const { loop, messages, settled } = makeLoop({
+      runFor: (capability, fn, options) => registry.runFor(capability, fn, options),
+      generate: (_provider, request, _signal, events) => {
+        const cardId = `card-${request.generationId}`;
+        events.onBegin({ generationId: request.generationId, cardId, question: request.question });
+        events.onLine({ generationId: request.generationId, cardId, line: 'salvaged', index: 0 });
+        events.onEnd({ generationId: request.generationId, status: 'complete' });
+        return Promise.resolve(
+          outcome({ generationId: request.generationId, bullets: ['salvaged'], error: busy }),
+        );
+      },
+    });
+    await loop.start(PROFILE_ID);
+
+    const first = new AbortController();
+    loop.onFire(turn({ generationId: 'g1', signal: first.signal }));
+    await vi.waitFor(() => {
+      expect(messages.map((m) => m.channel)).toContain('suggestion:end');
+    });
+
+    first.abort();
+    await vi.waitFor(() => {
+      expect(settled).toContain('g1');
+    });
+    expect(messages.at(-1)).toEqual({
+      channel: 'suggestion:end',
+      payload: { generationId: 'g1', status: 'cancelled' },
+    });
+  });
+});

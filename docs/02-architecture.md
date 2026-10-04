@@ -628,6 +628,10 @@ Adapter notes:
     `NFR-017` p95) and aborted when it expires, as a retryable `timeout`. A
     retryable failure is retried once after 250 ms before it is raised on
     `error`, so one 429 or 5xx does not reopen both streams and lose the window.
+    Before it raises a failure, the session drops its queue and buffer and
+    takes no more audio. The reopen that the failure starts closes the session,
+    and that close then ends at once instead of waiting for the next window's
+    post. The dropped windows are never billed.
   - `close` waits for the tail at most `WHISPER_CLOSE_TIMEOUT_MS` (10 s), then
     drops the queue and aborts the request in flight. A provider that never
     answers can no longer hold Stop, the compaction and the session lock.
@@ -809,11 +813,27 @@ coarse rule intends. Found in an audit: with one OpenAI key as the STT
 primary (with a backup) and the LLM primary (without one), an STT failover
 routed every suggestion to a backup that did not exist.
 
+**Which capability is in `DEGRADED` is per capability as well.** The machine
+records the degraded scopes, each with its last reason and its own backoff
+growth, next to the scopes on a backup. Only a degraded scope gets the single
+`DEGRADED` attempt, and only its own success on the primary takes it out. The
+credential state is then a projection for the badge, worst first in the
+`SEVERITY` order the registry uses: `degraded` while any scope is degraded,
+else `using-backup` while any scope is on its backup, else `using-primary`.
+A ladder shows `retrying` only while nothing worse is true of the key. With one
+shared state, an STT failover rewrote a degraded LLM's state to
+`using-backup`, and the LLM's next request ran the whole primary ladder again.
+Two passing probes at a clean boundary clear both sets, as before.
+
 **A backoff sleep ends when the turn is aborted.** `runFor` takes an optional
 `AbortSignal` and races each backoff against it, rejecting with the abort reason
 at once. `CMP-15` passes the turn's signal, so a degraded turn a newer turn
 replaced stops waiting instead of holding the newer turn, chained behind it,
-until it is stale (`FR-054`, `FR-114`).
+until it is stale (`FR-054`, `FR-114`). No later attempt runs to send the
+cancelled `suggestion:end`, so `CMP-15` sends it itself when an earlier
+attempt's salvage is still on the overlay. Without it the salvage stayed up
+whenever the newer turn sent no card of its own (confidence gate,
+non-actionable).
 
 **`CONFIG_REQUIRED` is terminal for the credential, not for one capability.** A
 revoked key stays revoked even where another capability routes around it, so
@@ -1774,10 +1794,13 @@ change what the machine does, not only how it is written.
   `AWAITING_TURN_END`, so the second question of a pair does not wait out a
   local gap the provider has already observed. An endpoint arriving *before* the
   text it ends, which is the order OpenAI's server VAD uses, is held for the
-  next final rather than discarded, for at most `ENDPOINT_HOLD_MS` (2 s). An
-  endpoint with no text that arrives within one gap of the last evaluation is
-  dropped, not held: it ends the turn just evaluated, and held it fired the
-  first words of the next question on their own. Once honored, it is the identical "new
+  next final rather than discarded, for at most `ENDPOINT_HOLD_MS` (2 s). One
+  endpoint with no text is dropped, not held: the first after a turn that the
+  local gap ended before any endpoint arrived, when no interviewer text or
+  interim came since. It ends the turn just evaluated, and held it fired the
+  first words of the next question on their own. The rule follows what the
+  provider sent, not elapsed time, so a rapid follow-up whose endpoint comes
+  before its text is still held. Once honored, it is the identical "new
   turn end" trigger described above — same guard, same `firedAt` stamp, same
   abort, same confidence gate, same classifier — never a shortcut around any
   of them; the only thing a native endpoint changes is not having to wait out

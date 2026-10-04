@@ -588,6 +588,43 @@ describe('a shared credential keeps each capability on its own route', () => {
     expect(llm.mock.calls.every((c) => c[0] === 'primary')).toBe(true);
     expect(r.get('openai')?.current.kind).toBe('degraded');
   });
+
+  it('keeps a degraded LLM degraded after STT fails over on the same key', async () => {
+    const t = testDeps();
+    const r = sharedKey(t.deps);
+    await expect(
+      r.runFor('llm', () => Promise.reject(err('server', 'the model is busy'))),
+    ).rejects.toThrow();
+    expect(r.snapshot().llm.kind).toBe('degraded');
+
+    await r.runFor(
+      'stt',
+      vi
+        .fn<(t: string) => Promise<string>>()
+        .mockRejectedValueOnce(err('server'))
+        .mockRejectedValueOnce(err('server'))
+        .mockRejectedValueOnce(err('server'))
+        .mockRejectedValueOnce(err('server'))
+        .mockResolvedValue('backup'),
+    );
+
+    // The LLM is still in DEGRADED: one attempt, not the whole ladder again.
+    const llm = vi
+      .fn<(t: string) => Promise<string>>()
+      .mockRejectedValue(err('server', 'the model is busy'));
+    await expect(r.runFor('llm', llm)).rejects.toThrow();
+    expect(llm).toHaveBeenCalledTimes(1);
+    // The badge shows the worst fact about the key: a capability with nowhere
+    // to fall to outranks one on its backup.
+    expect(r.get('openai')?.current.kind).toBe('degraded');
+
+    // The LLM recovers, and the badge falls back to STT still on its backup.
+    await r.runFor('llm', () => Promise.resolve('answer'));
+    expect(r.get('openai')?.current.kind).toBe('using-backup');
+    const stt = vi.fn<(t: string) => Promise<string>>().mockResolvedValue('t');
+    await r.runFor('stt', stt);
+    expect(stt.mock.calls.map((c) => c[0])).toEqual(['backup']);
+  });
 });
 
 /** A newer turn aborts the old one, and a sleeping ladder must notice at once. */

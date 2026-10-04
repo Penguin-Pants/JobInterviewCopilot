@@ -85,7 +85,10 @@ export class WhisperSttSession implements SttSession {
    */
   private buffer: ArrayBuffer[] = [];
   private closed = false;
-  /** Set when `close` stopped waiting: what is still running is abandoned. */
+  /**
+   * Set when `close` stopped waiting, or when a failure was raised: what is
+   * still running is abandoned and nothing more is posted.
+   */
   private abandoned = false;
   private inFlight = 0;
   private sent = 0;
@@ -149,7 +152,7 @@ export class WhisperSttSession implements SttSession {
   }
 
   push(chunk: AudioChunk): void {
-    if (this.closed) return;
+    if (this.closed || this.abandoned) return;
     this.buffer.push(chunk.pcm);
     if (this.buffer.length < this.bufferChunks) return;
     this.flush();
@@ -261,8 +264,20 @@ export class WhisperSttSession implements SttSession {
     }
   }
 
+  /**
+   * Raises a failure the retry did not cure, after stopping the queue.
+   *
+   * The handler starts the live loop's reopen, and the reopen closes this
+   * session, which waits for the drain. Left running, the drain posted the next
+   * waiting window, even after a terminal 401, so failover waited for it up to
+   * `WHISPER_CLOSE_TIMEOUT_MS`. The dropped windows were never sent, so they
+   * are never billed.
+   */
   private fail(err: ProviderError): void {
     if (this.closed) return;
+    this.abandoned = true;
+    this.queue.length = 0;
+    this.buffer = [];
     for (const h of this.handlers.error) h(err);
   }
 

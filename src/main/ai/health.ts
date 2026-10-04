@@ -116,6 +116,16 @@ export class CredentialHealth {
    * failed with a valid key.
    */
   private readonly onBackup = new Set<string>();
+  /**
+   * The capabilities in `DEGRADED`, each with its last failure reason.
+   *
+   * Per capability for the same reason as `onBackup`. A single shared state
+   * let one capability's transition rewrite another's policy: after STT failed
+   * over, a degraded LLM on the same key read `using-backup` and ran the whole
+   * ladder again instead of one degraded attempt. The credential state is a
+   * projection of both sets (`settled`).
+   */
+  private readonly degraded = new Map<string, string>();
   private readonly probeFn: () => Promise<boolean>;
   private readonly emit: (s: HealthState) => void;
   private readonly deps: HealthDeps;
@@ -127,8 +137,8 @@ export class CredentialHealth {
   /** Set when probes have passed twice. The switch waits for a clean boundary. */
   private switchBackPending = false;
 
-  /** Grows while DEGRADED, capped. Reset by any success. */
-  private degradedAttempt = 0;
+  /** Grows while a capability is DEGRADED, capped. Reset by its next success. */
+  private readonly degradedAttempts = new Map<string, number>();
 
   /** Every backoff this credential has actually slept, for TC-100. */
   readonly backoffsMs: number[] = [];
@@ -183,15 +193,40 @@ export class CredentialHealth {
     // Both are read per capability: a capability without a backup never goes
     // to one, and one with a backup is not held in another's DEGRADED.
     if (run.hasBackup && this.onBackup.has(run.scope)) return this.runOnBackup(fn);
-    if (this.state.kind === 'degraded' && !run.hasBackup) return this.runDegraded(fn, run);
+    if (this.degraded.has(run.scope) && !run.hasBackup) return this.runDegraded(fn, run);
 
     return this.runPrimaryWithLadder(fn, run);
   }
 
-  /** A success on the primary. The badge still shows a capability on its backup. */
-  private primaryAnswered(): void {
-    this.degradedAttempt = 0;
-    this.setState(this.onBackup.size > 0 ? { kind: 'using-backup' } : { kind: 'using-primary' });
+  /**
+   * The credential state the badge shows when no ladder is climbing: the worst
+   * fact about any capability on this key, in the registry's `SEVERITY` order.
+   * A capability with nowhere to fall to outranks one on its backup.
+   */
+  private settled(): HealthState {
+    const reason = [...this.degraded.values()].at(-1);
+    if (reason !== undefined) return { kind: 'degraded', reason };
+    return this.onBackup.size > 0 ? { kind: 'using-backup' } : { kind: 'using-primary' };
+  }
+
+  /** One capability is in `DEGRADED`. The newest reason is the one shown. */
+  private markDegraded(scope: string, reason: string): void {
+    this.degraded.delete(scope);
+    this.degraded.set(scope, reason);
+    this.setState(this.settled());
+  }
+
+  /** A success on the primary ends this capability's DEGRADED, and no other's. */
+  private primaryAnswered(run: Run): void {
+    this.degraded.delete(run.scope);
+    this.degradedAttempts.delete(run.scope);
+    this.setState(this.settled());
+  }
+
+  private clearScopes(): void {
+    this.onBackup.clear();
+    this.degraded.clear();
+    this.degradedAttempts.clear();
   }
 
   private async runPrimaryWithLadder<T>(fn: (t: Target) => Promise<T>, run: Run): Promise<T> {
@@ -200,7 +235,7 @@ export class CredentialHealth {
     for (let attempt = 0; attempt <= MAX_RETRY_ATTEMPTS; attempt += 1) {
       try {
         const result = await fn('primary');
-        this.primaryAnswered();
+        this.primaryAnswered(run);
         return result;
       } catch (err) {
         const error = asProviderError(err, this.credentialId);
@@ -211,7 +246,11 @@ export class CredentialHealth {
         if (!error.retryable) break;
         if (attempt === MAX_RETRY_ATTEMPTS) break;
 
-        this.setState({ kind: 'retrying', attempt: attempt + 1 });
+        // Shown only while nothing worse is true of the key, so a retry here
+        // does not hide another capability's DEGRADED or backup.
+        if (this.settled().kind === 'using-primary') {
+          this.setState({ kind: 'retrying', attempt: attempt + 1 });
+        }
         await this.backoff(RETRY_BACKOFF_MS[attempt] ?? DEGRADED_MAX_BACKOFF_MS, run.signal);
       }
     }
@@ -227,14 +266,14 @@ export class CredentialHealth {
   ): Promise<T> {
     if (run.hasBackup) {
       this.onBackup.add(run.scope);
-      this.setState({ kind: 'using-backup' });
+      this.setState(this.settled());
       this.startProbing();
       return this.runOnBackup(fn);
     }
 
     // No backup. The path splits on `retryable` (ADR-024).
     if (error.retryable) {
-      this.setState({ kind: 'degraded', reason: error.message });
+      this.markDegraded(run.scope, error.message);
       return this.runDegraded(fn, run);
     }
 
@@ -256,7 +295,7 @@ export class CredentialHealth {
   private async runDegraded<T>(fn: (t: Target) => Promise<T>, run: Run): Promise<T> {
     try {
       const result = await fn('primary');
-      this.primaryAnswered();
+      this.primaryAnswered(run);
       return result;
     } catch (err) {
       const error = asProviderError(err, this.credentialId);
@@ -268,16 +307,17 @@ export class CredentialHealth {
         });
         throw new CredentialUnusableError(this.credentialId, error.message);
       }
-      this.degradedAttempt += 1;
-      this.setState({ kind: 'degraded', reason: error.message });
-      await this.backoff(this.degradedBackoffMs(), run.signal);
+      this.degradedAttempts.set(run.scope, (this.degradedAttempts.get(run.scope) ?? 0) + 1);
+      this.markDegraded(run.scope, error.message);
+      await this.backoff(this.degradedBackoffMs(run.scope), run.signal);
       throw error;
     }
   }
 
   /** Doubles from the last rung of the ladder, capped so it stops growing. */
-  degradedBackoffMs(): number {
-    const base = (RETRY_BACKOFF_MS.at(-1) ?? 1000) * 2 ** (this.degradedAttempt - 1);
+  degradedBackoffMs(scope: string = DEFAULT_SCOPE): number {
+    const attempt = this.degradedAttempts.get(scope) ?? 0;
+    const base = (RETRY_BACKOFF_MS.at(-1) ?? 1000) * 2 ** (attempt - 1);
     return Math.min(base, DEGRADED_MAX_BACKOFF_MS);
   }
 
@@ -351,9 +391,10 @@ export class CredentialHealth {
   noteCleanBoundary(): boolean {
     if (!this.switchBackPending) return false;
     this.switchBackPending = false;
-    this.onBackup.clear();
+    // The probes proved the primary answers, which ends every capability's
+    // DEGRADED as well as every backup route on this key.
+    this.clearScopes();
     this.stopProbing();
-    this.degradedAttempt = 0;
     this.setState({ kind: 'using-primary' });
     return true;
   }
@@ -364,9 +405,8 @@ export class CredentialHealth {
    */
   noteKeySaved(): void {
     this.state = { kind: 'using-primary' };
-    this.onBackup.clear();
+    this.clearScopes();
     this.switchBackPending = false;
-    this.degradedAttempt = 0;
     this.stopProbing();
     this.setState({ kind: 'using-primary' });
   }

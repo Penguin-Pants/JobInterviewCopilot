@@ -922,6 +922,17 @@ export class LiveSessionLoop {
     } catch (err) {
       // An abort is a newer turn replacing this one, not a provider failure.
       if (!turn.signal.aborted) this.options.onError('the language model failed', err);
+      // Aborted in a backoff with an earlier attempt's salvage still on the
+      // overlay. No later attempt runs to send the cancelled end, and the newer
+      // turn may never send a begin of its own (gated out, or non-actionable),
+      // so this end is what removes the partial output (FR-054, ADR-047).
+      if (turn.signal.aborted && cardUp) {
+        cardUp = false;
+        this.options.onSuggestion({
+          channel: 'suggestion:end',
+          payload: { generationId: turn.generationId, status: 'cancelled' },
+        });
+      }
     }
 
     // A turn aborted in a backoff has no later attempt to report the cancel,
