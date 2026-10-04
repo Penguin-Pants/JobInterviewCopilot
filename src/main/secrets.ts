@@ -16,13 +16,6 @@ import type { CredentialId, SecretStatus, SecretVault, ValidationResult } from '
  * would be worse than a visible failure.
  */
 
-export const CREDENTIAL_IDS: readonly CredentialId[] = [
-  'deepgram',
-  'openai',
-  'anthropic',
-  'elevenlabs',
-] as const;
-
 type SecretKeyField = Exclude<keyof SecretVault, 'credentialVersions'>;
 const VAULT_FIELD: Record<CredentialId, SecretKeyField> = {
   deepgram: 'deepgramApiKey',

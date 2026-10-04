@@ -1814,6 +1814,3 @@ function registerIpcHandlers(): void {
     return state;
   });
 }
-
-/** Exported for the acrylic-availability check in the Dashboard. */
-export { supportsAcrylic, translucencyChangeNeedsRecreate };

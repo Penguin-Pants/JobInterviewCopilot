@@ -816,7 +816,6 @@ export const audioWorkerChannels = {
 
 export type InvokeChannel = keyof typeof invokeChannels;
 export type PushChannel = keyof typeof pushChannels;
-export type AudioWorkerChannel = keyof typeof audioWorkerChannels;
 
 export type InvokePayload<C extends InvokeChannel> = z.infer<(typeof invokeChannels)[C]['payload']>;
 export type InvokeResponse<C extends InvokeChannel> = z.infer<
