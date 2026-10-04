@@ -29,12 +29,18 @@ import { validateOpenAiKey } from '../../src/main/ai/stt/openai-realtime.js';
 
 const CHOICE = { providerId: 'openai', modelId: 'whisper-1' };
 
-/** A socket that goes nowhere, so no unit test reaches the network. */
+/**
+ * A socket that goes nowhere, so no unit test reaches the network. It reports
+ * `open` at once, because a streaming `open` resolves only on a connected
+ * socket (ADR-054).
+ */
 function fakeSocket(): SocketLike {
   return {
     send: () => undefined,
     close: () => undefined,
-    addEventListener: () => undefined,
+    addEventListener: (type: string, h: () => void) => {
+      if (type === 'open') queueMicrotask(h);
+    },
   } as unknown as SocketLike;
 }
 

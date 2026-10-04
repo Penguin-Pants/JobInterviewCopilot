@@ -2330,3 +2330,71 @@ The hold buffer restarts `FR-115`'s hold when the shown generation replaces its
 own card, because that card is newly visible; otherwise the next question could
 replace the retry's answer at once. `OverlayGate` already treats every `begin`
 as a new card, so a rebuilt overlay is replayed the replacement alone.
+
+### ADR-054 — Streaming STT transport audit: open on accept, the OpenAI rate, the ElevenLabs protocol
+
+**Decided 2026-10-04** from an audit of the streaming STT adapters, with the
+protocols checked against the official SDK packages (`openai` 7.28.0,
+`@elevenlabs/elevenlabs-js` 2.70.0). Amends ADR-036 point 1 and ADR-022's
+"no per-provider resampling".
+
+**Context.** Seven defects, one root: the transport assumed what the provider
+does rather than checking.
+
+1. A streaming `open` resolved before its socket connected. The health
+   machine's retry called `open` again, which always "succeeded", reset to the
+   primary, and the socket failed seconds later. A retryable outage never
+   reached the backup. ADR-036 routed later failures back into the machine but
+   left this loop in place.
+2. A malformed frame and an exception thrown by a downstream listener were
+   swallowed by the same empty `catch`, with no log.
+3. Provider error frames were ignored, so a revoked key or a spent quota looked
+   like silence.
+4. The socket had no upgrade timeout and no heartbeat. A half-open socket held
+   a session open, billing, with no transcripts.
+5. OpenAI realtime accepts `pcm16` only at 24 kHz (SDK
+   `TranscriptionSessionUpdate.Session.input_audio_format`). The app sent
+   16 kHz.
+6. The ElevenLabs adapter spoke a protocol the provider does not: it read
+   `type` (the SDK keys frames by `message_type`), sent raw binary (the SDK
+   sends base64 JSON `input_audio_chunk` frames), sent `{type: 'close'}`, and
+   passed the gap as `min_silence_duration_ms`, which is a different VAD knob
+   (the gap is `vad_silence_threshold_secs`, 0.3 to 3.0 s).
+7. `close` closed the socket right after the close frame, so the provider's
+   final transcript, the last thing said before Stop, was dropped.
+
+**Decision.**
+
+- `open` resolves when the provider accepts the socket (`open`, or
+  `session_started` for ElevenLabs) and rejects with a classified
+  `ProviderError` on an early close, an error frame, or 10 s of silence. A
+  refused upgrade is classified by its HTTP status. A session that never opened
+  does not run its own reconnect ladder; the health machine owns that retry.
+  After a successful open the ladder is unchanged.
+- A frame the adapter cannot read is dropped and logged as a warning without
+  its contents. A throwing listener is logged as an error and does not stop the
+  other listeners. Neither reaches the health machine. The log sink is injected
+  from `index.ts`, because the adapters may not import a module that writes to
+  disk (NFR-002).
+- Error frames that make the session useless end it with a class: ElevenLabs by
+  `message_type`, OpenAI by `error.type` and `error.code`. OpenAI says most
+  realtime errors are recoverable, so an unknown OpenAI error is logged and the
+  session goes on. Deepgram has no in-band error frame in this repository's
+  sources; its refusals arrive as an HTTP status or a close code.
+- `ws` gets a 10 s handshake timeout and a 15 s ping. A missed pong terminates
+  the socket, which the reconnect ladder treats as any abnormal close.
+- The OpenAI adapter upsamples 16 kHz to 24 kHz with a stateful 2:3 linear
+  interpolation, so chunk boundaries neither drop nor repeat a sample.
+  `sentBytes` still counts the 16 kHz PCM, because the Cost Meter computes
+  seconds at the registry's 16 kHz rate.
+- The ElevenLabs adapter follows the SDK's wire protocol, and `close` sends an
+  empty chunk with `commit: true`.
+- `close` with a close frame keeps routing transcripts until the provider
+  closes, answers, or 1.5 s passes. No chunk is accepted while closing.
+
+**Consequences.** Stop can take up to 1.5 s longer per stream; both streams
+close in parallel. The OpenAI session-config frame was checked against the
+SDK's `TranscriptionSessionUpdate` and matches it, so it is unchanged; whether
+the beta `OpenAI-Beta: realtime=v1` protocol stays available is not covered by
+the SDK types and is an open risk. `02-architecture.md` section 3.1 records the
+new behavior.

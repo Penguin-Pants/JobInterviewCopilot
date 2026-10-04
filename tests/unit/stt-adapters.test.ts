@@ -31,72 +31,30 @@ import {
   createElevenLabsProvider,
   elevenLabsConnectSpec,
 } from '../../src/main/ai/stt/elevenlabs.js';
+import type { SttProvider } from '../../src/main/ai/stt.js';
+import { FakeSocket, fakeFactory } from '../fakes/socket.js';
 
-/** A socket we drive by hand. Records every frame the adapter sends. */
-class FakeSocket implements SocketLike {
-  readonly sent: (string | Uint8Array)[] = [];
-  closedWith: number | null = null;
-  private readonly handlers = new Map<string, ((e: never) => void)[]>();
-
-  constructor(readonly spec: ConnectSpec) {}
-
-  send(data: string | Uint8Array): void {
-    this.sent.push(data);
-  }
-
-  close(code?: number): void {
-    this.closedWith = code ?? 1000;
-  }
-
-  addEventListener(type: string, h: (e: never) => void): void {
-    const list = this.handlers.get(type) ?? [];
-    list.push(h);
-    this.handlers.set(type, list);
-  }
-
-  private fire(type: string, event?: unknown): void {
-    for (const h of this.handlers.get(type) ?? []) (h as (e: unknown) => void)(event);
-  }
-
-  opened(): void {
-    this.fire('open');
-  }
-
-  receive(frame: unknown): void {
-    this.fire('message', { data: JSON.stringify(frame) });
-  }
-
-  /** Delivers the text verbatim, so a malformed frame really is malformed. */
-  receiveRaw(text: string): void {
-    this.fire('message', { data: text });
-  }
-
-  dropped(code = 1006, reason = 'abnormal'): void {
-    this.fire('close', { code, reason });
-  }
-
-  /** The text frames only, decoded for assertion. */
-  get textFrames(): string[] {
-    return this.sent.filter((f): f is string => typeof f === 'string');
-  }
-
-  get binaryFrames(): Uint8Array[] {
-    return this.sent.filter((f): f is Uint8Array => typeof f !== 'string');
-  }
+/** What the provider sends when it accepts a socket. */
+function accept(socket: FakeSocket, providerId: string): void {
+  socket.opened();
+  // ElevenLabs `open` waits for the session-start frame (ADR-054).
+  if (providerId === 'elevenlabs') socket.receive({ message_type: 'session_started' });
 }
 
-/** Hands back every socket it made, so a reconnect is observable. */
-function fakeFactory(): { factory: (s: ConnectSpec) => SocketLike; sockets: FakeSocket[] } {
-  const sockets: FakeSocket[] = [];
-  return {
-    factory: (spec) => {
-      const socket = new FakeSocket(spec);
-      sockets.push(socket);
-      return socket;
-    },
-    sockets,
-  };
+/** Opens a session over a fake socket that the provider accepts. */
+async function openOn(
+  make: (f: (s: ConnectSpec) => SocketLike) => SttProvider,
+  choice: { providerId: string; modelId: string },
+  source: AudioChunk['source'] = 'interviewer',
+) {
+  const { factory, sockets } = fakeFactory();
+  const pending = make(factory).open(choice, source, 'key', OPTIONS);
+  accept(sockets[0]!, choice.providerId);
+  return { session: await pending, sockets, socket: sockets[0]! };
 }
+
+const DEEPGRAM = { providerId: 'deepgram', modelId: 'nova-3' };
+const ELEVENLABS = { providerId: 'elevenlabs', modelId: 'scribe-v2-realtime' };
 
 function chunk(sequence = 0, source: AudioChunk['source'] = 'interviewer'): AudioChunk {
   return { source, pcm: new ArrayBuffer(32000), timestamp: 1_000 + sequence, sequence };
@@ -159,7 +117,8 @@ describe('TC-159 endpointing uses the configured gap', () => {
       { turnEndGapMs: 1400 },
     );
     const url = new URL(spec.url);
-    expect(url.searchParams.get('min_silence_duration_ms')).toBe('1400');
+    // Seconds, as the official SDK sends it (ADR-054).
+    expect(url.searchParams.get('vad_silence_threshold_secs')).toBe('1.4');
     expect(url.searchParams.get('commit_strategy')).toBe('vad');
     expect(url.searchParams.get('audio_format')).toBe('pcm_16000');
   });
@@ -204,27 +163,18 @@ describe('TC-050 normalized events', () => {
       name: 'elevenlabs',
       make: createElevenLabsProvider,
       modelId: 'scribe-v2-realtime',
-      interim: { type: 'partial_transcript', text: 'tell me' },
-      final: { type: 'committed_transcript', text: 'tell me about yourself' },
+      interim: { message_type: 'partial_transcript', text: 'tell me' },
+      final: { message_type: 'committed_transcript', text: 'tell me about yourself' },
       text: 'tell me about yourself',
     },
   ];
 
   for (const c of cases) {
     it(`${c.name} emits exactly {source, text, isFinal, timestamp, providerId}`, async () => {
-      const { factory, sockets } = fakeFactory();
-      const provider = c.make(factory);
-      const session = await provider.open(
-        { providerId: c.name, modelId: c.modelId },
-        'interviewer',
-        'key',
-        OPTIONS,
-      );
+      const { session, socket } = await openOn(c.make, { providerId: c.name, modelId: c.modelId });
       const seen: TranscriptEvent[] = [];
       session.on('transcript', (t) => seen.push(t));
 
-      const socket = sockets[0]!;
-      socket.opened();
       socket.receive(c.interim);
       socket.receive(c.final);
 
@@ -241,7 +191,6 @@ describe('TC-050 normalized events', () => {
         expect(typeof event.timestamp).toBe('number');
       }
       expect(seen[1]?.confidence).toBe(c.name === 'deepgram' ? 0.91 : undefined);
-      await session.close();
     });
   }
 });
@@ -249,17 +198,14 @@ describe('TC-050 normalized events', () => {
 /** TC-053: Deepgram's speech-final is the native turn end. */
 describe('TC-053 endpoint event', () => {
   it('fires on a Deepgram speech_final message', async () => {
-    const { factory, sockets } = fakeFactory();
-    const session = await createDeepgramProvider(factory).open(
+    const { session, sockets } = await openOn(
+      createDeepgramProvider,
       { providerId: 'deepgram', modelId: 'nova-3' },
       'interviewer',
-      'key',
-      OPTIONS,
     );
     const endpoints = vi.fn();
     session.on('endpoint', endpoints);
     const socket = sockets[0]!;
-    socket.opened();
 
     socket.receive({ channel: { alternatives: [{ transcript: 'a question' }] }, is_final: true });
     expect(endpoints).not.toHaveBeenCalled();
@@ -273,16 +219,13 @@ describe('TC-053 endpoint event', () => {
   });
 
   it('does not emit an empty interim, which would blank the overlay', async () => {
-    const { factory, sockets } = fakeFactory();
-    const session = await createDeepgramProvider(factory).open(
+    const { session, sockets } = await openOn(
+      createDeepgramProvider,
       { providerId: 'deepgram', modelId: 'nova-3' },
       'interviewer',
-      'key',
-      OPTIONS,
     );
     const seen: TranscriptEvent[] = [];
     session.on('transcript', (t) => seen.push(t));
-    sockets[0]!.opened();
     sockets[0]!.receive({ channel: { alternatives: [{ transcript: '' }] }, is_final: false });
     expect(seen).toEqual([]);
   });
@@ -291,16 +234,13 @@ describe('TC-053 endpoint event', () => {
 /** TC-152: the OpenAI realtime mapping. */
 describe('TC-152 OpenAI realtime adapter', () => {
   it('configures the chosen model with server VAD on open', async () => {
-    const { factory, sockets } = fakeFactory();
-    await createOpenAiRealtimeProvider(factory).open(
+    const { sockets } = await openOn(
+      createOpenAiRealtimeProvider,
       { providerId: 'openai', modelId: 'gpt-4o-mini-transcribe' },
       'candidate',
-      'key',
-      OPTIONS,
     );
     const socket = sockets[0]!;
     expect(socket.spec.headers?.Authorization).toBe('Bearer key');
-    socket.opened();
 
     const handshake = JSON.parse(socket.textFrames[0]!) as {
       type: string;
@@ -312,71 +252,64 @@ describe('TC-152 OpenAI realtime adapter', () => {
   });
 
   it('maps the VAD stop event to endpoint', async () => {
-    const { factory, sockets } = fakeFactory();
-    const session = await createOpenAiRealtimeProvider(factory).open(
+    const { session, sockets } = await openOn(
+      createOpenAiRealtimeProvider,
       { providerId: 'openai', modelId: 'gpt-4o-transcribe' },
       'interviewer',
-      'key',
-      OPTIONS,
     );
     const endpoints = vi.fn();
     session.on('endpoint', endpoints);
-    sockets[0]!.opened();
     sockets[0]!.receive({ type: 'input_audio_buffer.speech_stopped' });
     expect(endpoints).toHaveBeenCalledTimes(1);
   });
 
   it('sends audio as base64 in a JSON frame, not as bytes', async () => {
-    const { factory, sockets } = fakeFactory();
-    const session = await createOpenAiRealtimeProvider(factory).open(
+    const { session, sockets } = await openOn(
+      createOpenAiRealtimeProvider,
       { providerId: 'openai', modelId: 'gpt-4o-transcribe' },
       'interviewer',
-      'key',
-      OPTIONS,
     );
-    sockets[0]!.opened();
     session.push(chunk());
+    expect(sockets[0]!.binaryFrames).toHaveLength(0);
     const frame = JSON.parse(sockets[0]!.textFrames[1]!) as { type: string; audio: string };
     expect(frame.type).toBe('input_audio_buffer.append');
-    expect(Buffer.from(frame.audio, 'base64').byteLength).toBe(32000);
+    // Resampled to the 24 kHz the realtime API requires (ADR-054).
+    expect(Buffer.from(frame.audio, 'base64').byteLength).toBe(23999 * 2);
   });
 });
 
 /** TC-153: the ElevenLabs mapping. */
 describe('TC-153 ElevenLabs adapter', () => {
   it('commits a segment as a final and as a turn end', async () => {
-    const { factory, sockets } = fakeFactory();
-    const session = await createElevenLabsProvider(factory).open(
+    const { session, sockets } = await openOn(
+      createElevenLabsProvider,
       { providerId: 'elevenlabs', modelId: 'scribe-v2-realtime' },
       'interviewer',
-      'key',
-      OPTIONS,
     );
     const seen: TranscriptEvent[] = [];
     const endpoints = vi.fn();
     session.on('transcript', (t) => seen.push(t));
     session.on('endpoint', endpoints);
-
-    sockets[0]!.opened();
-    sockets[0]!.receive({ type: 'partial_transcript', text: 'why do you' });
+    sockets[0]!.receive({ message_type: 'partial_transcript', text: 'why do you' });
     expect(endpoints).not.toHaveBeenCalled();
-    sockets[0]!.receive({ type: 'committed_transcript', text: 'why do you want this role' });
+    sockets[0]!.receive({
+      message_type: 'committed_transcript',
+      text: 'why do you want this role',
+    });
 
     expect(seen.map((t) => t.isFinal)).toEqual([false, true]);
     expect(endpoints).toHaveBeenCalledTimes(1);
   });
 
-  it('sends raw PCM bytes with no resampling', async () => {
-    const { factory, sockets } = fakeFactory();
-    const session = await createElevenLabsProvider(factory).open(
+  it('sends the 16 kHz PCM with no resampling', async () => {
+    const { session, sockets } = await openOn(
+      createElevenLabsProvider,
       { providerId: 'elevenlabs', modelId: 'scribe-v2-realtime' },
       'interviewer',
-      'key',
-      OPTIONS,
     );
-    sockets[0]!.opened();
     session.push(chunk());
-    expect(sockets[0]!.binaryFrames[0]!.byteLength).toBe(32000);
+    const frame = JSON.parse(sockets[0]!.textFrames.at(-1)!) as { audio_base_64: string };
+    expect(Buffer.from(frame.audio_base_64, 'base64').byteLength).toBe(32000);
   });
 });
 
@@ -385,26 +318,18 @@ describe('TC-051 per-stream isolation', () => {
   it('a final on one stream does not touch the other', async () => {
     const { factory, sockets } = fakeFactory();
     const provider = createDeepgramProvider(factory);
-    const interviewer = await provider.open(
-      { providerId: 'deepgram', modelId: 'nova-3' },
-      'interviewer',
-      'key',
-      OPTIONS,
-    );
-    const candidate = await provider.open(
-      { providerId: 'deepgram', modelId: 'nova-3' },
-      'candidate',
-      'key',
-      OPTIONS,
-    );
+    const pendingInterviewer = provider.open(DEEPGRAM, 'interviewer', 'key', OPTIONS);
+    const pendingCandidate = provider.open(DEEPGRAM, 'candidate', 'key', OPTIONS);
+    sockets[0]!.opened();
+    sockets[1]!.opened();
+    const interviewer = await pendingInterviewer;
+    const candidate = await pendingCandidate;
 
     const interviewerEvents: TranscriptEvent[] = [];
     const candidateEvents: TranscriptEvent[] = [];
     interviewer.on('transcript', (t) => interviewerEvents.push(t));
     candidate.on('transcript', (t) => candidateEvents.push(t));
 
-    sockets[0]!.opened();
-    sockets[1]!.opened();
     sockets[0]!.receive({
       channel: { alternatives: [{ transcript: 'their turn' }] },
       is_final: true,
@@ -451,7 +376,7 @@ describe('TC-054 socket reconnect', () => {
     s.on('error', (e) => errors.push(e));
     s.on('transcript', (t) => seen.push(t));
 
-    s.connect();
+    void s.connect();
     sockets[0]!.opened();
     sockets[0]!.dropped();
     await Promise.resolve();
@@ -466,7 +391,7 @@ describe('TC-054 socket reconnect', () => {
 
   it('holds at most MAX_QUEUED_CHUNKS while the socket is down, then flushes', async () => {
     const { s, sockets } = session();
-    s.connect();
+    void s.connect();
     sockets[0]!.opened();
     sockets[0]!.dropped();
     await Promise.resolve();
@@ -487,7 +412,7 @@ describe('TC-054 socket reconnect', () => {
    */
   it('counts only the bytes it put on the wire, never the chunks it dropped', async () => {
     const { s, sockets } = session();
-    s.connect();
+    void s.connect();
     sockets[0]!.opened();
 
     s.push(chunk(0));
@@ -510,7 +435,7 @@ describe('TC-054 socket reconnect', () => {
     const errors: ProviderError[] = [];
     s.on('error', (e) => errors.push(e));
 
-    s.connect();
+    void s.connect();
     // Accepted then dropped immediately, over and over: a provider crashloop.
     // The clock never advances, so no connection counts as healthy and the
     // ladder is never reset. Three retries, then the session reports.
@@ -530,7 +455,7 @@ describe('TC-054 socket reconnect', () => {
     const errors: ProviderError[] = [];
     s.on('error', (e) => errors.push(e));
 
-    s.connect();
+    void s.connect();
     // Two quick failures put the ladder at 2 of 3.
     for (let i = 0; i < 2; i += 1) {
       sockets[i]!.opened();
@@ -557,7 +482,9 @@ describe('TC-054 socket reconnect', () => {
     const { s, sockets } = session();
     const errors: ProviderError[] = [];
     s.on('error', (e) => errors.push(e));
-    s.connect();
+    const opening = s.connect();
+    sockets[0]!.opened();
+    await opening;
     sockets[0]!.dropped(1008, 'invalid credentials');
     await Promise.resolve();
 
@@ -567,9 +494,17 @@ describe('TC-054 socket reconnect', () => {
     expect(errors[0]!.retryable).toBe(false);
   });
 
+  it('rejects the open itself when the first socket is refused', async () => {
+    const { s, sockets } = session();
+    const opening = s.connect();
+    sockets[0]!.dropped(1008, 'invalid credentials');
+    await expect(opening).rejects.toMatchObject({ class: 'auth', retryable: false });
+    expect(sockets).toHaveLength(1);
+  });
+
   it('stops reconnecting once the session is closed', async () => {
     const { s, sockets } = session();
-    s.connect();
+    void s.connect();
     sockets[0]!.opened();
     await s.close();
     sockets[0]!.dropped();
@@ -679,41 +614,35 @@ describe('validation failure messages', () => {
 
 describe('stream teardown', () => {
   it('tells Deepgram the stream ended before closing', async () => {
-    const { factory, sockets } = fakeFactory();
-    const session = await createDeepgramProvider(factory).open(
-      { providerId: 'deepgram', modelId: 'nova-3' },
-      'interviewer',
-      'key',
-      OPTIONS,
-    );
-    sockets[0]!.opened();
-    await session.close();
-    expect(JSON.parse(sockets[0]!.textFrames.at(-1)!)).toEqual({ type: 'CloseStream' });
-    expect(sockets[0]!.closedWith).toBe(1000);
+    const { session, socket } = await openOn(createDeepgramProvider, DEEPGRAM);
+    const closing = session.close();
+    expect(JSON.parse(socket.textFrames.at(-1)!)).toEqual({ type: 'CloseStream' });
+    // Deepgram closes the socket once it has sent its last results.
+    socket.dropped(1000, '');
+    await closing;
+    expect(socket.closedWith).toBe(1000);
   });
 
-  it('tells ElevenLabs the stream ended before closing', async () => {
-    const { factory, sockets } = fakeFactory();
-    const session = await createElevenLabsProvider(factory).open(
-      { providerId: 'elevenlabs', modelId: 'scribe-v2-realtime' },
-      'candidate',
-      'key',
-      OPTIONS,
-    );
-    sockets[0]!.opened();
-    await session.close();
-    expect(JSON.parse(sockets[0]!.textFrames.at(-1)!)).toEqual({ type: 'close' });
+  it('tells ElevenLabs the stream ended before closing, with a final commit', async () => {
+    const { session, socket } = await openOn(createElevenLabsProvider, ELEVENLABS, 'candidate');
+    const closing = session.close();
+    expect(JSON.parse(socket.textFrames.at(-1)!)).toEqual({
+      message_type: 'input_audio_chunk',
+      audio_base_64: '',
+      commit: true,
+      sample_rate: 16000,
+    });
+    socket.receive({ message_type: 'committed_transcript', text: '' });
+    await closing;
+    expect(socket.closedWith).toBe(1000);
   });
 
   it('sends nothing extra to OpenAI, which has no close frame', async () => {
-    const { factory, sockets } = fakeFactory();
-    const session = await createOpenAiRealtimeProvider(factory).open(
+    const { session, sockets } = await openOn(
+      createOpenAiRealtimeProvider,
       { providerId: 'openai', modelId: 'gpt-4o-transcribe' },
       'interviewer',
-      'key',
-      OPTIONS,
     );
-    sockets[0]!.opened();
     const before = sockets[0]!.sent.length;
     await session.close();
     expect(sockets[0]!.sent).toHaveLength(before);
@@ -721,31 +650,24 @@ describe('stream teardown', () => {
   });
 
   it('drops a push after close rather than reviving the socket', async () => {
-    const { factory, sockets } = fakeFactory();
-    const session = await createDeepgramProvider(factory).open(
-      { providerId: 'deepgram', modelId: 'nova-3' },
-      'interviewer',
-      'key',
-      OPTIONS,
-    );
-    sockets[0]!.opened();
-    await session.close();
-    const after = sockets[0]!.sent.length;
+    const { session, socket } = await openOn(createDeepgramProvider, DEEPGRAM);
+    const closing = session.close();
+    const after = socket.sent.length;
     session.push(chunk(1));
-    expect(sockets[0]!.sent).toHaveLength(after);
+    socket.dropped(1000, '');
+    await closing;
+    session.push(chunk(2));
+    expect(socket.sent).toHaveLength(after);
   });
 
   it('ignores a frame it cannot parse instead of ending the interview', async () => {
-    const { factory, sockets } = fakeFactory();
-    const session = await createDeepgramProvider(factory).open(
+    const { session, sockets } = await openOn(
+      createDeepgramProvider,
       { providerId: 'deepgram', modelId: 'nova-3' },
       'interviewer',
-      'key',
-      OPTIONS,
     );
     const errors: ProviderError[] = [];
     session.on('error', (e) => errors.push(e));
-    sockets[0]!.opened();
     sockets[0]!.receiveRaw('not json at all{');
     expect(errors).toEqual([]);
 
@@ -768,18 +690,15 @@ describe('stream teardown', () => {
  */
 describe('TC-171 only the Deepgram adapter reports confidence', () => {
   it('sets confidence from channel.alternatives[0].confidence on every event', async () => {
-    const { factory, sockets } = fakeFactory();
-    const session = await createDeepgramProvider(factory).open(
+    const { session, sockets } = await openOn(
+      createDeepgramProvider,
       { providerId: 'deepgram', modelId: 'nova-3' },
       'interviewer',
-      'key',
-      OPTIONS,
     );
     const seen: TranscriptEvent[] = [];
     session.on('transcript', (t) => seen.push(t));
 
     const socket = sockets[0]!;
-    socket.opened();
     socket.receive({
       channel: { alternatives: [{ transcript: 'tell me', confidence: 0.42 }] },
       is_final: false,
@@ -795,23 +714,18 @@ describe('TC-171 only the Deepgram adapter reports confidence', () => {
     // substituted value: no reading is not a low reading (ADR-032).
     socket.receive({ channel: { alternatives: [{ transcript: 'and then' }] }, is_final: true });
     expect(seen[2]).not.toHaveProperty('confidence');
-
-    await session.close();
   });
 
   it('never sets it on the OpenAI realtime adapter', async () => {
-    const { factory, sockets } = fakeFactory();
-    const session = await createOpenAiRealtimeProvider(factory).open(
+    const { session, sockets } = await openOn(
+      createOpenAiRealtimeProvider,
       { providerId: 'openai', modelId: 'gpt-4o-transcribe' },
       'interviewer',
-      'key',
-      OPTIONS,
     );
     const seen: TranscriptEvent[] = [];
     session.on('transcript', (t) => seen.push(t));
 
     const socket = sockets[0]!;
-    socket.opened();
     socket.receive({
       type: 'conversation.item.input_audio_transcription.completed',
       transcript: 'tell me about yourself',
@@ -823,23 +737,19 @@ describe('TC-171 only the Deepgram adapter reports confidence', () => {
   });
 
   it('never sets it on the ElevenLabs adapter', async () => {
-    const { factory, sockets } = fakeFactory();
-    const session = await createElevenLabsProvider(factory).open(
+    const { session, sockets } = await openOn(
+      createElevenLabsProvider,
       { providerId: 'elevenlabs', modelId: 'scribe-v2-realtime' },
       'interviewer',
-      'key',
-      OPTIONS,
     );
     const seen: TranscriptEvent[] = [];
     session.on('transcript', (t) => seen.push(t));
 
     const socket = sockets[0]!;
-    socket.opened();
-    socket.receive({ type: 'committed_transcript', text: 'tell me about yourself' });
+    socket.receive({ message_type: 'committed_transcript', text: 'tell me about yourself' });
 
     expect(seen).toHaveLength(1);
     expect(seen[0]).not.toHaveProperty('confidence');
-    await session.close();
   });
 
   /**
