@@ -107,7 +107,15 @@ export class AudioSupervisor {
     if (this.running) throw new Error('audio capture is already running');
     this.running = true;
     for (const source of SOURCES) this.setState(source, 'starting');
-    await this.worker.start(SOURCES);
+    try {
+      await this.worker.start(SOURCES);
+    } catch (err) {
+      // No worker will ever report on these streams, so `starting` would stand
+      // for the whole session. `running` stays set so `stop()` still tears the
+      // worker down.
+      for (const source of SOURCES) this.markUnavailable(source, describe(err));
+      throw err;
+    }
   }
 
   /**
@@ -185,6 +193,10 @@ export class AudioSupervisor {
    * A stream ended unexpectedly. Restart it up to `MAX_STREAM_RESTARTS`, then
    * leave it in `error` for the Dashboard badge to report (FR-045).
    *
+   * A restart that fails leaves the stream in `error` rather than `starting`,
+   * and counts toward the bound. It never rejects, because its callers fire
+   * it from an event handler with nobody to catch.
+   *
    * @returns whether a restart was attempted.
    */
   async handleStreamEnded(source: TranscriptSource, reason: string): Promise<boolean> {
@@ -200,7 +212,11 @@ export class AudioSupervisor {
     status.restarts += 1;
     status.error = reason;
     this.setState(source, 'starting');
-    await this.worker.start([source]);
+    try {
+      await this.worker.start([source]);
+    } catch (err) {
+      this.markUnavailable(source, `${reason} (restart failed: ${describe(err)})`);
+    }
     return true;
   }
 
@@ -252,7 +268,11 @@ export class AudioSupervisor {
     await this.worker.stop();
     await this.worker.destroy();
     for (const source of SOURCES) {
-      this.status.set(source, { state: 'idle', restarts: 0, error: null, received: 0 });
+      const reset: StreamStatus = { state: 'idle', restarts: 0, error: null, received: 0 };
+      this.status.set(source, reset);
+      // The worker is destroyed before it can report `idle`, so this is the
+      // only report the Dashboard badge gets.
+      this.onStreamState?.(source, { ...reset });
     }
     this.lastSequence.clear();
     this.inFlight = 0;
@@ -265,6 +285,10 @@ export class AudioSupervisor {
     if (state !== 'error') status.error = null;
     this.onStreamState?.(source, { ...status });
   }
+}
+
+function describe(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
