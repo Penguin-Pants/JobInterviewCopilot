@@ -184,7 +184,7 @@ async function loadDocxConverter(): Promise<DocxConverter> {
  * so the cache key would describe content that was never converted.
  *
  * `signal` stops a PDF parse the caller gave up on, so a stuck pdfjs worker does
- * not keep running after its document has failed (ADR-054).
+ * not keep running after its document has failed (ADR-055).
  *
  * Throws {@link ConversionError} rather than a raw parser error, so a Dashboard
  * row shows a sentence instead of a stack frame. The caller turns that into

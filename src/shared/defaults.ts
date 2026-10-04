@@ -31,7 +31,7 @@ export const KB_CEILING = {
 } as const;
 
 /**
- * Hard limits on one ingest (ADR-054).
+ * Hard limits on one ingest (ADR-055).
  *
  * Separate from {@link KB_CEILING} on purpose. The ceiling only bounds a timing
  * promise, and a document above it still processes (FR-068). These bound what

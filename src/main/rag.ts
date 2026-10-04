@@ -91,7 +91,7 @@ export interface RagEngineOptions {
   debounceMs?: number;
   /** Injected so a test can hold or stall a conversion. Defaults to the real converter. */
   convert?: typeof convertToMarkdown;
-  /** How long one conversion may run before its document fails. Lowered in tests (ADR-054). */
+  /** How long one conversion may run before its document fails. Lowered in tests (ADR-055). */
   conversionTimeoutMs?: number;
 }
 
@@ -487,7 +487,7 @@ export class RagEngine {
     // Stat, then read once, then convert those same bytes. The stat keeps a
     // multi-gigabyte file out of memory entirely, and a second read inside the
     // converter could see a different file than the one hashed below, so the
-    // cache key would describe content that was never converted (ADR-054).
+    // cache key would describe content that was never converted (ADR-055).
     let bytes: Buffer;
     try {
       if ((await stat(path)).size > KB_INGEST_LIMITS.maxFileBytes) {
@@ -667,7 +667,7 @@ export class RagEngine {
   }
 
   /**
-   * Convert, failing rather than waiting forever (ADR-054).
+   * Convert, failing rather than waiting forever (ADR-055).
    *
    * A parse with no bound left its document in `converting` for the rest of the
    * process, and `inFlight` queued every later pass for that path behind it. On
@@ -1205,7 +1205,7 @@ function errnoOf(err: unknown): string {
   return typeof code === 'string' ? code : 'unknown error';
 }
 
-/** The row text for a file above the hard per-file cap (ADR-054). */
+/** The row text for a file above the hard per-file cap (ADR-055). */
 function tooLargeMessage(): string {
   const megabytes = KB_INGEST_LIMITS.maxFileBytes / (1024 * 1024);
   return `This file is larger than the ${megabytes} MB limit for one document.`;

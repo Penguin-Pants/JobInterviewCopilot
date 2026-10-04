@@ -614,7 +614,7 @@ describe('a delete that lands during conversion', () => {
   });
 });
 
-describe('ingest limits (ADR-054)', () => {
+describe('ingest limits (ADR-055)', () => {
   it('rejects a file above the hard cap with a row, without reading it', async () => {
     const h = makeHarness();
     const profile = await withProfile(h);
