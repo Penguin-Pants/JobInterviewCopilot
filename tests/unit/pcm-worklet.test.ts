@@ -4,13 +4,10 @@ import { fileURLToPath } from 'node:url';
 import { createContext, runInContext } from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import {
-  BYTES_PER_CHUNK,
-  CHUNK_DURATION_MS,
   FRAMES_PER_CHUNK,
   PCM_PROCESSOR_FILE,
   PCM_PROCESSOR_NAME,
   TARGET_SAMPLE_RATE,
-  floatToInt16,
 } from '../../src/renderer/audio-worker/pcm-worklet.js';
 
 /**
@@ -98,34 +95,35 @@ function loadProcessor(framesPerChunk = FRAMES_PER_CHUNK): {
   };
 }
 
+/** Runs mono samples through the shipped processor as one chunk and returns the Int16 values. */
+function convert(samples: number[]): number[] {
+  const { process, emitted } = loadProcessor(samples.length);
+  process(new Float32Array(samples));
+  return Array.from(new Int16Array(emitted[0]!.pcm));
+}
+
 /** TC-040: the conversion and the framing. */
 describe('TC-040 PCM framing', () => {
   it('uses the documented constants', () => {
     expect(TARGET_SAMPLE_RATE).toBe(16000);
-    expect(CHUNK_DURATION_MS).toBe(1000);
     expect(FRAMES_PER_CHUNK).toBe(16000);
-    expect(BYTES_PER_CHUNK).toBe(32000);
   });
 
   it('converts known Float32 values to the expected Int16 values', () => {
-    expect(floatToInt16(0)).toBe(0);
-    expect(floatToInt16(1)).toBe(32767);
-    expect(floatToInt16(-1)).toBe(-32768);
-    expect(floatToInt16(0.5)).toBe(16384);
-    expect(floatToInt16(-0.5)).toBe(-16384);
+    expect(convert([0, 1, -1, 0.5, -0.5])).toEqual([0, 32767, -32768, 16384, -16384]);
   });
 
   it('clamps out-of-range input rather than wrapping it', () => {
     // A wrap would turn the loudest possible sample into the quietest, which
     // is an audible click rather than a clean clip.
-    expect(floatToInt16(2)).toBe(32767);
-    expect(floatToInt16(-2)).toBe(-32768);
+    expect(convert([2, -2])).toEqual([32767, -32768]);
   });
 
   it('scales negative and positive by different constants', () => {
     // The signed 16-bit range is asymmetric. One constant for both would either
     // clip the most negative sample or overflow the most positive one.
-    expect(Math.abs(floatToInt16(-1))).toBeGreaterThan(Math.abs(floatToInt16(1)));
+    const [negative, positive] = convert([-1, 1]);
+    expect(Math.abs(negative!)).toBeGreaterThan(Math.abs(positive!));
   });
 
   it('emits nothing until a whole chunk is filled', () => {
@@ -140,7 +138,7 @@ describe('TC-040 PCM framing', () => {
     for (let i = 0; i < 125; i += 1) process(new Float32Array(128));
 
     expect(emitted).toHaveLength(1);
-    expect(emitted[0]!.pcm.byteLength).toBe(BYTES_PER_CHUNK);
+    expect(emitted[0]!.pcm.byteLength).toBe(32000);
   });
 
   it('preserves the samples through the conversion', () => {
