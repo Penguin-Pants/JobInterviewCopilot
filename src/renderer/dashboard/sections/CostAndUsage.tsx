@@ -123,7 +123,7 @@ export function CostAndUsage({
         id="threshold-time"
         data-testid="threshold-time"
         type="number"
-        min="1"
+        min="0"
         step="5"
         value={timeMinutes}
         onChange={(e) => setTimeMinutes(e.target.value)}

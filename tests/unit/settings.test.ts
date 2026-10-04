@@ -396,6 +396,12 @@ describe('TC-033 every bounded setting has a range', () => {
     expect(clamped.thresholds.timeMinutes).toBe(SETTINGS_LIMITS.timeMinutes.max);
   });
 
+  it('keeps a zero threshold, which means the warning is off', () => {
+    const s = defaultSettings();
+    s.thresholds = { costUsd: 0, timeMinutes: 0 };
+    expect(clampSettings(s).thresholds).toEqual({ costUsd: 0, timeMinutes: 0 });
+  });
+
   it('puts the shipped consent text back when the stored one is blank', () => {
     const s = defaultSettings();
     s.consentReminderText = '   ';
@@ -421,7 +427,9 @@ describe('TC-033 every bounded setting has a range', () => {
     expect(parse({ trigger: { ...trigger, candidateContextTurns: 1_000 } })).toBe(false);
     expect(parse({ trigger: { ...trigger, candidateContextChars: -1 } })).toBe(false);
     expect(parse({ thresholds: { costUsd: -1, timeMinutes: 60 } })).toBe(false);
-    expect(parse({ thresholds: { costUsd: 2, timeMinutes: 0 } })).toBe(false);
+    expect(parse({ thresholds: { costUsd: 2, timeMinutes: -1 } })).toBe(false);
+    // Zero is "not set" for both thresholds (FR-109), so it stays valid.
+    expect(parse({ thresholds: { costUsd: 0, timeMinutes: 0 } })).toBe(true);
     expect(parse({ consentReminderText: '   ' })).toBe(false);
     expect(
       parse({ consentReminderText: 'a'.repeat(SETTINGS_LIMITS.consentReminderChars.max + 1) }),

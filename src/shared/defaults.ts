@@ -57,10 +57,10 @@ export const SETTINGS_LIMITS = {
   minTurnChars: { min: 1, max: 200 },
   candidateContextTurns: { min: 0, max: 10 },
   candidateContextChars: { min: 0, max: 4000 },
-  // The two warning thresholds (FR-031). A cost of 0 warns on the first
-  // priced request; a time of 0 would warn before the session started.
+  // The two warning thresholds (FR-031). Zero means "not set": the cost meter
+  // never warns on a threshold of zero or less (FR-109), so zero stays valid.
   costUsd: { min: 0, max: 1000 },
-  timeMinutes: { min: 1, max: 1440 },
+  timeMinutes: { min: 0, max: 1440 },
   // The consent reminder (FR-006, FR-032). Never blank: a blank reminder is no
   // reminder. The maximum keeps it a card the overlay can show.
   consentReminderChars: { min: 1, max: 1000 },

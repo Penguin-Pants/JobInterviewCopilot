@@ -130,7 +130,7 @@ interface Settings {
   };
   thresholds: {
     costUsd: number;                       // 0 .. 1000, default 2.00
-    timeMinutes: number;                   // 1 .. 1440, default 60
+    timeMinutes: number;                   // 0 .. 1440, 0 = off, default 60
   };
   consentReminderText: string;             // trimmed, 1 .. 1000 characters
   overlayWindow: {
