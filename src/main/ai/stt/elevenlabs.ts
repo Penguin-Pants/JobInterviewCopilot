@@ -113,10 +113,11 @@ function readElevenLabsFrame(raw: string, emit: Emitter): void {
     const text = optionalString(frame, 'text') ?? '';
     if (text !== '') emit.transcript(text, true);
     // A commit is the turn end for this provider. It fires at the VAD silence
-    // threshold, which is the user's configured gap.
+    // threshold, which is the user's configured gap. It does not end the close
+    // drain: the frame has no field that says which commit it answers (SDK
+    // `CommittedTranscriptPayload`), so a VAD commit and the final commit
+    // look the same.
     emit.endpoint();
-    // While closing, this is the answer to the final commit.
-    emit.finished();
     return;
   }
 

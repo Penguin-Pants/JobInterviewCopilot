@@ -2371,6 +2371,13 @@ does rather than checking.
   refused upgrade is classified by its HTTP status. A session that never opened
   does not run its own reconnect ladder; the health machine owns that retry.
   After a successful open the ladder is unchanged.
+- A failure in the same tick as the accept, before the caller can attach an
+  `error` listener, rejects `open` too. Resolving recorded a dead session as a
+  success, and its error reached no listener.
+- Every reconnect waits for the same accept and the same 10 s bound as the
+  first dial. Audio stays in the bounded queue until then. A reconnect that is
+  not accepted in time is closed and the ladder goes on, so a stalled
+  ElevenLabs handshake reaches failover instead of taking audio forever.
 - A frame the adapter cannot read is dropped and logged as a warning without
   its contents. A throwing listener is logged as an error and does not stop the
   other listeners. Neither reaches the health machine. The log sink is injected
@@ -2390,10 +2397,15 @@ does rather than checking.
 - The ElevenLabs adapter follows the SDK's wire protocol, and `close` sends an
   empty chunk with `commit: true`.
 - `close` with a close frame keeps routing transcripts until the provider
-  closes, answers, or 1.5 s passes. No chunk is accepted while closing.
+  closes or 1.5 s passes. No chunk is accepted while closing. An answer frame
+  does not end the drain: ElevenLabs answers a VAD commit and the final commit
+  with the same `committed_transcript`, which has no field that says which
+  commit it answers (SDK `CommittedTranscriptPayload`). Ending on the first
+  one lost the tail when an earlier VAD commit was answered during the drain.
 
 **Consequences.** Stop can take up to 1.5 s longer per stream; both streams
-close in parallel. The OpenAI session-config frame was checked against the
+close in parallel. ElevenLabs always uses the full 1.5 s, because nothing in
+its protocol marks the last answer. The OpenAI session-config frame was checked against the
 SDK's `TranscriptionSessionUpdate` and matches it, so it is unchanged; whether
 the beta `OpenAI-Beta: realtime=v1` protocol stays available is not covered by
 the SDK types and is an open risk. `02-architecture.md` section 3.1 records the

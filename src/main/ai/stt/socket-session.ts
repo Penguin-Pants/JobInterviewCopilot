@@ -44,10 +44,11 @@ export const RECONNECT_BACKOFF_MS = [250, 500, 1000];
 export const HEALTHY_CONNECTION_MS = 5000;
 
 /**
- * How long `open` waits for the provider to accept the socket (ADR-056).
+ * How long each dial waits for the provider to accept the socket (ADR-056).
  *
  * `ws` already bounds the HTTP upgrade (`ws-factory.ts`); this also bounds a
- * provider that upgrades and then never sends its session-start frame.
+ * provider that upgrades and then never sends its session-start frame. It
+ * applies to the first dial and to every reconnect.
  */
 export const OPEN_TIMEOUT_MS = 10_000;
 
@@ -112,8 +113,6 @@ export interface Emitter {
   error(err: ProviderError): void;
   /** The provider's session-start frame, for a spec with `awaitsSessionStart`. */
   ready(): void;
-  /** The provider has answered the close frame. Ends the close drain early. */
-  finished(): void;
   /** A provider notice that does not end the session. Logged only. */
   notice(message: string): void;
 }
@@ -156,8 +155,9 @@ export interface SocketAdapterSpec {
   /** Frames to send immediately after the socket opens, e.g. a session update. */
   handshake?(send: (data: string) => void): void;
   /**
-   * When true, `open` resolves on the provider's session-start frame
-   * (`emit.ready()`) rather than on the socket's `open` event.
+   * When true, every dial (the first and each reconnect) is ready on the
+   * provider's session-start frame (`emit.ready()`) rather than on the
+   * socket's `open` event. Audio waits in the queue until then.
    */
   awaitsSessionStart?: boolean;
   /**
@@ -169,7 +169,7 @@ export interface SocketAdapterSpec {
   encode(chunk: AudioChunk): string | Uint8Array;
   /**
    * A frame telling the provider the stream ended. When there is one, `close`
-   * waits up to CLOSE_DRAIN_MS for the provider's answer before closing.
+   * keeps the socket up until the provider closes it or CLOSE_DRAIN_MS passes.
    */
   closeFrame?(): string | null;
 }
@@ -194,6 +194,7 @@ export class SocketSttSession implements SttSession {
   private readonly log: SttLog;
 
   private socket: SocketLike | null = null;
+  /** The current socket is ready: the provider accepted it, so audio may go. */
   private open = false;
   private closing = false;
   private reconnectAttempt = 0;
@@ -210,8 +211,18 @@ export class SocketSttSession implements SttSession {
   private pendingOpen: {
     resolve: () => void;
     reject: (err: ProviderError) => void;
-    cancelTimeout: () => void;
   } | null = null;
+
+  /** Cancels the current dial's acceptance timeout (OPEN_TIMEOUT_MS). */
+  private cancelAccept: (() => void) | null = null;
+
+  /**
+   * A failure that ended the session while no `error` listener was attached.
+   * After `open` resolves, the caller has not yet got the session, so a close
+   * or an error frame in that same tick reached nobody and the dead session
+   * read as a success. `connect` rejects with it instead.
+   */
+  private unheard: ProviderError | null = null;
 
   /** Ends the close drain. Set only while `close` waits for the provider. */
   private finishDrain: (() => void) | null = null;
@@ -271,7 +282,9 @@ export class SocketSttSession implements SttSession {
    * Opens the socket. Resolves once the provider has accepted it: on `open`,
    * or on the session-start frame for a spec that waits for one. Rejects with
    * a classified error if the socket closes first, the provider sends an error
-   * frame, or nothing answers within OPEN_TIMEOUT_MS (ADR-056).
+   * frame, or nothing answers within OPEN_TIMEOUT_MS (ADR-056). It also
+   * rejects if the session fails in the same tick as it was accepted, before
+   * the caller can attach an `error` listener.
    *
    * A session that never opened does not run the reconnect ladder. Its caller
    * is the health machine, which owns the retry and the failover. Resolving
@@ -285,19 +298,14 @@ export class SocketSttSession implements SttSession {
       );
     }
     const opened = new Promise<void>((resolve, reject) => {
-      const cancelTimeout = this.timer(() => {
-        this.fail(
-          providerError(
-            this.spec.providerId,
-            'timeout',
-            `The ${this.spec.providerId} socket did not open within ${String(OPEN_TIMEOUT_MS)} ms.`,
-          ),
-        );
-      }, OPEN_TIMEOUT_MS);
-      this.pendingOpen = { resolve, reject, cancelTimeout };
+      this.pendingOpen = { resolve, reject };
     });
     this.dial();
-    return opened;
+    // The `then` runs after the tick that accepted the socket, so a failure
+    // later in that tick is seen here rather than lost.
+    return opened.then(() => {
+      if (this.unheard) throw this.unheard;
+    });
   }
 
   private dial(): void {
@@ -305,16 +313,20 @@ export class SocketSttSession implements SttSession {
     this.refusedStatus = null;
     const socket = this.factory(this.spec.connect());
     this.socket = socket;
+    this.cancelAccept?.();
+    this.cancelAccept = this.timer(() => {
+      this.acceptTimedOut(socket);
+    }, OPEN_TIMEOUT_MS);
 
     socket.addEventListener('open', () => {
-      this.open = true;
-      this.openedAt = this.now();
       this.spec.handshake?.((data) => socket.send(data));
-      this.flushQueue();
       if (!this.spec.awaitsSessionStart) this.markReady();
     });
 
     socket.addEventListener('message', (e) => {
+      // A socket this session let go of may still deliver a frame. Its late
+      // session-start frame must not mark the current socket ready.
+      if (this.socket !== socket) return;
       const raw = typeof e.data === 'string' ? e.data : String(e.data);
       try {
         this.spec.handleMessage(raw, this.emitter);
@@ -338,11 +350,14 @@ export class SocketSttSession implements SttSession {
     });
 
     socket.addEventListener('close', (e) => {
-      // A socket this session already let go of, e.g. after an error frame.
-      if (this.socket !== socket && this.socket !== null) return;
+      // A socket this session already let go of, e.g. after an error frame
+      // or a reconnect the provider never accepted.
+      if (this.socket !== socket) return;
       const wasHealthy = this.open && this.now() - this.openedAt >= HEALTHY_CONNECTION_MS;
       this.open = false;
       this.socket = null;
+      this.cancelAccept?.();
+      this.cancelAccept = null;
       const errorClass =
         this.refusedStatus === null
           ? closeCodeToErrorClass(e.code)
@@ -363,16 +378,48 @@ export class SocketSttSession implements SttSession {
         return;
       }
       if (wasHealthy) this.reconnectAttempt = 0;
-      void this.reconnect(errorClass, e.code, e.reason);
+      void this.reconnect(
+        errorClass,
+        e.reason || `The ${this.spec.providerId} socket was rejected (code ${String(e.code)}).`,
+      );
     });
   }
 
+  /**
+   * The provider accepted the current socket. Only now is it writable, so a
+   * reconnect does not send audio before the provider's session-start frame.
+   */
   private markReady(): void {
+    if (!this.socket || this.open) return;
+    this.cancelAccept?.();
+    this.cancelAccept = null;
+    this.open = true;
+    this.openedAt = this.now();
+    this.flushQueue();
     const pending = this.pendingOpen;
     if (!pending) return;
     this.pendingOpen = null;
-    pending.cancelTimeout();
     pending.resolve();
+  }
+
+  /**
+   * The provider did not accept `socket` within OPEN_TIMEOUT_MS. On the first
+   * open this rejects it. On a reconnect the socket is let go and the ladder
+   * runs, so a stalled handshake reaches failover instead of hanging.
+   */
+  private acceptTimedOut(socket: SocketLike): void {
+    if (this.socket !== socket || this.open) return;
+    const message = `The ${this.spec.providerId} socket was not accepted within ${String(
+      OPEN_TIMEOUT_MS,
+    )} ms.`;
+    if (this.pendingOpen) {
+      this.fail(providerError(this.spec.providerId, 'timeout', message));
+      return;
+    }
+    this.cancelAccept = null;
+    this.socket = null;
+    socket.close(1000, 'not accepted');
+    void this.reconnect('timeout', message);
   }
 
   /**
@@ -385,16 +432,21 @@ export class SocketSttSession implements SttSession {
     const socket = this.socket;
     this.socket = null;
     this.open = false;
+    this.cancelAccept?.();
+    this.cancelAccept = null;
     socket?.close(1000, 'provider error');
 
     const pending = this.pendingOpen;
     if (pending) {
       this.pendingOpen = null;
-      pending.cancelTimeout();
       pending.reject(err);
       return;
     }
     this.finishDrain?.();
+    if (this.handlers.error.length === 0) {
+      this.unheard ??= err;
+      return;
+    }
     this.dispatch(this.handlers.error, err);
   }
 
@@ -435,9 +487,6 @@ export class SocketSttSession implements SttSession {
     ready: () => {
       this.markReady();
     },
-    finished: () => {
-      this.finishDrain?.();
-    },
     notice: (message) => {
       this.log('warn', message);
     },
@@ -448,19 +497,9 @@ export class SocketSttSession implements SttSession {
    * session only fails outward once the ladder is exhausted, or immediately on
    * a non-retryable close, where retrying would fail identically forever.
    */
-  private async reconnect(
-    errorClass: ProviderError['class'],
-    code: number,
-    reason: string,
-  ): Promise<void> {
+  private async reconnect(errorClass: ProviderError['class'], reason: string): Promise<void> {
     if (errorClass === 'auth' || errorClass === 'client') {
-      this.fail(
-        providerError(
-          this.spec.providerId,
-          errorClass,
-          reason || `The ${this.spec.providerId} socket was rejected (code ${String(code)}).`,
-        ),
-      );
+      this.fail(providerError(this.spec.providerId, errorClass, reason));
       return;
     }
 
@@ -510,20 +549,23 @@ export class SocketSttSession implements SttSession {
   /**
    * Ends the stream. No chunk is accepted from here on.
    *
-   * With a close frame, the socket stays up until the provider closes it,
-   * answers (`emit.finished()`) or CLOSE_DRAIN_MS passes, and transcripts keep
-   * flowing meanwhile. Closing at once dropped the provider's last transcript,
-   * which is the last thing said before Stop (ADR-056).
+   * With a close frame, the socket stays up until the provider closes it or
+   * CLOSE_DRAIN_MS passes, and transcripts keep flowing meanwhile. Closing at
+   * once dropped the provider's last transcript, which is the last thing said
+   * before Stop (ADR-056). An answer frame does not end the drain: ElevenLabs
+   * answers a VAD commit and the final commit with the same uncorrelated
+   * frame, so an earlier segment's answer would close before the tail.
    */
   close(): Promise<void> {
     if (this.closed) return this.closed;
     this.closing = true;
     this.queue.length = 0;
 
+    this.cancelAccept?.();
+    this.cancelAccept = null;
     const pending = this.pendingOpen;
     if (pending) {
       this.pendingOpen = null;
-      pending.cancelTimeout();
       pending.reject(
         providerError(this.spec.providerId, 'network', 'The session was closed before it opened.'),
       );

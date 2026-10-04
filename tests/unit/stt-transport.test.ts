@@ -38,9 +38,8 @@ async function settled(p: Promise<unknown>): Promise<'resolved' | 'rejected' | '
     () => (state = 'resolved'),
     () => (state = 'rejected'),
   );
-  // Two turns of the microtask queue are enough for a settled promise to report.
-  await Promise.resolve();
-  await Promise.resolve();
+  // One macrotask lets every microtask run, so a settled promise has reported.
+  await new Promise((r) => setTimeout(r, 0));
   return state;
 }
 
@@ -146,6 +145,88 @@ describe('open resolves only once the provider has accepted the socket', () => {
     sockets[1]!.opened();
     expect(session.isOpen).toBe(true);
     expect(errors).toEqual([]);
+  });
+
+  it('rejects the open when the socket closes on auth in the same tick as it opened', async () => {
+    const { factory, sockets } = fakeFactory();
+    const pending = createDeepgramProvider(factory).open(DEEPGRAM, 'interviewer', 'k', OPTIONS);
+    // No caller holds the session yet, so no error listener can hear this.
+    sockets[0]!.opened();
+    sockets[0]!.dropped(1008, 'invalid key');
+    expect(await settled(pending)).toBe('rejected');
+    const err = await rejection(pending);
+    expect(err.class).toBe('auth');
+    expect(err.retryable).toBe(false);
+  });
+
+  it('rejects the open when ElevenLabs sends an error frame right after session_started', async () => {
+    const { factory, sockets } = fakeFactory();
+    const pending = createElevenLabsProvider(factory).open(ELEVENLABS, 'interviewer', 'k', OPTIONS);
+    sockets[0]!.opened();
+    sockets[0]!.receive({ message_type: 'session_started' });
+    sockets[0]!.receive({ message_type: 'quota_exceeded', error: 'spent' });
+    expect(await settled(pending)).toBe('rejected');
+    const err = await rejection(pending);
+    expect(err.class).toBe('rate-limit');
+    expect(sockets[0]!.closedWith).not.toBeNull();
+  });
+});
+
+/** A reconnect is writable only once the provider accepts it again, within a bound. */
+describe('a reconnect waits for the provider to accept it', () => {
+  async function droppedElevenLabs() {
+    const { factory, sockets } = fakeFactory();
+    const clock = manualTimer();
+    const pending = createElevenLabsProvider(factory, {
+      timer: clock.timer,
+      sleep: () => Promise.resolve(),
+    }).open(ELEVENLABS, 'interviewer', 'k', OPTIONS);
+    sockets[0]!.opened();
+    sockets[0]!.receive({ message_type: 'session_started' });
+    const session = await pending;
+    const errors: ProviderError[] = [];
+    session.on('error', (e) => errors.push(e));
+    sockets[0]!.dropped();
+    await Promise.resolve();
+    expect(sockets).toHaveLength(2);
+    sockets[1]!.opened();
+    return { session, sockets, clock, errors };
+  }
+
+  const audioFrames = (frames: string[]) =>
+    frames.filter(
+      (f) => (JSON.parse(f) as { message_type?: string }).message_type === 'input_audio_chunk',
+    );
+
+  it('holds audio until the new socket sends session_started', async () => {
+    const { session, sockets } = await droppedElevenLabs();
+    session.push(chunk());
+    expect(audioFrames(sockets[1]!.textFrames)).toHaveLength(0);
+
+    sockets[1]!.receive({ message_type: 'session_started' });
+    expect(audioFrames(sockets[1]!.textFrames)).toHaveLength(1);
+  });
+
+  it('drops a reconnect that never sends session_started and runs the ladder', async () => {
+    const { session, sockets, clock, errors } = await droppedElevenLabs();
+    session.push(chunk());
+    clock.fire(OPEN_TIMEOUT_MS);
+    await Promise.resolve();
+    expect(sockets[1]!.closedWith).not.toBeNull();
+    expect(audioFrames(sockets[1]!.textFrames)).toHaveLength(0);
+    // The next rung of the ladder dials again; the session is not failed yet.
+    expect(sockets).toHaveLength(3);
+    expect(errors).toEqual([]);
+  });
+
+  it('ignores a late session_started from a reconnect it already let go of', async () => {
+    const { session, sockets, clock } = await droppedElevenLabs();
+    clock.fire(OPEN_TIMEOUT_MS);
+    await Promise.resolve();
+    sockets[2]!.opened();
+    sockets[1]!.receive({ message_type: 'session_started' });
+    session.push(chunk());
+    expect(audioFrames(sockets[2]!.textFrames)).toHaveLength(0);
   });
 });
 
@@ -325,17 +406,27 @@ describe('the stream tail after Stop', () => {
     expect(socket.closedWith).toBe(1000);
   });
 
-  it('commits ElevenLabs and closes once the committed transcript arrives', async () => {
-    const { session, socket, seen } = await openWithClock(createElevenLabsProvider, ELEVENLABS);
+  it('keeps an ElevenLabs drain open past an earlier VAD commit, so the tail arrives', async () => {
+    const { session, socket, seen, clock } = await openWithClock(
+      createElevenLabsProvider,
+      ELEVENLABS,
+    );
     const closing = session.close();
     expect(JSON.parse(socket.textFrames.at(-1)!)).toMatchObject({
       message_type: 'input_audio_chunk',
       audio_base_64: '',
       commit: true,
     });
+    // VAD committed a segment before the final commit was sent. Its answer
+    // looks the same as the answer to the final commit.
+    socket.receive({ message_type: 'committed_transcript', text: 'an earlier segment' });
+    expect(await settled(closing)).toBe('pending');
+    expect(socket.closedWith).toBeNull();
+
     socket.receive({ message_type: 'committed_transcript', text: 'the tail' });
+    clock.fire(CLOSE_DRAIN_MS);
     await closing;
-    expect(seen.map((t) => t.text)).toEqual(['the tail']);
+    expect(seen.map((t) => t.text)).toEqual(['an earlier segment', 'the tail']);
     expect(socket.closedWith).toBe(1000);
   });
 });

@@ -584,11 +584,15 @@ the socket's `open` event, or on the session-start frame for a provider that
 sends one (ElevenLabs `session_started`). It rejects with a classified
 `ProviderError` if the socket closes first, the provider sends an error frame,
 or nothing answers within 10 s; a refused upgrade is classified by its HTTP
-status, so a revoked key is `auth` and is not retried. A session that never
-opened does not run its own reconnect ladder, because `CMP-12` owns the retry
-and the failover (ADR-056). After a successful open, a dropped socket runs the
-adapter's reconnect ladder, and a failure after that ladder, or a provider
-error frame that ends the session, arrives on the `error` event. The caller
+status, so a revoked key is `auth` and is not retried. A failure in the same
+tick as the accept, before the caller has the session, also rejects. A session
+that never opened does not run its own reconnect ladder, because `CMP-12` owns
+the retry and the failover (ADR-056). After a successful open, a dropped socket
+runs the adapter's reconnect ladder. Each reconnect must be accepted the same
+way within the same 10 s, and audio waits in the bounded queue until it is; a
+reconnect not accepted in time is closed and the ladder goes on. A failure
+after that ladder, or a provider error frame that ends the session, arrives on
+the `error` event. The caller
 must treat that event as the provider failing, not as a line for the log:
 `CMP-15` raises it into `CMP-12` and re-opens the pair on whatever the machine
 then serves (ADR-036).
@@ -613,9 +617,10 @@ caller bills the chunk it handed over.
 so a caller must stay routable until `close` resolves. Clearing the route first
 discarded the last thing said before Stop. A **streaming** adapter with a close
 frame (Deepgram `CloseStream`, an ElevenLabs final commit) does the same: it
-keeps routing transcripts until the provider closes the socket, answers the
-close frame, or 1.5 s passes, and only then closes (ADR-056). No chunk is
-accepted once `close` is called.
+keeps routing transcripts until the provider closes the socket or 1.5 s
+passes, and only then closes (ADR-056). An answer frame does not end the
+drain, because an ElevenLabs commit answer does not say which commit it
+answers. No chunk is accepted once `close` is called.
 
 Adapter notes:
 - `deepgram`: WebSocket with `encoding=linear16`, `sample_rate=16000`,
