@@ -1325,8 +1325,11 @@ in Milestone 0 and are recorded here for the first time. The rest are new:
 - `CH-122` `overlay:ready` names the session its consent card was rendered
   for: the `sessionId` of the last `CH-201` push, or `null` when no session
   runs. `OverlayGate.reset` records the session that starts or `null` when one
-  stops, and the gate refuses a report for any other session with
-  `{ refused: 'another-session' }`. Without it, a late report or retry from the
+  stops. While a session runs, the gate refuses a report for any other session
+  with `{ refused: 'another-session' }`, and after a stop it refuses a late
+  report for the session that stopped. With no session held at all it accepts
+  the report, because nothing can be opened early; the overlay end-to-end suite
+  drives sessions from the renderer side this way. Without the rule, a late report or retry from the
   previous interview could arrive after the reset and before the renewed
   reminder had painted, and open the next interview's gate early. The renderer
   also stops a retry as soon as a newer `CH-201` push names another session.

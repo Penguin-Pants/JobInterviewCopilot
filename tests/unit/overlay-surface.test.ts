@@ -416,9 +416,19 @@ describe('the overlay readiness gate', () => {
     expect(g.sent.map((m) => m.channel)).toEqual(['suggestion:begin']);
   });
 
+  it('accepts a report when the main process holds no session to protect', () => {
+    // Nothing was started through the main process, so no interview can be
+    // opened early. The overlay end-to-end suite drives sessions this way, and
+    // a refusal here left the reminder unclickable (FR-006, FR-083).
+    const g = gate();
+    expect(g.gate.noteReady('session-from-the-renderer')).toBe(true);
+    expect(g.gate.isReady).toBe(true);
+  });
+
   it('refuses a late report for the session that has just stopped', () => {
     const g = gate();
     g.gate.reset('session-1');
+    g.gate.reset(null);
     g.gate.reset(null);
     expect(g.gate.noteReady('session-1')).toBe(false);
     expect(g.gate.isReady).toBe(false);

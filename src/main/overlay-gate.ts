@@ -63,6 +63,8 @@ export class OverlayGate {
    * `null` before the first session and after one stops.
    */
   private session: string | null = null;
+  /** The session that stopped last, whose late reports are still refused. */
+  private stopped: string | null = null;
 
   constructor(private readonly deliver: (message: GatedMessage) => void) {}
 
@@ -89,10 +91,18 @@ export class OverlayGate {
    * before the renewed reminder has painted. Taken as an answer, it opened the
    * next interview's gate on a reminder that was not on screen yet, which is
    * the race `ADR-016` exists so that nothing has to win. It is refused, and
-   * the gate stays closed until the report for this session arrives.
+   * the gate stays closed until the report for this session arrives. A late
+   * report for the session that has just stopped is refused too.
+   *
+   * With no session held at all, nothing can be opened early, so a report is
+   * accepted as it was before sessions were named. The overlay end-to-end
+   * suite drives sessions from the renderer side only, and a refusal there
+   * left the reminder unclickable (FR-006, FR-083).
    */
   noteReady(session: string | null): boolean {
-    if (session !== this.session) return false;
+    const held = this.session !== null;
+    if (held && session !== this.session) return false;
+    if (!held && session !== null && session === this.stopped) return false;
     if (this.ready) return true;
     this.ready = true;
     this.flush();
@@ -141,6 +151,9 @@ export class OverlayGate {
   reset(session: string | null): void {
     this.card = null;
     this.ready = false;
+    // A second stop in a row keeps the session that stopped last.
+    if (session !== null) this.stopped = null;
+    else if (this.session !== null) this.stopped = this.session;
     this.session = session;
   }
 
