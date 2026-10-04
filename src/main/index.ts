@@ -238,7 +238,7 @@ if (!app.requestSingleInstanceLock()) {
     // them with no Dashboard and no way to open one short of killing the
     // background process.
     bootstrapReady
-      .then((ready) => (ready ? focusOrRecreateDashboard() : undefined))
+      .then((ready) => (ready ? focusOrRecreateDashboard() : focusAnyWindow()))
       .catch((err: unknown) =>
         getLogger().error('second launch could not show the Dashboard', err),
       );
@@ -621,6 +621,21 @@ async function startKnowledgeBase(): Promise<void> {
 }
 
 /** Bring the Dashboard forward, creating it again when it has been closed. */
+/**
+ * Bring forward whatever window a failed bootstrap left open (TC-009).
+ *
+ * A bootstrap that fails after a window exists leaves the app running, and its
+ * state is not complete enough to build a Dashboard from. Showing the window
+ * that does exist is still better than a launch that does nothing.
+ */
+function focusAnyWindow(): void {
+  const win = BrowserWindow.getAllWindows().find((w) => !w.isDestroyed());
+  if (!win) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+}
+
 async function focusOrRecreateDashboard(): Promise<void> {
   if (!dashboardWindow || dashboardWindow.isDestroyed()) {
     await createDashboardWindow(config.get(), (win) => {

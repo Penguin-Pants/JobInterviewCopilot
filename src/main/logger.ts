@@ -191,7 +191,17 @@ export class Logger {
 }
 
 /** A console write that cannot throw, for example on a closed pipe (EPIPE). */
+/** Streams that already have the listener below, so it is added once. */
+const quietStreams = new WeakSet<NodeJS.WriteStream>();
+
 function writeQuietly(stream: NodeJS.WriteStream, text: string): void {
+  // A closed pipe reports EPIPE as an `error` event after `write()` returns,
+  // and an `error` event with no listener ends the process. The catch below
+  // only sees synchronous throws.
+  if (!quietStreams.has(stream)) {
+    quietStreams.add(stream);
+    stream.on('error', () => undefined);
+  }
   try {
     stream.write(text);
   } catch {

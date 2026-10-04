@@ -268,6 +268,14 @@ export class SessionManager {
       await writeFile(metaPath(dir, id), JSON.stringify(meta), 'utf8');
       await this.openTranscript(join(dir, `${id}.ndjson`));
     } catch (err) {
+      // Undo everything this start made. A sidecar and an empty transcript left
+      // behind would be imported by recovery as a crashed session that never
+      // ran, and an open handle would leak.
+      const handle = this.handle;
+      this.handle = null;
+      await handle?.close().catch(() => undefined);
+      await rm(join(dir, `${id}.ndjson`), { force: true });
+      await rm(metaPath(dir, id), { force: true });
       await rm(lockPath(this.userDataDir), { force: true });
       throw err;
     }

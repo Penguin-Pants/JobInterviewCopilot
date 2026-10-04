@@ -7,10 +7,10 @@
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { readFile, readdir, rm, stat, writeFile, mkdir } from 'node:fs/promises';
+import { open, readFile, readdir, rm, stat, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Session, TranscriptEntry } from '../../src/shared/types.js';
 import {
   SessionManager,
@@ -511,6 +511,29 @@ describe('session durability regressions', () => {
       'before',
       'after',
     ]);
+  });
+
+  it('a start that fails after opening the transcript leaves nothing behind', async () => {
+    // The FileHandle class is not exported, so it is reached through a handle.
+    const probe = await open(join(userData, 'probe'), 'w');
+    const proto = Object.getPrototypeOf(probe) as { stat: () => Promise<unknown> };
+    await probe.close();
+    const spy = vi
+      .spyOn(proto, 'stat')
+      .mockRejectedValueOnce(Object.assign(new Error('EIO: i/o error'), { code: 'EIO' }));
+    try {
+      await expect(manager().start(request())).rejects.toThrow('EIO');
+    } finally {
+      spy.mockRestore();
+    }
+
+    // No lock, no sidecar and no transcript, so recovery has nothing to import
+    // and the next start is not blocked.
+    await expect(stat(join(userData, 'session.lock'))).rejects.toThrow();
+    const dir = join(userData, 'profiles', PROFILE.id, 'sessions');
+    expect(await readdir(dir)).toEqual([]);
+    await expect(manager().recover([PROFILE])).resolves.toEqual([]);
+    await expect(manager({ newSessionId: () => 's2' }).start(request())).resolves.toBeTruthy();
   });
 
   it('a short write is completed rather than leaving half a line', async () => {

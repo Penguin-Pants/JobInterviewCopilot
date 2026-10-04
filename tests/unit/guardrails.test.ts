@@ -520,6 +520,15 @@ describe('TC-009 a second launch waits for bootstrap', () => {
     expect(body).toContain('dialog.showErrorBox(');
     expect(body).toContain('app.quit()');
   });
+
+  it('a second launch after a partial bootstrap still brings a window forward', () => {
+    // Bootstrap can fail after a window exists, and the app then stays up. A
+    // launch that did nothing in that state left the user no way back to it.
+    const text = source();
+    const start = text.indexOf("app.on('second-instance'");
+    const handler = text.slice(start, text.indexOf('});', start));
+    expect(handler).toContain('focusAnyWindow()');
+  });
 });
 
 /**

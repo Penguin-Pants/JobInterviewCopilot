@@ -105,6 +105,21 @@ describe('NFR-009 logging never throws', () => {
     expect(text.match(/not writable/g)).toHaveLength(1);
   });
 
+  it('survives a console pipe that fails after the write returned', () => {
+    // A closed pipe reports EPIPE as an `error` event after `write()` returns.
+    // With no listener, Node treats that event as fatal.
+    const dir = tmp();
+    mkdirSync(join(dir, 'main.log'));
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      new Logger({ dir }).error('to a closed pipe');
+      const epipe = Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+      expect(() => process.stderr.emit('error', epipe)).not.toThrow();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('still writes the line when rotation fails', () => {
     const dir = tmp();
     writeFileSync(join(dir, 'main.log'), 'x'.repeat(5 * 1024 * 1024 + 10), 'utf8');
