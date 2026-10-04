@@ -44,7 +44,6 @@
   },
   "overrides": {
     "protobufjs@6.11.6": "https://npm.aikido.io/263fa3fb5d741a9c9eb25/protobufjs@6.11.6-aikido.6",
-    "sharp@<0.35.4": "0.35.4",
     "pdfjs-dist@5.4.296": "https://npm.aikido.io/263fa3fb5d741a9c9eb25/pdfjs-dist@5.4.296-aikido.1"
   },
   "devDependencies": {
