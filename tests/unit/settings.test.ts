@@ -14,6 +14,7 @@ import {
   quarantineIfCorrupt,
 } from '../../src/main/config.js';
 import { defaultSettings, SETTINGS_LIMITS } from '../../src/shared/defaults.js';
+import { settingsSchema } from '../../src/shared/ipc.js';
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), 'icp-settings-'));
@@ -364,5 +365,94 @@ describe('FR-025 provider separation is enforced on load', () => {
     const store = new ConfigStore({ dir });
 
     expect(store.get().providers.stt.backup).toBeNull();
+  });
+});
+
+/**
+ * Audit regression: the trigger guard, the candidate context, both thresholds
+ * and the consent text were bare `z.number()` and `z.string()`. A negative
+ * guard, a context of a million turns or an empty consent reminder was stored
+ * and used as is. Every bounded field now has a range in `SETTINGS_LIMITS`,
+ * the schema refuses a value outside it and the load path clamps it.
+ */
+describe('TC-033 every bounded setting has a range', () => {
+  it('clamps the trigger guard, the candidate context and both thresholds', () => {
+    const s = defaultSettings();
+    s.trigger = {
+      ...s.trigger,
+      minTurnWords: -5,
+      minTurnChars: 10_000,
+      candidateContextTurns: 2.6,
+      candidateContextChars: -1,
+    };
+    s.thresholds = { costUsd: -3, timeMinutes: 100_000 };
+
+    const clamped = clampSettings(s);
+    expect(clamped.trigger.minTurnWords).toBe(SETTINGS_LIMITS.minTurnWords.min);
+    expect(clamped.trigger.minTurnChars).toBe(SETTINGS_LIMITS.minTurnChars.max);
+    expect(clamped.trigger.candidateContextTurns).toBe(3);
+    expect(clamped.trigger.candidateContextChars).toBe(SETTINGS_LIMITS.candidateContextChars.min);
+    expect(clamped.thresholds.costUsd).toBe(SETTINGS_LIMITS.costUsd.min);
+    expect(clamped.thresholds.timeMinutes).toBe(SETTINGS_LIMITS.timeMinutes.max);
+  });
+
+  it('puts the shipped consent text back when the stored one is blank', () => {
+    const s = defaultSettings();
+    s.consentReminderText = '   ';
+    expect(clampSettings(s).consentReminderText).toBe(defaultSettings().consentReminderText);
+  });
+
+  it('trims the consent text and cuts it to its maximum length', () => {
+    const s = defaultSettings();
+    s.consentReminderText = `  ${'a'.repeat(SETTINGS_LIMITS.consentReminderChars.max + 50)}  `;
+    const clamped = clampSettings(s).consentReminderText;
+    expect(clamped).toHaveLength(SETTINGS_LIMITS.consentReminderChars.max);
+    expect(clamped.startsWith('a')).toBe(true);
+  });
+
+  it('the schema refuses an out-of-range value instead of storing it', () => {
+    const parse = (patch: Record<string, unknown>): boolean =>
+      settingsSchema.safeParse({ ...defaultSettings(), ...patch }).success;
+    const trigger = defaultSettings().trigger;
+
+    expect(parse({})).toBe(true);
+    expect(parse({ trigger: { ...trigger, minTurnWords: 0 } })).toBe(false);
+    expect(parse({ trigger: { ...trigger, minTurnChars: 2.5 } })).toBe(false);
+    expect(parse({ trigger: { ...trigger, candidateContextTurns: 1_000 } })).toBe(false);
+    expect(parse({ trigger: { ...trigger, candidateContextChars: -1 } })).toBe(false);
+    expect(parse({ thresholds: { costUsd: -1, timeMinutes: 60 } })).toBe(false);
+    expect(parse({ thresholds: { costUsd: 2, timeMinutes: 0 } })).toBe(false);
+    expect(parse({ consentReminderText: '   ' })).toBe(false);
+    expect(
+      parse({ consentReminderText: 'a'.repeat(SETTINGS_LIMITS.consentReminderChars.max + 1) }),
+    ).toBe(false);
+  });
+
+  it('a stored file with out-of-range values is clamped on load, not reset', () => {
+    const dir = tmp();
+    const stored = defaultSettings();
+    stored.theme.accent = '#123456';
+    stored.trigger.minTurnWords = 0;
+    stored.thresholds.costUsd = -10;
+    stored.consentReminderText = '';
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify(stored));
+
+    expect(quarantineIfCorrupt(dir)).toBeNull();
+
+    const corrupt: string[] = [];
+    const loaded = new ConfigStore({ dir, onCorrupt: (_p, reason) => corrupt.push(reason) }).get();
+    expect(corrupt).toEqual([]);
+    // The user's other choices survive, which a reset to defaults would lose.
+    expect(loaded.theme.accent).toBe('#123456');
+    expect(loaded.trigger.minTurnWords).toBe(SETTINGS_LIMITS.minTurnWords.min);
+    expect(loaded.thresholds.costUsd).toBe(SETTINGS_LIMITS.costUsd.min);
+    expect(loaded.consentReminderText).toBe(defaultSettings().consentReminderText);
+  });
+
+  it('a value of the wrong type is still quarantined, not repaired', () => {
+    const dir = tmp();
+    const stored = { ...defaultSettings(), thresholds: { costUsd: 'lots', timeMinutes: 60 } };
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify(stored));
+    expect(quarantineIfCorrupt(dir)?.reason).toContain('schema invalid');
   });
 });

@@ -14,6 +14,11 @@ import type { InvokeChannel, PushChannel, PushPayload } from '../shared/ipc.js';
  * writing settings, rebinding hotkeys and replacing credentials. The overlay
  * needs six channels, so it gets six (FR-086).
  *
+ * Both lists are copies of `INVOKE_ACCESS` and `PUSH_ACCESS` in
+ * `shared/ipc.ts`, held equal by `ipc-sender.test.ts`. This check runs inside
+ * the renderer it restricts, so it is not the boundary: the main-process
+ * router enforces the same table by sender (ADR-054).
+ *
  * `overlay:setFontSize` is the fourth, added with the in-overlay text size
  * control (FR-093), and `overlay:setSize` is the fifth, added with the resize
  * grip (FR-081). Both exist rather than `config:set` for the reason above: a

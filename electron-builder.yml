@@ -25,6 +25,29 @@ asarUnpack:
   - '**/node_modules/@img/**'
   - '**/node_modules/chokidar/**'
   - '**/node_modules/readdirp/**'
+# Electron fuses, flipped in the packaged binary only (ADR-054). They close
+# ways to run code in this process that skip the app's own entry point.
+#
+#   - runAsNode off: ELECTRON_RUN_AS_NODE no longer turns the signed binary into
+#     a plain Node runtime. Nothing in this app forks a Node child.
+#   - enableNodeOptionsEnvironmentVariable off: NODE_OPTIONS (for example
+#     --require) is ignored. The nightly soak sets it on the dev binary, not on
+#     the packaged one.
+#   - onlyLoadAppFromAsar on: the app loads from app.asar and nowhere else.
+#     Unpacked files above still load, because Electron redirects reads of
+#     app.asar paths to app.asar.unpacked; the app itself still comes from
+#     the archive. smoke:packaged on the Windows runner is what proves it.
+#   - enableEmbeddedAsarIntegrityValidation on: app.asar is checked against the
+#     hash electron-builder embeds in the executable (Windows, Electron >= 30).
+#
+# enableNodeCliInspectArguments stays on, deliberately. Playwright's Electron
+# launcher passes --inspect=0 and waits for the inspector to answer, so with
+# the fuse off smoke:packaged could not launch the packaged app at all.
+electronFuses:
+  runAsNode: false
+  enableNodeOptionsEnvironmentVariable: false
+  onlyLoadAppFromAsar: true
+  enableEmbeddedAsarIntegrityValidation: true
 win:
   icon: branding/app-icon.ico
   target:

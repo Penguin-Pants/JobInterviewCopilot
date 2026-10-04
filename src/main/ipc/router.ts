@@ -1,7 +1,9 @@
 import type { IpcMain, IpcMainInvokeEvent, WebContents } from 'electron';
 import {
   invokeChannels,
+  mayInvoke,
   pushChannels,
+  type IpcWindowRole,
   type InvokeChannel,
   type InvokePayload,
   type InvokeResponse,
@@ -10,6 +12,7 @@ import {
   type PushPayload,
 } from '../../shared/ipc.js';
 import { getLogger } from '../logger.js';
+import { isTopLevelAppFrame } from './sender.js';
 
 /**
  * The IPC router (CMP-10, FR-086, TC-002).
@@ -17,6 +20,11 @@ import { getLogger } from '../logger.js';
  * Every payload and every response is validated against the schema declared in
  * src/shared/ipc.ts. A payload that fails is logged and rejected with a typed
  * error; it is never forwarded to a handler.
+ *
+ * The sender is checked before the payload (FR-086). The message must come
+ * from the top-level frame of an app page, in a window that `INVOKE_ACCESS`
+ * allows on that channel. The preload allowlists say the same thing, but they
+ * run inside the renderer they restrict, so they cannot be the boundary.
  *
  * This component does not redact. Redaction has exactly one home, the logger,
  * because a key can leak from a path that never crosses IPC (FR-034).
@@ -33,10 +41,21 @@ function ipcError(channel: string, message: string): IpcError {
   return { __ipcError: true, channel, message };
 }
 
+/** How the router tells the app's windows apart. Supplied by `index.ts`. */
+export interface SenderPolicy {
+  /** Which app window owns these contents, or null for none of them. */
+  roleOf(sender: WebContents): IpcWindowRole | null;
+  /** True when a frame URL is one of this app's own renderer pages. */
+  isAppUrl(url: string): boolean;
+}
+
 export class IpcRouter {
   private readonly registered = new Set<InvokeChannel>();
 
-  constructor(private readonly ipcMain: IpcMain) {}
+  constructor(
+    private readonly ipcMain: IpcMain,
+    private readonly senders: SenderPolicy,
+  ) {}
 
   /** Register one request/response channel with schema validation on both sides. */
   handle<C extends InvokeChannel>(channel: C, handler: Handler<C>): void {
@@ -48,6 +67,18 @@ export class IpcRouter {
     const spec = invokeChannels[channel];
 
     this.ipcMain.handle(channel, async (event, rawPayload: unknown) => {
+      const role = this.senders.roleOf(event.sender);
+      if (
+        role === null ||
+        !mayInvoke(role, channel) ||
+        !isTopLevelAppFrame(event.senderFrame, (url) => this.senders.isAppUrl(url))
+      ) {
+        // The URL stays out of the log: a packaged page URL is an install path
+        // outside userData (03-tasks.md Definition of Done).
+        getLogger().warn('ipc sender rejected', { channel, channelId: spec.id, role });
+        return ipcError(channel, 'This window may not use this channel.');
+      }
+
       const parsedPayload = spec.payload.safeParse(rawPayload);
       if (!parsedPayload.success) {
         getLogger().warn('ipc payload rejected', {

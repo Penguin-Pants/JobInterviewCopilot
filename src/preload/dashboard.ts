@@ -15,6 +15,11 @@ import type { InvokeChannel, PushChannel, PushPayload } from '../shared/ipc.js';
  * The Dashboard is the configuration surface, so it may invoke everything.
  * Listed explicitly rather than left open, so adding a channel is a decision
  * about which window may call it (FR-086).
+ *
+ * Both lists are copies of `INVOKE_ACCESS` and `PUSH_ACCESS` in
+ * `shared/ipc.ts`, held equal by `ipc-sender.test.ts`. A copy, because a
+ * sandboxed preload cannot load a chunk it shares with another preload. The
+ * main-process router enforces the table again by sender (ADR-054).
  */
 const ALLOWED_INVOKE: readonly InvokeChannel[] = [
   'config:get',

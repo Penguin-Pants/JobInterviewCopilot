@@ -3,6 +3,8 @@ import { BrowserWindow, desktopCapturer, session, type Session } from 'electron'
 import { applyNavigationLockdown } from './windows.js';
 import { getLogger } from './logger.js';
 import type { AudioWorkerHandle } from './audio.js';
+import { appRendererUrlCheck, isTopLevelAppFrame, type SenderFrame } from './ipc/sender.js';
+import { audioWorkerChannels, MAX_PCM_CHUNK_BYTES } from '../shared/ipc.js';
 import type { AudioChunk, TranscriptSource } from '../shared/types.js';
 
 /**
@@ -32,10 +34,23 @@ export interface AudioHostOptions {
  * path: returning without calling it leaves `getDisplayMedia` pending forever,
  * which presents as an audio pipeline that never starts and never errors,
  * which is close to the worst failure mode available.
+ *
+ * Only the audio worker's frame gets a stream. The answer is the whole screen
+ * plus system audio with no picker, so any other window that asked would get
+ * both without the user ever seeing a prompt. Every other frame is refused,
+ * through the callback, before a source is even enumerated.
  */
-export function installLoopbackHandler(target: Session = session.defaultSession): void {
+export function installLoopbackHandler(
+  isAudioWorkerFrame: (frame: Electron.WebFrameMain | null) => boolean,
+  target: Session = session.defaultSession,
+): void {
   target.setDisplayMediaRequestHandler(
-    async (_request, callback) => {
+    async (request, callback) => {
+      if (!isAudioWorkerFrame(request.frame)) {
+        getLogger().warn('display media refused for a frame that is not the audio worker');
+        callback({});
+        return;
+      }
       try {
         const sources = await desktopCapturer.getSources({ types: ['screen'] });
         const screen = sources[0];
@@ -62,6 +77,10 @@ export function installLoopbackHandler(target: Session = session.defaultSession)
  * Milestone 0 denied every permission. Loopback and the microphone both need
  * `media`, so it is granted here, scoped to the worker's own contents: no other
  * window in this app has any reason to capture anything.
+ *
+ * Checks get the same rule as requests. Chromium asks the check handler when a
+ * page queries a permission without prompting, and Electron's default answers
+ * yes to all of them.
  */
 export function installPermissionHandler(
   isAudioWorker: (contents: Electron.WebContents) => boolean,
@@ -74,6 +93,70 @@ export function installPermissionHandler(
     }
     callback(allowed);
   });
+  target.setPermissionCheckHandler(
+    (contents, permission) =>
+      permission === 'media' && contents !== null && isAudioWorker(contents),
+  );
+}
+
+/** The worker side of `AudioHostOptions`, which is all a message can reach. */
+type WorkerSink = Pick<AudioHostOptions, 'onChunk' | 'onStreamState'>;
+
+/** True for a buffer that can be a chunk of 16-bit PCM (ADR-027). */
+function isPcm(value: unknown): value is ArrayBuffer {
+  return (
+    value instanceof ArrayBuffer &&
+    value.byteLength > 0 &&
+    value.byteLength % 2 === 0 &&
+    value.byteLength <= MAX_PCM_CHUNK_BYTES
+  );
+}
+
+/**
+ * Parse one message from the audio worker and hand it on (CH-303, CH-304).
+ *
+ * Parsed, never cast. This runs inside an Electron `ipc-message` listener, so
+ * anything it throws is an uncaught exception in the main process. A message
+ * from a frame that is not the worker page, or one that fails its schema, is
+ * dropped and logged. The log names the channel only, never the bytes
+ * (NFR-002).
+ */
+export function handleWorkerMessage(
+  sink: WorkerSink,
+  isWorkerFrame: (frame: SenderFrame | null) => boolean,
+  event: { senderFrame: SenderFrame | null },
+  channel: string,
+  args: readonly unknown[],
+): void {
+  if (channel !== 'audio:streamState' && channel !== 'audio:chunk') return;
+  if (!isWorkerFrame(event.senderFrame)) {
+    getLogger().warn('audio worker message from another frame dropped', { channel });
+    return;
+  }
+
+  if (channel === 'audio:streamState') {
+    const parsed = audioWorkerChannels['audio:streamState'].payload.safeParse(args[0]);
+    if (!parsed.success) {
+      getLogger().warn('audio worker message rejected', { channel });
+      return;
+    }
+    sink.onStreamState(parsed.data);
+    return;
+  }
+
+  const meta = audioWorkerChannels['audio:chunk'].payload.safeParse(args[0]);
+  const pcm = args[1];
+  if (!meta.success || !isPcm(pcm)) {
+    getLogger().warn('audio worker message rejected', { channel });
+    return;
+  }
+  try {
+    // Handed straight on. Electron copied it getting here, which ADR-027
+    // accepts; what is not accepted is this layer keeping it.
+    sink.onChunk({ ...meta.data, pcm });
+  } catch (err) {
+    getLogger().error('audio chunk consumer threw', { err });
+  }
 }
 
 /* v8 ignore start -- binds directly to BrowserWindow and cannot run in a plain
@@ -92,6 +175,13 @@ export class ElectronAudioWorkerHost implements AudioWorkerHandle {
     return (
       this.window !== null && !this.window.isDestroyed() && this.window.webContents === contents
     );
+  }
+
+  /** True when this frame is the worker's own top-level frame, for display media. */
+  ownsFrame(frame: Electron.WebFrameMain | null): boolean {
+    if (frame === null || this.window === null || this.window.isDestroyed()) return false;
+    const main = this.window.webContents.mainFrame;
+    return frame.processId === main.processId && frame.routingId === main.routingId;
   }
 
   async start(streams: readonly TranscriptSource[]): Promise<void> {
@@ -138,19 +228,21 @@ export class ElectronAudioWorkerHost implements AudioWorkerHandle {
     // every other renderer is explicitly denied (FR-086).
     applyNavigationLockdown(win);
 
-    win.webContents.on('ipc-message', (_event, channel, ...args) => {
-      if (channel === 'audio:streamState') {
-        this.options.onStreamState(args[0] as Parameters<AudioHostOptions['onStreamState']>[0]);
-        return;
-      }
-      if (channel === 'audio:chunk') {
-        const meta = args[0] as { source: TranscriptSource; timestamp: number; sequence: number };
-        const pcm = args[1] as ArrayBuffer;
-        // Handed straight on. Electron copied it getting here, which ADR-027
-        // accepts; what is not accepted is this layer keeping it.
-        this.options.onChunk({ ...meta, pcm });
-      }
-    });
+    // The worker's own page directory, not the whole renderer tree, so a
+    // message is trusted only from the document this window was built for.
+    const isWorkerPage = appRendererUrlCheck(
+      process.env.ELECTRON_RENDERER_URL,
+      join(__dirname, '../renderer/audio-worker'),
+    );
+    win.webContents.on('ipc-message', (event, channel, ...args) =>
+      handleWorkerMessage(
+        this.options,
+        (frame) => isTopLevelAppFrame(frame, isWorkerPage),
+        event,
+        channel,
+        args,
+      ),
+    );
 
     win.on('closed', () => {
       if (this.window === win) this.window = null;

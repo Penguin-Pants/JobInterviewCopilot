@@ -71,7 +71,7 @@ not a flake. It is fixed or deleted, never retried.
 | TC-030 | U | Defaults | Fresh settings match every default in `02-architecture.md` section 2.1 exactly |
 | TC-031 | I | Corrupt settings | A malformed file is replaced with defaults and renamed to `settings.corrupt-<epochMillis>.json`. The original content survives. The generated name contains no colon and creates successfully on Windows, where an ISO 8601 name would throw |
 | TC-032 | U | Migration chain | A stubbed version 0 file runs the chain and lands on the current `schemaVersion`; a version 1 file gains a null overlay size and keeps its position |
-| TC-033 | U | Clamping | `overlayOpacity` 5.0 clamps to 1.00, `overlayFontSizePx` 4 clamps to 16, `turnEndGapMs` 99 clamps to 500 |
+| TC-033 | U | Clamping | `overlayOpacity` 5.0 clamps to 1.00, `overlayFontSizePx` 4 clamps to 16, `turnEndGapMs` 99 clamps to 500; a stored file with an out-of-range value loads clamped, not quarantined |
 | TC-034 | I | Hotkey conflict | A rebind that `globalShortcut.register` rejects returns an error and the previous accelerator is still registered |
 | TC-035 | E | Hotkey rebind live | After a rebind the new accelerator works and the old one does nothing, with no restart |
 | TC-036 | I | Overlay position persistence | Position and `displayId` round-trip. With the stored display absent, the overlay lands at the default position on the primary display |

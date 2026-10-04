@@ -13,6 +13,7 @@
  * live detail and the threshold settings themselves.
  */
 import { useEffect, useState, type JSX } from 'react';
+import { SETTINGS_LIMITS } from '../../../shared/defaults.js';
 import type { Settings } from '../../../shared/types.js';
 import { call } from '../call.js';
 import { useInFlight } from '../inFlight.js';
@@ -47,8 +48,17 @@ export function CostAndUsage({
     setSaved(false);
     const cost = Number(costUsd);
     const minutes = Number(timeMinutes);
-    if (!Number.isFinite(cost) || cost < 0 || !Number.isFinite(minutes) || minutes <= 0) {
-      setError('Give a cost of zero or more and a time of more than zero minutes.');
+    // The ranges the settings schema enforces, checked here so the user gets a
+    // sentence naming them rather than the router's generic refusal (FR-031).
+    const { costUsd: costRange, timeMinutes: timeRange } = SETTINGS_LIMITS;
+    if (
+      !(cost >= costRange.min && cost <= costRange.max) ||
+      !(minutes >= timeRange.min && minutes <= timeRange.max)
+    ) {
+      setError(
+        `Give a cost from ${costRange.min} to ${costRange.max} dollars and a time from ` +
+          `${timeRange.min} to ${timeRange.max} minutes.`,
+      );
       return;
     }
     const result = await call('config:set', {

@@ -1,26 +1,23 @@
 /**
  * TASK-032. The overlay's IPC surface, and the readiness gate in front of it.
  *
- * TC-096 is a static check against the preload source, because the claim is
- * about what the surface *is*, not about what one code path happens to send.
- * A runtime test could only ever prove that today's code did not send an error.
+ * TC-096 is a static check against the access table both the overlay preload
+ * and the main process router enforce, because the claim is about what the
+ * surface *is*, not about what one code path happens to send. A runtime test
+ * could only ever prove that today's code did not send an error.
  */
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   INVOKE_CHANNEL_NAMES,
   PUSH_CHANNEL_NAMES,
   invokeChannels,
+  invokeChannelsFor,
   pushChannels,
+  pushChannelsFor,
   type PushChannel,
 } from '../../src/shared/ipc.js';
 import { SETTINGS_LIMITS } from '../../src/shared/defaults.js';
 import { OverlayGate, isGatedChannel, type GatedMessage } from '../../src/main/overlay-gate.js';
-
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const preload = readFileSync(join(repoRoot, 'src', 'preload', 'overlay.ts'), 'utf8');
 
 /**
  * The field names of an object schema.
@@ -43,17 +40,10 @@ function enumValues(schema: unknown, field: string): string[] {
   return Object.keys(entries ?? {});
 }
 
-/** The channel names inside a `const NAME: readonly ...[] = [ ... ]` literal. */
-function allowlist(name: string): string[] {
-  const match = new RegExp(`const ${name}[^=]*=\\s*\\[([^\\]]*)\\]`).exec(preload);
-  expect(match, `${name} is missing from the overlay preload`).toBeTruthy();
-  return [...(match?.[1] ?? '').matchAll(/'([^']+)'/g)].map((m) => m[1] ?? '');
-}
-
 /** TC-096: no channel reachable from the overlay can carry an error to it. */
 describe('TC-096 no overlay error channel', () => {
-  const push = allowlist('ALLOWED_PUSH');
-  const invoke = allowlist('ALLOWED_INVOKE');
+  const push: string[] = pushChannelsFor('overlay');
+  const invoke: string[] = invokeChannelsFor('overlay');
 
   it('exposes exactly the channels the overlay needs, and no more', () => {
     expect(push.sort()).toEqual(
