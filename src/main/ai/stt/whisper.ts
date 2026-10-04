@@ -35,15 +35,44 @@ export const WHISPER_BUFFER_CHUNKS = bufferChunksFor(WHISPER_BUFFER_MS);
 
 export const WHISPER_TRANSCRIBE_URL = 'https://api.openai.com/v1/audio/transcriptions';
 
+/**
+ * How long one request may take. `NFR-017` allows 10 s at p95 from turn end to
+ * the first bullet, so a window answered later than that has missed the budget
+ * anyway. Without a limit, one request that never answered held Stop forever,
+ * because `close` waits for every request.
+ */
+export const WHISPER_REQUEST_TIMEOUT_MS = 10_000;
+
+/** The pause before the one retry of a transient failure (the ladder's first rung). */
+export const WHISPER_RETRY_DELAY_MS = 250;
+
+/**
+ * Windows that may wait behind the request in flight. A slow provider must not
+ * grow the backlog for the rest of the interview (ADR-027). When it is full the
+ * oldest waiting window is dropped: it is the one least likely to still matter.
+ */
+export const WHISPER_MAX_QUEUED_WINDOWS = 2;
+
+/**
+ * How long `close` waits for the tail before it gives up on it. One request's
+ * timeout, so a healthy tail always lands and a hung one cannot hold Stop.
+ */
+export const WHISPER_CLOSE_TIMEOUT_MS = WHISPER_REQUEST_TIMEOUT_MS;
+
 export type PostWav = (
   body: FormData,
   key: string,
+  /** Aborted when the request times out or the session gives up on it. */
+  signal?: AbortSignal,
 ) => Promise<{ ok: boolean; status: number; text: string }>;
 
 type Handlers = {
   transcript: ((t: TranscriptEvent) => void)[];
   error: ((e: ProviderError) => void)[];
 };
+
+/** How one attempt ended: a transcript to emit, or a failure to retry or raise. */
+type Attempt = { text: string } | { error: ProviderError };
 
 export class WhisperSttSession implements SttSession {
   readonly source: TranscriptSource;
@@ -56,17 +85,30 @@ export class WhisperSttSession implements SttSession {
    */
   private buffer: ArrayBuffer[] = [];
   private closed = false;
+  /** Set when `close` stopped waiting: what is still running is abandoned. */
+  private abandoned = false;
   private inFlight = 0;
+  private sent = 0;
 
   /**
-   * Every request still in flight, so `close` can wait for the tail.
+   * Full windows waiting for the request in flight, oldest first.
+   *
+   * One request at a time, so windows are emitted in the order they were
+   * spoken. Concurrent requests emitted whichever answered first, and a slow
+   * window landed after the one that followed it.
+   */
+  private readonly queue: ArrayBuffer[][] = [];
+
+  /**
+   * The loop posting the queue, so `close` can wait for the tail.
    *
    * A batch model answers once per window, so the last thing said before Stop
    * is sitting in a request that has not come back yet. Closing without waiting
    * discarded it, and the final spoken segment of every interview went missing
    * (ADR-036).
    */
-  private readonly pending = new Set<Promise<void>>();
+  private draining: Promise<void> | null = null;
+  private current: AbortController | null = null;
 
   private readonly handlers: Handlers = { transcript: [], error: [] };
 
@@ -97,6 +139,15 @@ export class WhisperSttSession implements SttSession {
     return this.inFlight;
   }
 
+  /**
+   * PCM bytes posted, each window counted once (`FR-103`, ADR-036). A window
+   * dropped from a full backlog was never sent and is never billed; a retry
+   * resends audio already counted.
+   */
+  get sentBytes(): number {
+    return this.sent;
+  }
+
   push(chunk: AudioChunk): void {
     if (this.closed) return;
     this.buffer.push(chunk.pcm);
@@ -104,68 +155,144 @@ export class WhisperSttSession implements SttSession {
     this.flush();
   }
 
-  /** Posts whatever is buffered and releases it. Safe to call with a partial buffer. */
+  /** Queues whatever is buffered and releases it. Safe to call with a partial buffer. */
   private flush(): void {
     if (this.buffer.length === 0) return;
-    // Hand the array off and replace it, so the request holds the only
-    // reference and the session retains nothing.
-    const buffered = this.buffer;
+    // Hand the array off and replace it, so the queue holds the only reference
+    // and the buffer retains nothing.
+    this.queue.push(this.buffer);
     this.buffer = [];
-    const request = this.transcribe(encodeWav(buffered));
-    this.pending.add(request);
-    void request.finally(() => this.pending.delete(request));
+    while (this.queue.length > WHISPER_MAX_QUEUED_WINDOWS) this.queue.shift();
+    this.draining ??= this.drain();
   }
 
-  private async transcribe(wav: Uint8Array): Promise<void> {
+  private async drain(): Promise<void> {
+    try {
+      for (let window = this.queue.shift(); window; window = this.queue.shift()) {
+        if (this.abandoned) return;
+        await this.transcribe(window);
+      }
+    } finally {
+      // Cleared in the same step that finds the queue empty, so a window queued
+      // after it always starts a new loop rather than waiting behind a dead one.
+      this.draining = null;
+    }
+  }
+
+  private async transcribe(window: ArrayBuffer[]): Promise<void> {
     this.inFlight += 1;
     try {
-      const form = new FormData();
-      // A Blob, never a path and never a stream. Nothing here can touch disk.
-      form.append('file', new Blob([wav as BlobPart], { type: 'audio/wav' }), 'audio.wav');
-      form.append('model', this.choice.modelId);
-      form.append('response_format', 'text');
-
-      const res = await this.post(form, this.key);
-      if (!res.ok) {
-        this.fail(classifyStatus(res.status), res.text || `OpenAI returned ${String(res.status)}.`);
+      const wav = encodeWav(window);
+      this.sent += window.reduce((bytes, pcm) => bytes + pcm.byteLength, 0);
+      let attempt = await this.attempt(wav);
+      // One retry for a transient failure. Raising it at once made the session
+      // reopen both streams and lose this window over a single 429 or 5xx.
+      if ('error' in attempt && attempt.error.retryable && !this.abandoned) {
+        await new Promise((resolve) => setTimeout(resolve, WHISPER_RETRY_DELAY_MS));
+        if (this.abandoned) return;
+        attempt = await this.attempt(wav);
+      }
+      if (this.abandoned) return;
+      if ('error' in attempt) {
+        this.fail(attempt.error);
         return;
       }
-      const text = res.text.trim();
-      if (text === '' || this.closed) return;
+      if (attempt.text === '' || this.closed) return;
       const event: TranscriptEvent = {
         source: this.source,
-        text,
+        text: attempt.text,
         // Whisper has no interim state. Everything it returns is final.
         isFinal: true,
         timestamp: Date.now(),
         providerId: this.choice.providerId,
       };
       for (const h of this.handlers.transcript) h(event);
-    } catch {
-      this.fail('network', 'OpenAI could not be reached while transcribing.');
     } finally {
       this.inFlight -= 1;
     }
   }
 
-  private fail(cls: ProviderError['class'], message: string): void {
+  /** One request, bounded by `WHISPER_REQUEST_TIMEOUT_MS`. Never throws. */
+  private async attempt(wav: Uint8Array): Promise<Attempt> {
+    const form = new FormData();
+    // A Blob, never a path and never a stream. Nothing here can touch disk.
+    form.append('file', new Blob([wav as BlobPart], { type: 'audio/wav' }), 'audio.wav');
+    form.append('model', this.choice.modelId);
+    form.append('response_format', 'text');
+
+    const controller = new AbortController();
+    this.current = controller;
+    const timedOut = providerError(
+      this.choice.providerId,
+      'timeout',
+      `OpenAI did not answer within ${String(WHISPER_REQUEST_TIMEOUT_MS)} ms.`,
+    );
+    const timer = setTimeout(() => {
+      controller.abort(timedOut);
+    }, WHISPER_REQUEST_TIMEOUT_MS);
+    // Raced as well as passed, so a transport that ignores the signal still
+    // cannot hold the queue.
+    const aborted = new Promise<never>((_, reject) => {
+      controller.signal.addEventListener('abort', () => {
+        reject(controller.signal.reason as Error);
+      });
+    });
+    try {
+      const res = await Promise.race([this.post(form, this.key, controller.signal), aborted]);
+      if (!res.ok) {
+        const cls = classifyStatus(res.status);
+        const message = res.text || `OpenAI returned ${String(res.status)}.`;
+        return { error: providerError(this.choice.providerId, cls, message) };
+      }
+      return { text: res.text.trim() };
+    } catch {
+      return controller.signal.reason === timedOut
+        ? { error: timedOut }
+        : {
+            error: providerError(
+              this.choice.providerId,
+              'network',
+              'OpenAI could not be reached while transcribing.',
+            ),
+          };
+    } finally {
+      clearTimeout(timer);
+      if (this.current === controller) this.current = null;
+    }
+  }
+
+  private fail(err: ProviderError): void {
     if (this.closed) return;
-    const err = providerError(this.choice.providerId, cls, message);
     for (const h of this.handlers.error) h(err);
   }
 
   /**
-   * Post the tail, wait for every request to answer, then close (ADR-036).
+   * Post the tail, wait for the queue to drain, then close (ADR-036).
    *
    * `closed` is set **after** the wait, not before it. Set first, it made
    * `transcribe` discard the very response this flush exists to collect, so the
    * last thing the interviewer said before Stop was posted, paid for, answered,
    * and thrown away.
+   *
+   * The wait is bounded by `WHISPER_CLOSE_TIMEOUT_MS`. Past it, the queue is
+   * dropped and the request in flight aborted, so a provider that never answers
+   * cannot keep Stop, the transcript compaction and the session lock waiting.
    */
   async close(): Promise<void> {
     // The tail of the last turn is worth one more request, not worth dropping.
     this.flush();
-    await Promise.allSettled([...this.pending]);
+    const draining = this.draining;
+    if (draining) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const expired = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, WHISPER_CLOSE_TIMEOUT_MS);
+      });
+      await Promise.race([draining, expired]);
+      clearTimeout(timer);
+    }
+    this.abandoned = true;
+    this.queue.length = 0;
+    this.current?.abort(new Error('The session closed before OpenAI answered.'));
     this.closed = true;
     this.buffer = [];
   }
@@ -192,11 +319,12 @@ export class WhisperSttSession implements SttSession {
  * never execute the code that could commit it.
  */
 export function postWavToOpenAi(url: string = WHISPER_TRANSCRIBE_URL): PostWav {
-  return async (body, key) => {
+  return async (body, key, signal) => {
     const res = await fetch(url, {
       method: 'POST',
       headers: { Authorization: `Bearer ${key}` },
       body,
+      signal,
     });
     return { ok: res.ok, status: res.status, text: await res.text() };
   };

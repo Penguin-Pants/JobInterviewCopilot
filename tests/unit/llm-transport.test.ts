@@ -6,8 +6,13 @@
  * decodes a byte stream, and a multi-byte character split across two packets is
  * a failure nobody would see until a user typed one.
  */
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fetchStreamPost, isAbortError } from '../../src/main/ai/llm/sse.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  LLM_FIRST_BYTE_TIMEOUT_MS,
+  LLM_IDLE_TIMEOUT_MS,
+  fetchStreamPost,
+  isAbortError,
+} from '../../src/main/ai/llm/sse.js';
 
 function bodyOf(...packets: Uint8Array[]): ReadableStream<Uint8Array> {
   return new ReadableStream<Uint8Array>({
@@ -40,6 +45,7 @@ describe('fetchStreamPost', () => {
 
     const controller = new AbortController();
     const res = await fetchStreamPost('https://example.test/v1', {
+      providerId: 'anthropic',
       headers: { 'x-api-key': 'k' },
       body: '{"a":1}',
       signal: controller.signal,
@@ -54,9 +60,11 @@ describe('fetchStreamPost', () => {
     expect(init.headers['content-type']).toBe('application/json');
     expect(init.headers['x-api-key']).toBe('k');
     expect(init.body).toBe('{"a":1}');
-    // The signal reaches fetch, which is what makes cancellation abort the
-    // request rather than stop the read (FR-075).
-    expect(init.signal).toBe(controller.signal);
+    // The caller's signal reaches fetch, which is what makes cancellation abort
+    // the request rather than stop the read (FR-075).
+    expect(init.signal.aborted).toBe(false);
+    controller.abort();
+    expect(init.signal.aborted).toBe(true);
 
     expect(res.ok).toBe(true);
     expect(await collect(res.chunks())).toBe('data: hi\n\n');
@@ -76,6 +84,7 @@ describe('fetchStreamPost', () => {
     );
 
     const res = await fetchStreamPost('https://example.test/v1', {
+      providerId: 'anthropic',
       headers: {},
       body: '{}',
       signal: new AbortController().signal,
@@ -95,6 +104,7 @@ describe('fetchStreamPost', () => {
     );
 
     const res = await fetchStreamPost('https://example.test/v1', {
+      providerId: 'anthropic',
       headers: {},
       body: '{}',
       signal: new AbortController().signal,
@@ -103,6 +113,132 @@ describe('fetchStreamPost', () => {
     expect(res.status).toBe(500);
     expect(await res.errorText()).toBe('upstream exploded');
     expect(await collect(res.chunks())).toBe('');
+  });
+});
+
+/**
+ * A provider that accepts the request and then sends nothing must count as a
+ * failure, or no retry and no failover ever runs while the overlay waits.
+ */
+describe('fetchStreamPost timeouts', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** A fetch that never answers, and rejects with the abort reason like undici does. */
+  function silentFetch() {
+    return vi.fn(
+      (_url: string, init: { signal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          init.signal.addEventListener('abort', () => {
+            reject(init.signal.reason as Error);
+          });
+        }),
+    );
+  }
+
+  /** A response whose body sends one packet and then goes quiet until aborted. */
+  function stallingFetch() {
+    return vi.fn((_url: string, init: { signal: AbortSignal }) =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        text: () => Promise.resolve(''),
+        body: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('data: first\n\n'));
+            init.signal.addEventListener('abort', () => {
+              controller.error(init.signal.reason);
+            });
+          },
+        }),
+      }),
+    );
+  }
+
+  function post(signal = new AbortController().signal) {
+    return fetchStreamPost('https://example.test/v1', {
+      providerId: 'openai',
+      headers: {},
+      body: '{}',
+      signal,
+    });
+  }
+
+  it('fails a request with no first byte as a retryable timeout', async () => {
+    vi.stubGlobal('fetch', silentFetch());
+    const pending = post();
+    const settled = pending.catch((e: unknown) => e);
+
+    await vi.advanceTimersByTimeAsync(LLM_FIRST_BYTE_TIMEOUT_MS);
+    expect(await Promise.race([settled, Promise.resolve('still waiting')])).toMatchObject({
+      class: 'timeout',
+      retryable: true,
+      providerId: 'openai',
+    });
+  });
+
+  it('fails a stream that goes quiet after it started as a retryable timeout', async () => {
+    vi.stubGlobal('fetch', stallingFetch());
+    const res = await post();
+    const read = collect(res.chunks()).catch((e: unknown) => e);
+
+    await vi.advanceTimersByTimeAsync(LLM_IDLE_TIMEOUT_MS);
+    expect(await Promise.race([read, Promise.resolve('still waiting')])).toMatchObject({
+      class: 'timeout',
+      retryable: true,
+    });
+  });
+
+  it('reports a caller abort as a cancellation, never as a timeout', async () => {
+    vi.stubGlobal('fetch', silentFetch());
+    const controller = new AbortController();
+    const settled = post(controller.signal).catch((e: unknown) => e);
+
+    controller.abort();
+    const error = await settled;
+    expect(isAbortError(error)).toBe(true);
+    expect(error).not.toHaveProperty('class');
+
+    // And the watchdog is gone: nothing fires later.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('allows a slow answer that keeps sending', async () => {
+    const encoder = new TextEncoder();
+    let push: (text: string) => void = () => undefined;
+    let close: () => void = () => undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: () => Promise.resolve(''),
+        body: new ReadableStream<Uint8Array>({
+          start(controller) {
+            push = (text) => {
+              controller.enqueue(encoder.encode(text));
+            };
+            close = () => {
+              controller.close();
+            };
+          },
+        }),
+      }),
+    );
+    const res = await post();
+    const read = collect(res.chunks());
+
+    for (let i = 0; i < 5; i += 1) {
+      await vi.advanceTimersByTimeAsync(LLM_IDLE_TIMEOUT_MS - 1);
+      push(`${String(i)} `);
+    }
+    close();
+    expect(await read).toBe('0 1 2 3 4 ');
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 

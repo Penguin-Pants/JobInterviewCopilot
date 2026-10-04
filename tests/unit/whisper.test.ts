@@ -20,6 +20,10 @@ import { WAV_HEADER_BYTES, encodeWav } from '../../src/main/ai/stt/wav.js';
 import type { PostWav } from '../../src/main/ai/stt/whisper.js';
 import {
   WHISPER_BUFFER_CHUNKS,
+  WHISPER_CLOSE_TIMEOUT_MS,
+  WHISPER_MAX_QUEUED_WINDOWS,
+  WHISPER_REQUEST_TIMEOUT_MS,
+  WHISPER_RETRY_DELAY_MS,
   WHISPER_BUFFER_MS,
   WHISPER_TRANSCRIBE_URL,
   WhisperSttSession,
@@ -274,6 +278,161 @@ describe('TC-055 non-streaming buffering', () => {
     });
     expect(errors[0]!.class).toBe('network');
     expect(s.requestsInFlight).toBe(0);
+  });
+});
+
+/**
+ * A batch request is the one network call in the live path that Stop waits
+ * for, so a request that never answers must not be able to hold Stop forever.
+ * Windows are answered in the order they were spoken, the backlog is bounded,
+ * and one transient failure is retried before the stream is called failed.
+ */
+describe('Whisper requests are bounded, ordered and retried once', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** A chunk whose every byte is `fill`, so a window can be told apart by its audio. */
+  function marked(fill: number): AudioChunk {
+    const pcm = new Uint8Array(32000).fill(fill);
+    return { source: 'interviewer', pcm: pcm.buffer, timestamp: 0, sequence: fill };
+  }
+
+  function pushWindow(s: WhisperSttSession, fill: number): void {
+    for (let i = 0; i < WHISPER_BUFFER_CHUNKS; i += 1) s.push(marked(fill));
+  }
+
+  /** The fill byte of the window a request carried. */
+  async function windowOf(form: FormData): Promise<number> {
+    const bytes = new Uint8Array(await (form.get('file') as Blob).arrayBuffer());
+    return bytes[WAV_HEADER_BYTES] ?? -1;
+  }
+
+  function session(post: PostWav) {
+    const s = new WhisperSttSession({ source: 'interviewer', choice: CHOICE, key: 'k', post });
+    const heard: string[] = [];
+    const errors: ProviderError[] = [];
+    s.on('transcript', (e) => heard.push(e.text));
+    s.on('error', (e) => errors.push(e));
+    return { s, heard, errors };
+  }
+
+  const never: PostWav = () => new Promise(() => undefined);
+
+  it('times a silent request out as a retryable timeout', async () => {
+    const post = vi.fn(never);
+    const { s, errors } = session(post);
+    pushWindow(s, 1);
+
+    await vi.advanceTimersByTimeAsync(WHISPER_REQUEST_TIMEOUT_MS * 2 + WHISPER_RETRY_DELAY_MS);
+    expect(errors.map((e) => [e.class, e.retryable])).toEqual([['timeout', true]]);
+    // One retry, then the failure is raised.
+    expect(post).toHaveBeenCalledTimes(2);
+    expect(s.requestsInFlight).toBe(0);
+  });
+
+  it('lets close finish within its bound when a request never answers', async () => {
+    const { s } = session(never);
+    s.push(marked(1));
+    let closed = false;
+    void s.close().then(() => {
+      closed = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(WHISPER_CLOSE_TIMEOUT_MS);
+    expect(closed).toBe(true);
+  });
+
+  it('emits windows in the order they were spoken, even when the first is slow', async () => {
+    const post = vi.fn<PostWav>(async (form) => {
+      const window = await windowOf(form);
+      // The first window answers late, the second at once.
+      if (window === 1) await new Promise((resolve) => setTimeout(resolve, 2000));
+      return { ok: true, status: 200, text: `window ${String(window)}` };
+    });
+    const { s, heard } = session(post);
+    pushWindow(s, 1);
+    pushWindow(s, 2);
+
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.waitFor(() => {
+      expect(heard).toHaveLength(2);
+    });
+    expect(heard).toEqual(['window 1', 'window 2']);
+  });
+
+  it('drops the oldest waiting window when the backlog is full, and bills only what was sent', async () => {
+    let release: (() => void) | null = null;
+    const post = vi.fn<PostWav>(async (form) => {
+      const window = await windowOf(form);
+      if (window === 1) {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      }
+      return { ok: true, status: 200, text: `window ${String(window)}` };
+    });
+    const { s, heard } = session(post);
+    // Window 1 is in flight; windows 2 to 2 + MAX + 1 queue up behind it.
+    const queued = WHISPER_MAX_QUEUED_WINDOWS + 1;
+    for (let w = 1; w <= 1 + queued; w += 1) pushWindow(s, w);
+    await vi.waitFor(() => {
+      expect(release).not.toBeNull();
+    });
+    expect(post).toHaveBeenCalledTimes(1);
+
+    release!();
+    await vi.waitFor(() => {
+      expect(heard).toHaveLength(1 + WHISPER_MAX_QUEUED_WINDOWS);
+    });
+    // Window 2 was the oldest waiting, so it is the one dropped.
+    const kept = Array.from(
+      { length: WHISPER_MAX_QUEUED_WINDOWS },
+      (_, i) => `window ${String(3 + i)}`,
+    );
+    expect(heard).toEqual(['window 1', ...kept]);
+    expect(s.sentBytes).toBe((1 + WHISPER_MAX_QUEUED_WINDOWS) * WHISPER_BUFFER_CHUNKS * 32000);
+  });
+
+  it('retries a transient failure once and keeps the window', async () => {
+    const post = vi
+      .fn<PostWav>()
+      .mockResolvedValueOnce({ ok: false, status: 503, text: 'busy' })
+      .mockResolvedValue({ ok: true, status: 200, text: 'kept' });
+    const { s, heard, errors } = session(post);
+    pushWindow(s, 1);
+
+    await vi.advanceTimersByTimeAsync(WHISPER_RETRY_DELAY_MS);
+    await vi.waitFor(() => {
+      expect(heard).toEqual(['kept']);
+    });
+    expect(errors).toEqual([]);
+    // Billed once: the retry resends the same audio, not more of it.
+    expect(s.sentBytes).toBe(WHISPER_BUFFER_CHUNKS * 32000);
+  });
+
+  it('does not retry a rejected key', async () => {
+    const post = vi.fn<PostWav>().mockResolvedValue({ ok: false, status: 401, text: 'no' });
+    const { s, errors } = session(post);
+    pushWindow(s, 1);
+
+    await vi.advanceTimersByTimeAsync(WHISPER_RETRY_DELAY_MS * 4);
+    expect(errors.map((e) => e.class)).toEqual(['auth']);
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it('aborts the request it times out, so the connection is released', async () => {
+    let seen: AbortSignal | undefined;
+    const { s } = session((_form, _key, signal) => {
+      seen = signal;
+      return new Promise(() => undefined);
+    });
+    pushWindow(s, 1);
+    await vi.advanceTimersByTimeAsync(WHISPER_REQUEST_TIMEOUT_MS);
+    expect(seen?.aborted).toBe(true);
   });
 });
 

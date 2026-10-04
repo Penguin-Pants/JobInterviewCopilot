@@ -495,3 +495,142 @@ describe('TC-144 the STT switch-back boundary', () => {
     expect(h.current.kind).toBe('using-primary');
   });
 });
+
+/**
+ * One key can serve two capabilities that disagree about whether a backup
+ * exists. Whether a run may fall to a backup, and whether a capability is on
+ * its backup, belong to that capability, never to the shared machine.
+ */
+describe('a shared credential keeps each capability on its own route', () => {
+  /** Sleeps that wait until the test releases them, in order. */
+  function heldDeps() {
+    const waiting: (() => void)[] = [];
+    return {
+      waiting,
+      release: () => waiting.shift()?.(),
+      deps: {
+        ...testDeps().deps,
+        sleep: () =>
+          new Promise<void>((resolve) => {
+            waiting.push(resolve);
+          }),
+      },
+    };
+  }
+
+  function sharedKey(deps: ReturnType<typeof testDeps>['deps']) {
+    const r = new ProviderHealthRegistry(
+      () => undefined,
+      () => () => Promise.resolve(false),
+      deps,
+    );
+    // OpenAI is the STT primary with a backup, and the LLM primary without one.
+    r.bind({ capability: 'stt', primary: 'openai', backup: 'deepgram' });
+    r.bind({ capability: 'llm', primary: 'openai', backup: null });
+    return r;
+  }
+
+  it('keeps the LLM on the primary after STT fails over on the same key', async () => {
+    const r = sharedKey(testDeps().deps);
+    await r.runFor(
+      'stt',
+      vi
+        .fn<(t: string) => Promise<string>>()
+        .mockRejectedValueOnce(err('server'))
+        .mockRejectedValueOnce(err('server'))
+        .mockRejectedValueOnce(err('server'))
+        .mockRejectedValueOnce(err('server'))
+        .mockResolvedValue('backup'),
+    );
+    expect(r.get('openai')?.current.kind).toBe('using-backup');
+
+    // The LLM has no backup. Routing it to one failed every suggestion with a
+    // perfectly good key.
+    const llm = vi.fn<(t: string) => Promise<string>>().mockResolvedValue('answer');
+    expect(await r.runFor('llm', llm)).toBe('answer');
+    expect(llm.mock.calls.map((c) => c[0])).toEqual(['primary']);
+
+    // STT stays on its backup, and the badge still says so.
+    const stt = vi.fn<(t: string) => Promise<string>>().mockResolvedValue('t');
+    await r.runFor('stt', stt);
+    expect(stt.mock.calls.map((c) => c[0])).toEqual(['backup']);
+    expect(r.snapshot().stt.kind).toBe('using-backup');
+  });
+
+  it('does not let an STT run lend its backup to an LLM ladder that is sleeping', async () => {
+    const held = heldDeps();
+    const r = sharedKey(held.deps);
+    const llm = vi
+      .fn<(t: string) => Promise<string>>()
+      .mockRejectedValue(err('server', 'the model is busy'));
+    let done = false;
+    const settled = r
+      .runFor('llm', llm)
+      .catch((e: unknown) => e)
+      .finally(() => {
+        done = true;
+      });
+
+    // The LLM ladder is asleep in its first backoff. An STT request for the
+    // same key arrives and succeeds on the primary.
+    await vi.waitFor(() => {
+      expect(held.waiting).toHaveLength(1);
+    });
+    await r.runFor('stt', () => Promise.resolve('ok'));
+
+    // Release every rung of the LLM ladder, and the degraded backoff after it.
+    while (!done) {
+      held.release();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    await settled;
+    expect(llm.mock.calls.every((c) => c[0] === 'primary')).toBe(true);
+    expect(r.get('openai')?.current.kind).toBe('degraded');
+  });
+});
+
+/** A newer turn aborts the old one, and a sleeping ladder must notice at once. */
+describe('a backoff sleep ends when the run is aborted', () => {
+  const neverWakes = () => new Promise<void>(() => undefined);
+
+  it('rejects with the abort reason instead of sleeping out the backoff', async () => {
+    const sleep = vi.fn(neverWakes);
+    const h = new CredentialHealth({
+      credentialId: 'openai',
+      hasBackup: false,
+      probe: () => Promise.resolve(true),
+      onChange: () => undefined,
+      deps: { ...testDeps().deps, sleep },
+    });
+    const controller = new AbortController();
+    const fn = vi.fn<(t: string) => Promise<string>>().mockRejectedValue(err('server'));
+
+    const run = h.run(fn, { signal: controller.signal });
+    await vi.waitFor(() => {
+      expect(sleep).toHaveBeenCalledTimes(1);
+    });
+    const reason = new Error('a newer turn replaced this one');
+    controller.abort(reason);
+
+    await expect(run).rejects.toBe(reason);
+    // No further attempt is sent for a turn nobody will read.
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes the signal through runFor', async () => {
+    const r = new ProviderHealthRegistry(
+      () => undefined,
+      () => () => Promise.resolve(false),
+      { ...testDeps().deps, sleep: neverWakes },
+    );
+    r.bind({ capability: 'llm', primary: 'anthropic', backup: null });
+    const controller = new AbortController();
+    const run = r.runFor('llm', () => Promise.reject(err('network')), {
+      signal: controller.signal,
+    });
+    await Promise.resolve();
+    controller.abort(new Error('stale'));
+    await expect(run).rejects.toThrow('stale');
+  });
+});

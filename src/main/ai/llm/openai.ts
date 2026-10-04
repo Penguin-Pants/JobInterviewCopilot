@@ -14,6 +14,7 @@ import {
   classifyStatus,
   fetchStreamPost,
   isAbortError,
+  isProviderError,
   parseJson,
   parseSse,
   type StreamPost,
@@ -103,12 +104,15 @@ async function* stream(
   let res;
   try {
     res = await post(OPENAI_CHAT_URL, {
+      providerId: 'openai',
       headers: { Authorization: `Bearer ${key}` },
       body,
       signal,
     });
   } catch (err) {
     if (isAbortError(err)) return;
+    // A timeout the transport raised is already classified (sse.ts).
+    if (isProviderError(err)) throw err;
     throw providerError('openai', 'network', 'OpenAI could not be reached.');
   }
 

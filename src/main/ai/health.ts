@@ -63,6 +63,30 @@ export interface CredentialHealthOptions {
 }
 
 /**
+ * One request's view of the machine. Two capabilities can share a credential
+ * and still disagree about all three fields, so they travel with the run
+ * rather than living on the machine, where a run that awaits could read
+ * another run's values.
+ */
+export interface RunOptions {
+  /** Whether *this* capability has a backup on another credential (FR-025). */
+  hasBackup?: boolean;
+  /** The capability asking. Only a scope that failed over is sent to a backup. */
+  scope?: string;
+  /** Ends a backoff sleep at once, so a replaced turn stops waiting (FR-054). */
+  signal?: AbortSignal;
+}
+
+interface Run {
+  hasBackup: boolean;
+  scope: string;
+  signal: AbortSignal | undefined;
+}
+
+/** The scope a caller of `run` gets when it names none. */
+const DEFAULT_SCOPE = 'default';
+
+/**
  * Thrown by `run` when the credential is in `CONFIG_REQUIRED`. It carries no
  * request, because the point of that state is that no request is sent.
  */
@@ -81,7 +105,17 @@ export class CredentialHealth {
 
   private state: HealthState = { kind: 'using-primary' };
   private readonly hasBackup: boolean;
-  private hasBackupForThisRun = false;
+
+  /**
+   * The capabilities this credential has failed over for.
+   *
+   * `using-backup` is a fact about the credential, for the badge. Where a
+   * request goes is a fact about the capability: after STT fails over, an LLM
+   * with no backup on the same key must keep using the primary. Reading the
+   * shared state sent it to a backup that does not exist, and every suggestion
+   * failed with a valid key.
+   */
+  private readonly onBackup = new Set<string>();
   private readonly probeFn: () => Promise<boolean>;
   private readonly emit: (s: HealthState) => void;
   private readonly deps: HealthDeps;
@@ -111,10 +145,6 @@ export class CredentialHealth {
     return this.state;
   }
 
-  get target(): Target {
-    return this.state.kind === 'using-backup' ? 'backup' : 'primary';
-  }
-
   get isTerminal(): boolean {
     return this.state.kind === 'config-required';
   }
@@ -130,15 +160,17 @@ export class CredentialHealth {
    * the request goes. Every transition is emitted, so `CH-202` reflects the
    * machine rather than a periodic snapshot.
    */
-  async run<T>(
-    fn: (target: Target) => Promise<T>,
-    options: { hasBackup?: boolean } = {},
-  ): Promise<T> {
+  async run<T>(fn: (target: Target) => Promise<T>, options: RunOptions = {}): Promise<T> {
     // Whether a backup exists is a property of the *capability binding*, not of
     // the credential: one OpenAI key can be the LLM primary with no backup and
-    // the STT backup at the same time. So the caller supplies it per request
-    // and the machine keeps only the credential-level facts.
-    this.hasBackupForThisRun = options.hasBackup ?? this.hasBackup;
+    // the STT backup at the same time. So the caller supplies it per request,
+    // and it is passed down the call chain rather than stored, because a
+    // ladder asleep in a backoff would otherwise read the next caller's value.
+    const run: Run = {
+      hasBackup: options.hasBackup ?? this.hasBackup,
+      scope: options.scope ?? DEFAULT_SCOPE,
+      signal: options.signal,
+    };
 
     if (this.state.kind === 'config-required') {
       // Terminal for the session. A revoked key must not fire a doomed request
@@ -148,20 +180,27 @@ export class CredentialHealth {
 
     // On the backup, or already degraded, there is no ladder left to climb:
     // one attempt, and a failure re-enters the same state with more backoff.
-    if (this.state.kind === 'using-backup') return this.runOnBackup(fn);
-    if (this.state.kind === 'degraded') return this.runDegraded(fn);
+    // Both are read per capability: a capability without a backup never goes
+    // to one, and one with a backup is not held in another's DEGRADED.
+    if (run.hasBackup && this.onBackup.has(run.scope)) return this.runOnBackup(fn);
+    if (this.state.kind === 'degraded' && !run.hasBackup) return this.runDegraded(fn, run);
 
-    return this.runPrimaryWithLadder(fn);
+    return this.runPrimaryWithLadder(fn, run);
   }
 
-  private async runPrimaryWithLadder<T>(fn: (t: Target) => Promise<T>): Promise<T> {
+  /** A success on the primary. The badge still shows a capability on its backup. */
+  private primaryAnswered(): void {
+    this.degradedAttempt = 0;
+    this.setState(this.onBackup.size > 0 ? { kind: 'using-backup' } : { kind: 'using-primary' });
+  }
+
+  private async runPrimaryWithLadder<T>(fn: (t: Target) => Promise<T>, run: Run): Promise<T> {
     let lastError: ProviderError | null = null;
 
     for (let attempt = 0; attempt <= MAX_RETRY_ATTEMPTS; attempt += 1) {
       try {
         const result = await fn('primary');
-        this.setState({ kind: 'using-primary' });
-        this.degradedAttempt = 0;
+        this.primaryAnswered();
         return result;
       } catch (err) {
         const error = asProviderError(err, this.credentialId);
@@ -173,16 +212,21 @@ export class CredentialHealth {
         if (attempt === MAX_RETRY_ATTEMPTS) break;
 
         this.setState({ kind: 'retrying', attempt: attempt + 1 });
-        await this.backoff(RETRY_BACKOFF_MS[attempt] ?? DEGRADED_MAX_BACKOFF_MS);
+        await this.backoff(RETRY_BACKOFF_MS[attempt] ?? DEGRADED_MAX_BACKOFF_MS, run.signal);
       }
     }
 
     const error = lastError ?? unknownError(this.credentialId);
-    return this.failOver(error, fn);
+    return this.failOver(error, fn, run);
   }
 
-  private async failOver<T>(error: ProviderError, fn: (t: Target) => Promise<T>): Promise<T> {
-    if (this.hasBackupForThisRun) {
+  private async failOver<T>(
+    error: ProviderError,
+    fn: (t: Target) => Promise<T>,
+    run: Run,
+  ): Promise<T> {
+    if (run.hasBackup) {
+      this.onBackup.add(run.scope);
       this.setState({ kind: 'using-backup' });
       this.startProbing();
       return this.runOnBackup(fn);
@@ -191,7 +235,7 @@ export class CredentialHealth {
     // No backup. The path splits on `retryable` (ADR-024).
     if (error.retryable) {
       this.setState({ kind: 'degraded', reason: error.message });
-      return this.runDegraded(fn);
+      return this.runDegraded(fn, run);
     }
 
     this.setState({
@@ -209,11 +253,10 @@ export class CredentialHealth {
     return fn('backup');
   }
 
-  private async runDegraded<T>(fn: (t: Target) => Promise<T>): Promise<T> {
+  private async runDegraded<T>(fn: (t: Target) => Promise<T>, run: Run): Promise<T> {
     try {
       const result = await fn('primary');
-      this.degradedAttempt = 0;
-      this.setState({ kind: 'using-primary' });
+      this.primaryAnswered();
       return result;
     } catch (err) {
       const error = asProviderError(err, this.credentialId);
@@ -227,7 +270,7 @@ export class CredentialHealth {
       }
       this.degradedAttempt += 1;
       this.setState({ kind: 'degraded', reason: error.message });
-      await this.backoff(this.degradedBackoffMs());
+      await this.backoff(this.degradedBackoffMs(), run.signal);
       throw error;
     }
   }
@@ -238,10 +281,32 @@ export class CredentialHealth {
     return Math.min(base, DEGRADED_MAX_BACKOFF_MS);
   }
 
-  private async backoff(baseMs: number): Promise<void> {
+  /**
+   * Sleeps one backoff, or rejects with the abort reason the moment `signal`
+   * fires. A degraded turn otherwise slept up to ten seconds after a newer
+   * turn had replaced it, and the newer turn, chained behind it, was often old
+   * enough to be discarded as stale by the time it ran (FR-054, FR-114).
+   */
+  private async backoff(baseMs: number, signal: AbortSignal | undefined): Promise<void> {
     const ms = jittered(baseMs, this.deps.random());
     this.backoffsMs.push(ms);
-    await this.deps.sleep(ms);
+    if (!signal) {
+      await this.deps.sleep(ms);
+      return;
+    }
+    signal.throwIfAborted();
+    let onAbort = (): void => undefined;
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => {
+        reject(signal.reason as Error);
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    try {
+      await Promise.race([this.deps.sleep(ms), aborted]);
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+    }
   }
 
   private startProbing(): void {
@@ -286,6 +351,7 @@ export class CredentialHealth {
   noteCleanBoundary(): boolean {
     if (!this.switchBackPending) return false;
     this.switchBackPending = false;
+    this.onBackup.clear();
     this.stopProbing();
     this.degradedAttempt = 0;
     this.setState({ kind: 'using-primary' });
@@ -298,6 +364,7 @@ export class CredentialHealth {
    */
   noteKeySaved(): void {
     this.state = { kind: 'using-primary' };
+    this.onBackup.clear();
     this.switchBackPending = false;
     this.degradedAttempt = 0;
     this.stopProbing();
@@ -424,11 +491,17 @@ export class ProviderHealthRegistry {
    * capability has a backup to fall to. Two capabilities sharing a credential
    * can disagree about that, so it cannot live on the machine.
    */
-  runFor<T>(capability: 'stt' | 'llm', fn: (target: Target) => Promise<T>): Promise<T> {
+  runFor<T>(
+    capability: 'stt' | 'llm',
+    fn: (target: Target) => Promise<T>,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<T> {
     const binding = this.bindings.get(capability);
     if (!binding) throw new Error(`No credential is bound to "${capability}".`);
     return this.ensure(binding.primary, binding.backup !== null).run(fn, {
       hasBackup: binding.backup !== null,
+      scope: capability,
+      signal: options.signal,
     });
   }
 
