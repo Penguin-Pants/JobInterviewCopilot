@@ -2331,7 +2331,7 @@ own card, because that card is newly visible; otherwise the next question could
 replace the retry's answer at once. `OverlayGate` already treats every `begin`
 as a new card, so a rebuilt overlay is replayed the replacement alone.
 
-### ADR-054 — Streaming STT transport audit: open on accept, the OpenAI rate, the ElevenLabs protocol
+### ADR-056: Streaming STT transport audit: open on accept, the OpenAI rate, the ElevenLabs protocol
 
 **Decided 2026-10-04** from an audit of the streaming STT adapters, with the
 protocols checked against the official SDK packages (`openai` 7.28.0,

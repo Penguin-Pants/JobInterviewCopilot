@@ -11,7 +11,7 @@
  *
  * `pcm16` input must be 24 kHz (the official SDK's `TranscriptionSessionUpdate`
  * type), and the Audio Worker emits 16 kHz, so this adapter upsamples every
- * chunk before it goes on the wire (ADR-054).
+ * chunk before it goes on the wire (ADR-056).
  */
 import type {
   AudioChunk,

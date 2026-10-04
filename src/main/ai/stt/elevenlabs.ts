@@ -6,7 +6,7 @@
  * `endpoint` (TC-153).
  *
  * The wire protocol follows the official SDK (`@elevenlabs/elevenlabs-js`,
- * `wrapper/realtime/connection.js`), ADR-054: every frame is JSON keyed by
+ * `wrapper/realtime/connection.js`), ADR-056: every frame is JSON keyed by
  * `message_type`, audio goes up base64 inside an `input_audio_chunk` frame,
  * and an empty chunk with `commit: true` flushes the last segment.
  *

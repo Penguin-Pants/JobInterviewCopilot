@@ -1,9 +1,9 @@
 /**
- * Failover through the real streaming adapters (ADR-010, ADR-036, ADR-054).
+ * Failover through the real streaming adapters (ADR-010, ADR-036, ADR-056).
  *
  * The live loop, the real `ProviderHealthRegistry` and the real Deepgram and
  * ElevenLabs adapters, over a fake socket that fails the way a real one does:
- * asynchronously, after the adapter's `open` has been called. Before ADR-054
+ * asynchronously, after the adapter's `open` has been called. Before ADR-056
  * every streaming `open` resolved before its socket connected, so the health
  * machine recorded each refused attempt as a success, reset to the primary and
  * never reached the backup.

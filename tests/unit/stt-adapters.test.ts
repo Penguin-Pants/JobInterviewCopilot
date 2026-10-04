@@ -37,7 +37,7 @@ import { FakeSocket, fakeFactory } from '../fakes/socket.js';
 /** What the provider sends when it accepts a socket. */
 function accept(socket: FakeSocket, providerId: string): void {
   socket.opened();
-  // ElevenLabs `open` waits for the session-start frame (ADR-054).
+  // ElevenLabs `open` waits for the session-start frame (ADR-056).
   if (providerId === 'elevenlabs') socket.receive({ message_type: 'session_started' });
 }
 
@@ -117,7 +117,7 @@ describe('TC-159 endpointing uses the configured gap', () => {
       { turnEndGapMs: 1400 },
     );
     const url = new URL(spec.url);
-    // Seconds, as the official SDK sends it (ADR-054).
+    // Seconds, as the official SDK sends it (ADR-056).
     expect(url.searchParams.get('vad_silence_threshold_secs')).toBe('1.4');
     expect(url.searchParams.get('commit_strategy')).toBe('vad');
     expect(url.searchParams.get('audio_format')).toBe('pcm_16000');
@@ -273,7 +273,7 @@ describe('TC-152 OpenAI realtime adapter', () => {
     expect(sockets[0]!.binaryFrames).toHaveLength(0);
     const frame = JSON.parse(sockets[0]!.textFrames[1]!) as { type: string; audio: string };
     expect(frame.type).toBe('input_audio_buffer.append');
-    // Resampled to the 24 kHz the realtime API requires (ADR-054).
+    // Resampled to the 24 kHz the realtime API requires (ADR-056).
     expect(Buffer.from(frame.audio, 'base64').byteLength).toBe(23999 * 2);
   });
 });

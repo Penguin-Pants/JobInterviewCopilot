@@ -435,7 +435,7 @@ export class LiveSessionLoop {
    * A stream reported a terminal failure, after its adapter's own reconnect
    * ladder (ADR-036).
    *
-   * A streaming adapter's `open` rejects when its socket is refused (ADR-054),
+   * A streaming adapter's `open` rejects when its socket is refused (ADR-056),
    * so a failure at open reaches `runFor` directly. A socket that dies after it
    * opened, or a provider error frame mid-session, surfaces here instead.
    * Without this the health machine never learned that the provider had
@@ -522,7 +522,7 @@ export class LiveSessionLoop {
 
     // A socket that dies after it opened is reported here, after the adapter's
     // own reconnect ladder has been spent, as is a provider error frame that
-    // ends the session (ADR-054). Logging it was not enough:
+    // ends the session (ADR-056). Logging it was not enough:
     // the health machine never saw the failure, so a dead primary never failed
     // over and the session simply transcribed nothing for the rest of the
     // interview (ADR-036).

@@ -44,7 +44,7 @@ export const RECONNECT_BACKOFF_MS = [250, 500, 1000];
 export const HEALTHY_CONNECTION_MS = 5000;
 
 /**
- * How long `open` waits for the provider to accept the socket (ADR-054).
+ * How long `open` waits for the provider to accept the socket (ADR-056).
  *
  * `ws` already bounds the HTTP upgrade (`ws-factory.ts`); this also bounds a
  * provider that upgrades and then never sends its session-start frame.
@@ -53,7 +53,7 @@ export const OPEN_TIMEOUT_MS = 10_000;
 
 /**
  * How long `close` waits for the provider's last transcript after the close
- * frame (ADR-054). Closing at once dropped the words said just before Stop.
+ * frame (ADR-056). Closing at once dropped the words said just before Stop.
  */
 export const CLOSE_DRAIN_MS = 1500;
 
@@ -271,7 +271,7 @@ export class SocketSttSession implements SttSession {
    * Opens the socket. Resolves once the provider has accepted it: on `open`,
    * or on the session-start frame for a spec that waits for one. Rejects with
    * a classified error if the socket closes first, the provider sends an error
-   * frame, or nothing answers within OPEN_TIMEOUT_MS (ADR-054).
+   * frame, or nothing answers within OPEN_TIMEOUT_MS (ADR-056).
    *
    * A session that never opened does not run the reconnect ladder. Its caller
    * is the health machine, which owns the retry and the failover. Resolving
@@ -513,7 +513,7 @@ export class SocketSttSession implements SttSession {
    * With a close frame, the socket stays up until the provider closes it,
    * answers (`emit.finished()`) or CLOSE_DRAIN_MS passes, and transcripts keep
    * flowing meanwhile. Closing at once dropped the provider's last transcript,
-   * which is the last thing said before Stop (ADR-054).
+   * which is the last thing said before Stop (ADR-056).
    */
   close(): Promise<void> {
     if (this.closed) return this.closed;

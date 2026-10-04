@@ -2,7 +2,7 @@
  * 16 kHz to 24 kHz PCM resampling. No filesystem imports (NFR-002).
  *
  * The Audio Worker emits 16 kHz, 16-bit, mono PCM (FR-041). OpenAI realtime
- * accepts `pcm16` only at 24 kHz (ADR-054), so its adapter upsamples here.
+ * accepts `pcm16` only at 24 kHz (ADR-056), so its adapter upsamples here.
  * The other streaming providers take 16 kHz directly.
  */
 

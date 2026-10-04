@@ -217,7 +217,7 @@ interface LlmModelDescriptor {
 
 `FR-041` produces 16 kHz, 16-bit, mono linear PCM. Deepgram and ElevenLabs
 accept it as is. OpenAI realtime accepts `pcm16` only at 24 kHz, so its adapter
-upsamples (ADR-054). That is the one per-provider resampling step, and it lives
+upsamples (ADR-056). That is the one per-provider resampling step, and it lives
 inside the adapter.
 
 **v1 LLM registry contents.** `anthropic` with `claude-haiku-4-5-20251001`
@@ -586,7 +586,7 @@ sends one (ElevenLabs `session_started`). It rejects with a classified
 or nothing answers within 10 s; a refused upgrade is classified by its HTTP
 status, so a revoked key is `auth` and is not retried. A session that never
 opened does not run its own reconnect ladder, because `CMP-12` owns the retry
-and the failover (ADR-054). After a successful open, a dropped socket runs the
+and the failover (ADR-056). After a successful open, a dropped socket runs the
 adapter's reconnect ladder, and a failure after that ladder, or a provider
 error frame that ends the session, arrives on the `error` event. The caller
 must treat that event as the provider failing, not as a line for the log:
@@ -600,7 +600,7 @@ other listeners still get the event; it never reaches `CMP-12`.
 
 The `ws` transport bounds the HTTP upgrade at 10 s and pings an open socket
 every 15 s. A peer that misses a pong is terminated, which is an ordinary
-abnormal close, so the reconnect ladder runs (ADR-054).
+abnormal close, so the reconnect ladder runs (ADR-056).
 
 `sentBytes` is what the session has actually put on the wire, and it is optional.
 `SocketSttSession` drops queued chunks during an outage rather than buffering
@@ -614,7 +614,7 @@ so a caller must stay routable until `close` resolves. Clearing the route first
 discarded the last thing said before Stop. A **streaming** adapter with a close
 frame (Deepgram `CloseStream`, an ElevenLabs final commit) does the same: it
 keeps routing transcripts until the provider closes the socket, answers the
-close frame, or 1.5 s passes, and only then closes (ADR-054). No chunk is
+close frame, or 1.5 s passes, and only then closes (ADR-056). No chunk is
 accepted once `close` is called.
 
 Adapter notes:
@@ -631,7 +631,7 @@ Adapter notes:
   `input_audio_buffer.append` frame. `pcm16` input must be 24 kHz, so the
   adapter upsamples the worker's 16 kHz PCM with a stateful 2:3 linear
   interpolation before encoding; `sentBytes` still counts the 16 kHz bytes it
-  was handed (ADR-054). There is no close frame.
+  was handed (ADR-056). There is no close frame.
 - `elevenlabs`: Scribe v2 Realtime WebSocket, input format `pcm_16000`, commit
   strategy `vad`, `vad_silence_threshold_secs` from the gap. The protocol is the
   official SDK's: every frame is JSON keyed by `message_type`. Audio goes up
@@ -641,7 +641,7 @@ Adapter notes:
   `isFinal: true` and to `endpoint`. Error frames (`auth_error`,
   `quota_exceeded`, `rate_limited` and the rest) end the session with their
   class. `close` sends an empty chunk with `commit: true` and waits for the
-  committed transcript (ADR-054).
+  committed transcript (ADR-056).
 - `openai` `whisper-1`: the one non-streaming model. Buffers 4000 ms, posts an
   in-memory WAV body, emits one final event per request, never an interim, never
   an endpoint. Held to `NFR-017`. (ADR-022)

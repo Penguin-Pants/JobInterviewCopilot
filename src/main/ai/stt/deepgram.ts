@@ -62,7 +62,7 @@ export function deepgramConnectSpec(
  * Deepgram reports a refused key or a bad parameter by refusing the upgrade or
  * closing the socket, which `SocketSttSession` classifies from the HTTP status
  * or the close code. No in-band error frame is relied on here: none is
- * documented in this repository or exercised by a fixture (ADR-054).
+ * documented in this repository or exercised by a fixture (ADR-056).
  */
 function readDeepgramFrame(raw: string, emit: Emitter): void {
   const frame = parseFrame(raw);

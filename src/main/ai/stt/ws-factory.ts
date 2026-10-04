@@ -6,7 +6,7 @@
  * set one. It also gives every adapter one transport to reconnect, rather than
  * three SDK-owned sockets with three reconnect policies (ADR-029).
  *
- * Two bounds keep a dead connection from looking alive (ADR-054). The HTTP
+ * Two bounds keep a dead connection from looking alive (ADR-056). The HTTP
  * upgrade has a timeout, and an open socket is pinged on an interval: a peer
  * that misses a pong is terminated. Termination is an ordinary abnormal close,
  * so `SocketSttSession` runs its reconnect ladder. Without these a half-open

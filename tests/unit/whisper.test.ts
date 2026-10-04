@@ -32,7 +32,7 @@ const CHOICE = { providerId: 'openai', modelId: 'whisper-1' };
 /**
  * A socket that goes nowhere, so no unit test reaches the network. It reports
  * `open` at once, because a streaming `open` resolves only on a connected
- * socket (ADR-054).
+ * socket (ADR-056).
  */
 function fakeSocket(): SocketLike {
   return {

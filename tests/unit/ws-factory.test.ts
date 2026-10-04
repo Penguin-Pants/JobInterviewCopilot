@@ -65,7 +65,7 @@ describe('the ws transport is constructible and carries headers', () => {
 });
 
 /**
- * ADR-054. A half-open socket kept a session alive, and billing, with no
+ * ADR-056. A half-open socket kept a session alive, and billing, with no
  * transcripts. The upgrade is bounded and an open socket is pinged; a peer
  * that misses a pong is terminated, which is an ordinary abnormal close.
  */
