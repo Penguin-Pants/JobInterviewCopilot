@@ -184,7 +184,6 @@ export interface Settings {
      */
     clickThrough: boolean;
   };
-  firstRun: { modelDownloaded: boolean };
 }
 
 /**

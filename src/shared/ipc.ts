@@ -198,7 +198,6 @@ export const settingsSchema = z.object({
     // The shipped default is true, the teleprompter behavior (FR-083).
     clickThrough: z.boolean(),
   }),
-  firstRun: z.object({ modelDownloaded: z.boolean() }),
 });
 
 const documentRecord = z.object({
