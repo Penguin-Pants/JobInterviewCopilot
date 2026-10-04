@@ -1,5 +1,6 @@
 /**
- * Two Dashboard rows carried to TASK-050 and fixed in the follow-up sweep.
+ * Two Dashboard rows carried to TASK-050 and fixed in the follow-up sweep, and
+ * the rules the renderer UX audit of 2026-10-04 extracted from the sections.
  *
  * The renderer has no DOM in this suite, so each rule is asserted on the pure
  * function the component calls. `guardrails.test.ts` pins that every button
@@ -7,7 +8,14 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { createInFlightGate } from '../../src/renderer/dashboard/inFlight.js';
-import { dragLeftZone } from '../../src/renderer/dashboard/sections/CompanyProfiles.js';
+import {
+  announcedPercent,
+  createPromptSelection,
+  dragLeftZone,
+} from '../../src/renderer/dashboard/sections/CompanyProfiles.js';
+import { parseThresholds } from '../../src/renderer/dashboard/sections/CostAndUsage.js';
+import { withStoredBinding } from '../../src/renderer/dashboard/sections/Hotkeys.js';
+import { DEFAULT_PROMPT_ID } from '../../src/shared/prompts.js';
 
 /** A promise the test settles by hand, so "still pending" is a real state. */
 function deferred(): { promise: Promise<void>; resolve: () => void; reject: (e: Error) => void } {
@@ -111,5 +119,103 @@ describe('the drop zone highlight survives a drag across its own children (ADR-0
 
   it('ends it when the drag leaves the window, which has no related target', () => {
     expect(dragLeftZone(zone, null)).toBe(true);
+  });
+});
+
+describe('a cost threshold is a number the user typed (FR-109)', () => {
+  it('refuses an empty cost field rather than saving it as zero dollars', () => {
+    expect(parseThresholds('', '60')).toBeNull();
+    expect(parseThresholds('   ', '60')).toBeNull();
+  });
+
+  it('refuses an empty time field', () => {
+    expect(parseThresholds('5', '')).toBeNull();
+  });
+
+  it('accepts a typed zero cost, which is a real choice', () => {
+    expect(parseThresholds('0', '60')).toEqual({ costUsd: 0, timeMinutes: 60 });
+  });
+
+  it('refuses a negative cost, a zero time and text that is not a number', () => {
+    expect(parseThresholds('-1', '60')).toBeNull();
+    expect(parseThresholds('5', '0')).toBeNull();
+    expect(parseThresholds('five', '60')).toBeNull();
+  });
+});
+
+describe('a refused hotkey puts back only its own field (FR-030)', () => {
+  it('keeps the other action captured but unapplied combination', () => {
+    const draft = { toggleInteraction: 'Control+Alt+J', togglePause: 'Control+Alt+P' };
+    const stored = { toggleInteraction: 'Control+Shift+I', togglePause: 'Control+Shift+P' };
+    expect(withStoredBinding(draft, stored, 'toggleInteraction')).toEqual({
+      toggleInteraction: 'Control+Shift+I',
+      togglePause: 'Control+Alt+P',
+    });
+  });
+});
+
+describe('two quick prompt selections both reach the settings (FR-027)', () => {
+  /** A write the test answers by hand, recording what each one carried. */
+  function harness(stored: Record<string, string>) {
+    const sent: Record<string, string>[] = [];
+    const answers: ((ok: boolean) => void)[] = [];
+    const selection = createPromptSelection(
+      (ids) =>
+        new Promise<boolean>((resolve) => {
+          sent.push(ids);
+          answers.push(resolve);
+        }),
+    );
+    selection.sync(stored);
+    return { selection, sent, answers };
+  }
+
+  it('merges the second change with the first while the first is in flight', async () => {
+    const { selection, sent, answers } = harness({});
+    const one = selection.select('profile-a', 'prompt-1');
+    const two = selection.select('profile-b', 'prompt-2');
+    answers[0]?.(true);
+    answers[1]?.(true);
+    await Promise.all([one, two]);
+    expect(sent[1]).toEqual({ 'profile-a': 'prompt-1', 'profile-b': 'prompt-2' });
+  });
+
+  it('ignores a stored value that arrives while a write is pending', async () => {
+    const { selection, sent, answers } = harness({});
+    const one = selection.select('profile-a', 'prompt-1');
+    // The reload after an earlier write answers before this one has landed.
+    selection.sync({});
+    const two = selection.select('profile-b', 'prompt-2');
+    answers[0]?.(true);
+    answers[1]?.(true);
+    await Promise.all([one, two]);
+    expect(sent[1]).toEqual({ 'profile-a': 'prompt-1', 'profile-b': 'prompt-2' });
+  });
+
+  it('drops a refused change, so the next write does not send it again', async () => {
+    const { selection, sent, answers } = harness({ 'profile-a': 'prompt-1' });
+    const one = selection.select('profile-b', 'prompt-2');
+    answers[0]?.(false);
+    await one;
+    const two = selection.select('profile-c', 'prompt-3');
+    answers[1]?.(true);
+    await two;
+    expect(sent[1]).toEqual({ 'profile-a': 'prompt-1', 'profile-c': 'prompt-3' });
+  });
+
+  it('removes the entry when the default prompt is chosen', async () => {
+    const { selection, sent, answers } = harness({ 'profile-a': 'prompt-1' });
+    const one = selection.select('profile-a', DEFAULT_PROMPT_ID);
+    answers[0]?.(true);
+    await one;
+    expect(sent[0]).toEqual({});
+  });
+});
+
+describe('the model download is announced in steps (NFR-010)', () => {
+  it('announces only each quarter, so a screen reader is not read every tick', () => {
+    expect([0, 1, 24.9, 25, 49, 50, 74, 75, 99, 100].map(announcedPercent)).toEqual([
+      0, 0, 0, 25, 25, 50, 50, 75, 75, 100,
+    ]);
   });
 });

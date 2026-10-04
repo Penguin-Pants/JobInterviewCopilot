@@ -25,7 +25,7 @@ import type {
   SttModelDescriptor,
   SttCatalogSnapshot,
 } from '../../../shared/types.js';
-import { call, type CallResult } from '../call.js';
+import { call } from '../call.js';
 import { useInFlight } from '../inFlight.js';
 import type { ProvidersState } from '../state.js';
 
@@ -141,37 +141,52 @@ export function withSelectedModel(
   return selected ? [selected, ...visible] : visible;
 }
 
-/** What one speech-to-text catalog load reports to the section (FR-117). */
-export type SttCatalogUpdate =
-  | { kind: 'loading' }
-  | { kind: 'loaded'; catalog: SttCatalogSnapshot }
+/** What one catalog load reports to the section (FR-117). */
+export type CatalogUpdate<T> =
+  | { kind: 'loading'; force: boolean }
+  | { kind: 'loaded'; catalog: T }
   | { kind: 'failed'; message: string };
 
+export interface CatalogLoader<T> {
+  /** Asks for the catalog. `force` refreshes it rather than reading the cache. */
+  load: (force?: boolean) => Promise<void>;
+  /** A catalog the main process pushed, such as `CH-218` after a refresh. */
+  push: (catalog: T) => void;
+}
+
 /**
- * Loads the speech-to-text catalog so that only the newest request is applied
- * (FR-117, TC-198).
+ * Loads a model catalog so that only the newest answer is applied (FR-117,
+ * TC-198). Both catalogs in this section use it.
  *
  * A manual refresh can overlap the section's first load, and either can settle
  * first. The request issued last is the one the user is looking at, so an older
  * answer that settles after it is dropped rather than replacing newer usable
- * state. A failure reports its message and leaves the catalog already shown in
- * place.
+ * state. A push is newer than every request still in flight, so it drops them
+ * too: the language model loader had no sequence at all, and an older answer
+ * could overwrite the catalog a push had just delivered. A failure reports its
+ * message and leaves the catalog already shown in place.
  */
-export function createSttCatalogLoader(
-  request: (force: boolean) => Promise<CallResult<'catalog:stt'>>,
-  apply: (update: SttCatalogUpdate) => void,
-): (force?: boolean) => Promise<void> {
+export function createCatalogLoader<T>(
+  request: (force: boolean) => Promise<{ ok: true; value: T } | { ok: false; message: string }>,
+  apply: (update: CatalogUpdate<T>) => void,
+): CatalogLoader<T> {
   let latest = 0;
-  return async (force = false) => {
-    const id = ++latest;
-    apply({ kind: 'loading' });
-    const result = await request(force);
-    if (id !== latest) return;
-    apply(
-      result.ok
-        ? { kind: 'loaded', catalog: result.value }
-        : { kind: 'failed', message: result.message },
-    );
+  return {
+    async load(force = false) {
+      const id = ++latest;
+      apply({ kind: 'loading', force });
+      const result = await request(force);
+      if (id !== latest) return;
+      apply(
+        result.ok
+          ? { kind: 'loaded', catalog: result.value }
+          : { kind: 'failed', message: result.message },
+      );
+    },
+    push(catalog) {
+      latest += 1;
+      apply({ kind: 'loaded', catalog });
+    },
   };
 }
 
@@ -363,32 +378,36 @@ export function ProviderSetup({
   const [llmCatalogMessage, setLlmCatalogMessage] = useState('Loading models…');
   const [llmModelCutoffs, setLlmModelCutoffs] = useState(settings.llmModelCutoffs);
 
-  async function loadLlmCatalog(force = false): Promise<void> {
-    setLlmCatalogMessage(force ? 'Refreshing models…' : 'Loading models…');
-    const result = await call(force ? 'llmCatalog:refresh' : 'llmCatalog:get');
-    if (!result.ok) {
-      setLlmCatalogMessage(`Models could not be loaded. ${result.message}`);
-      return;
-    }
-    setLlmCatalog(result.value.providers);
-    setLlmCatalogMessage(llmCatalogStatus(result.value.providers));
-  }
+  // Created once, like the speech-to-text loader below: the loader holds the
+  // request sequence, and the setters it closes over are stable.
+  const [llmLoader] = useState(() =>
+    createCatalogLoader(
+      (force) => call(force ? 'llmCatalog:refresh' : 'llmCatalog:get'),
+      (update) => {
+        if (update.kind === 'loading') {
+          setLlmCatalogMessage(update.force ? 'Refreshing models…' : 'Loading models…');
+        } else if (update.kind === 'failed') {
+          setLlmCatalogMessage(`Models could not be loaded. ${update.message}`);
+        } else {
+          setLlmCatalog(update.catalog.providers);
+          setLlmCatalogMessage(llmCatalogStatus(update.catalog.providers));
+        }
+      },
+    ),
+  );
 
   useEffect(() => {
-    void loadLlmCatalog();
-    return window.copilot.on('state:llmCatalog', (result) => {
-      setLlmCatalog(result.providers);
-      setLlmCatalogMessage(llmCatalogStatus(result.providers));
-    });
-  }, []);
+    void llmLoader.load();
+    return window.copilot.on('state:llmCatalog', (result) => llmLoader.push(result));
+  }, [llmLoader]);
 
   const [sttCatalog, setSttCatalog] = useState<SttCatalogSnapshot | null>(null);
   const [sttCatalogLoading, setSttCatalogLoading] = useState(true);
   const [sttCatalogError, setSttCatalogError] = useState<string | null>(null);
   // Created once: the loader holds the request sequence, and the setters it
   // closes over are stable for the life of the component.
-  const [loadSttCatalog] = useState(() =>
-    createSttCatalogLoader(
+  const [sttLoader] = useState(() =>
+    createCatalogLoader(
       (force) => call('catalog:stt', { force }),
       (update) => {
         if (update.kind === 'loading') {
@@ -403,8 +422,8 @@ export function ProviderSetup({
     ),
   );
   useEffect(() => {
-    void loadSttCatalog();
-  }, []);
+    void sttLoader.load();
+  }, [sttLoader]);
 
   const sttRegistry = useMemo<ProviderDescriptor<SttModelDescriptor>[]>(() => {
     if (!sttCatalog) return STT_REGISTRY;
@@ -522,6 +541,9 @@ export function ProviderSetup({
   }
 
   async function saveKey(credentialId: CredentialId): Promise<void> {
+    // The button is `aria-disabled` while its check runs, so this is what
+    // refuses a second press.
+    if (keyStates[credentialId]?.kind === 'checking') return;
     const key = (keys[credentialId] ?? '').trim();
     if (key.length === 0) {
       setKeyStates((s) => ({
@@ -547,7 +569,7 @@ export function ProviderSetup({
     if (result.value.ok) {
       setKeys((k) => ({ ...k, [credentialId]: '' }));
       if (STT_REGISTRY.some((provider) => provider.credentialId === credentialId)) {
-        await loadSttCatalog(true);
+        await sttLoader.load(true);
       }
     }
     await onSecretsChanged();
@@ -589,8 +611,14 @@ export function ProviderSetup({
       <h3>Speech to text</h3>
       <button
         type="button"
-        disabled={sttCatalogLoading || sessionActive}
-        onClick={() => void loadSttCatalog(true)}
+        // `aria-disabled`, never `disabled`, on every button in this section:
+        // each one becomes unavailable through its own press or through a
+        // session starting, with focus on it, and Chromium drops focus from a
+        // focused control that becomes `disabled` (NFR-010).
+        aria-disabled={sttCatalogLoading || sessionActive || undefined}
+        onClick={() => {
+          if (!sttCatalogLoading && !sessionActive) void sttLoader.load(true);
+        }}
       >
         {sttCatalogLoading ? 'Loading models…' : 'Refresh models'}
       </button>
@@ -633,7 +661,7 @@ export function ProviderSetup({
       <button
         type="button"
         data-testid="refresh-llm-models"
-        onClick={() => void loadLlmCatalog(true)}
+        onClick={() => void llmLoader.load(true)}
       >
         Refresh models
       </button>
@@ -724,13 +752,15 @@ export function ProviderSetup({
       <button
         type="button"
         data-testid="save-providers"
-        disabled={blocked}
-        aria-disabled={saving.busy || undefined}
-        onClick={() => void saving.run(save)}
+        aria-disabled={blocked || saving.busy || undefined}
+        onClick={() => {
+          if (!blocked) void saving.run(save);
+        }}
       >
         Save provider and model settings
       </button>
-      {saved ? <span data-testid="providers-saved">Saved</span> : null}
+      {/* Mounted before its text, so the change is announced. */}
+      <span role="status">{saved ? <span data-testid="providers-saved">Saved</span> : null}</span>
       {saveError ? (
         <span role="alert" data-testid="providers-save-failed">
           {saveError}
@@ -768,7 +798,11 @@ export function ProviderSetup({
                 // accepted and saved" about a value the vault had never seen.
                 // That is the defect the `onChange` reset below was added to
                 // prevent, arriving by the asynchronous path instead.
-                disabled={state.kind === 'checking'}
+                //
+                // Read-only rather than `disabled`, so focus stays if it is
+                // here when the check starts (NFR-010).
+                readOnly={state.kind === 'checking'}
+                aria-disabled={state.kind === 'checking' || undefined}
                 value={keys[credentialId] ?? ''}
                 onChange={(e) => {
                   setKeys((k) => ({ ...k, [credentialId]: e.target.value }));
@@ -782,7 +816,7 @@ export function ProviderSetup({
               <button
                 type="button"
                 data-testid={`key-save-${credentialId}`}
-                disabled={state.kind === 'checking'}
+                aria-disabled={state.kind === 'checking' || undefined}
                 onClick={() => void saveKey(credentialId)}
               >
                 Check and save

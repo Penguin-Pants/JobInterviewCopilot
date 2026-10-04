@@ -2412,7 +2412,7 @@ language-model catalog's missing requirement and test case ids,
 
 | Item | Why it is not done here | Owner |
 |---|---|---|
-| Create profile, the embedding model retry and the key check still bind their in-flight state to `disabled` | Pre-existing, and not among the twenty-eight rows. Each drops keyboard focus the way the first version of this guard did. Create profile also relies on its disabled submit button to stop a second implicit submission from the name field, so moving it onto the gate needs that path covered too | Follow-up |
+| ~~Create profile, the embedding model retry and the key check still bind their in-flight state to `disabled`~~ **Fixed 2026-10-04** in "Renderer UX audit, 2026-10-04" below. Create profile runs through its gate from the form's submit, which covers the implicit submission from the name field | Pre-existing, and not among the twenty-eight rows. Each drops keyboard focus the way the first version of this guard did. Create profile also relies on its disabled submit button to stop a second implicit submission from the name field, so moving it onto the gate needs that path covered too | Follow-up |
 
 **Possible risks.** Unproven.
 
@@ -2433,3 +2433,27 @@ language-model catalog's missing requirement and test case ids,
 
 **Blockers.** None for this work. The build plan's only open acceptance work is
 still `TASK-051`'s manual release checklist, which needs Windows hardware.
+
+## Renderer UX audit, 2026-10-04
+
+**Status: COMPLETE, 2026-10-04.** Fixes for confirmed findings of an audit of
+the Dashboard and overlay renderers. No requirement, no IPC contract and no
+guardrail changed. Each fix keeps the screen as calm as it was: the only new
+step a user sees is the transcript delete confirmation.
+
+| Item | What changed | Verified by |
+|---|---|---|
+| Controls bound to native `disabled` lost keyboard focus when they became unavailable while focused (`NFR-010`). The rule above covered five buttons | Every Dashboard and overlay button is `aria-disabled` while it cannot act, and its handler refuses what the attribute announces: Start and Stop, every prompt action, Create profile, Switch to this profile, Delete profile, Delete it, Add documents, Download the model now, both Refresh models buttons, Save provider and model settings, Check and save, plus A+ and A- at their limits. The key field is read-only during its check and the translucency select refuses a change during a commit. Create profile, the model retry and both session buttons run through `useInFlight`. The model retry stays on screen, unavailable, during the download it started, rather than vanishing from under focus | Two generic scans in `guardrails.test.ts`: no native `disabled` on any button in either renderer, and none on a field or select bound to an in-flight state. Both fail on the old code |
+| Overlay calls dropped failures. A lost `overlay:ready` held every suggestion for the session (`FR-008`) | `overlay/invoke.ts` sends each call through `call` and logs a failure to the console. `overlay:ready` is retried six times with a doubling delay. The pointer hit test records a report only once the main process has taken it, so a failed one is sent again. `isIpcError` moved to `src/shared/ipc-error.ts`, so neither renderer loads the channel schemas to check an answer | `overlay-requests.test.ts` |
+| The language model catalog had no request sequence, so an older answer could overwrite a newer one or a push (`FR-117`) | One `createCatalogLoader` serves both catalogs and replaces `createSttCatalogLoader`. A push drops every request still in flight | "lets a push win over an older answer still in flight" in `stt-catalog.test.ts` |
+| A refused hotkey reset the other action's unapplied capture (`FR-030`) | Only the refused action goes back to its stored binding | `dashboard-actions.test.ts` |
+| Transcript delete was one irreversible click, every row's buttons had the same name, and the viewer's label was ignored (`FR-110`, `NFR-010`) | A delete asks first, with the dialog a profile delete uses. Row buttons name their session's start time. The viewer is a labelled `region` whose heading takes focus on open. Both delete dialogs return focus when they close, to the row's button or to the section heading after a delete, and the profile dialog is described by its counts | `guardrails.test.ts` pins the markup. The TC-123 E2E test now confirms the delete |
+| Success messages and the header states were not announced, and the model download re-announced every tick (`NFR-010`) | "Bound" and the three "Saved" messages sit inside a `role="status"` container that stays mounted. The session state and the audio state are status regions. The download is read out in quarters while the exact percent stays on screen | `guardrails.test.ts` and `dashboard-actions.test.ts` |
+| Keyboard resize stepped from a viewport that lagged its requests, and a drag sent a request per pointer move (`FR-081`) | `overlay/sizeRequests.ts` sends at most one size per frame, the newest, with one in flight, and the keyboard steps from the size last asked for until nothing is pending | `overlay-requests.test.ts` |
+| Two quick prompt changes in Company Profiles dropped one (`FR-027`) | `createPromptSelection` merges each change with those before it and ignores a reload that answers while a write is pending | `dashboard-actions.test.ts` |
+| An empty cost threshold was saved as $0 (`FR-109`) | `parseThresholds` treats an empty field as invalid and shows the existing message | `dashboard-actions.test.ts` |
+
+**Not run here.** The Playwright E2E suite runs on the Windows runner only.
+`toBeDisabled()` counts `aria-disabled`, so its existing assertions on Start,
+Stop, Save provider and model settings, the profile buttons and the font
+buttons still hold, but that was not executed for this work.

@@ -18,6 +18,24 @@ import { call } from '../call.js';
 import { useInFlight } from '../inFlight.js';
 import type { SessionState, UsageState } from '../state.js';
 
+/**
+ * The two thresholds as typed, or null when either is not a valid one (FR-109).
+ *
+ * `Number('')` is 0, so an emptied cost field passed `cost >= 0` and was saved
+ * as a $0 threshold, which warns at the first cent of every session. An empty
+ * field is a missing value, not zero.
+ */
+export function parseThresholds(
+  costUsd: string,
+  timeMinutes: string,
+): { costUsd: number; timeMinutes: number } | null {
+  if (costUsd.trim() === '' || timeMinutes.trim() === '') return null;
+  const cost = Number(costUsd);
+  const minutes = Number(timeMinutes);
+  if (!Number.isFinite(cost) || cost < 0 || !Number.isFinite(minutes) || minutes <= 0) return null;
+  return { costUsd: cost, timeMinutes: minutes };
+}
+
 export interface CostAndUsageProps {
   settings: Settings;
   session: SessionState;
@@ -45,15 +63,12 @@ export function CostAndUsage({
   async function saveThresholds(): Promise<void> {
     setError(null);
     setSaved(false);
-    const cost = Number(costUsd);
-    const minutes = Number(timeMinutes);
-    if (!Number.isFinite(cost) || cost < 0 || !Number.isFinite(minutes) || minutes <= 0) {
+    const thresholds = parseThresholds(costUsd, timeMinutes);
+    if (!thresholds) {
       setError('Give a cost of zero or more and a time of more than zero minutes.');
       return;
     }
-    const result = await call('config:set', {
-      thresholds: { costUsd: cost, timeMinutes: minutes },
-    });
+    const result = await call('config:set', { thresholds });
     if (!result.ok) {
       setError(result.message);
       return;
@@ -126,7 +141,8 @@ export function CostAndUsage({
       >
         Save thresholds
       </button>
-      {saved ? <span data-testid="thresholds-saved">Saved</span> : null}
+      {/* Mounted before its text, so the change is announced. */}
+      <span role="status">{saved ? <span data-testid="thresholds-saved">Saved</span> : null}</span>
       {error ? (
         <span role="alert" data-testid="thresholds-error">
           {error}

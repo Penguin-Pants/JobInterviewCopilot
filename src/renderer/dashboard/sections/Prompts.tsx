@@ -9,6 +9,7 @@ import {
 } from '../../../shared/prompts.js';
 import type { CustomPrompt, Profile, Settings } from '../../../shared/types.js';
 import { call } from '../call.js';
+import { useInFlight } from '../inFlight.js';
 
 interface PromptsProps {
   settings: Settings;
@@ -34,7 +35,14 @@ export function Prompts({
   // One library write at a time. Every mutation rebuilds the whole array from
   // the `settings` prop, so a second click before the first `config:set`
   // answers would send a stale array and drop the first change.
-  const [busy, setBusy] = useState(false);
+  //
+  // Each button is `aria-disabled` while it cannot act, never `disabled`
+  // (`inFlight.ts`, NFR-010). Most become unavailable because of their own
+  // press: Save once nothing is unsaved, Create at the last free slot, Delete
+  // once its prompt is gone. Focus is on the button at that moment, and
+  // Chromium drops focus from a focused control that becomes `disabled`. Each
+  // handler refuses what the attribute announces.
+  const writing = useInFlight();
 
   const dirty = selected
     ? name !== selected.name || text !== selected.systemPrompt
@@ -69,6 +77,7 @@ export function Prompts({
     [profiles, selectedId, settings.profilePromptIds],
   );
   const activeSelection = settings.profilePromptIds[activeProfileId] ?? DEFAULT_PROMPT_ID;
+  const atLimit = settings.customPrompts.length >= MAX_CUSTOM_PROMPTS;
 
   function load(id: string): void {
     if (dirty && !window.confirm('Discard the unsaved prompt changes?')) return;
@@ -102,23 +111,17 @@ export function Prompts({
     customPrompts: CustomPrompt[],
     profilePromptIds = settings.profilePromptIds,
   ): Promise<boolean> {
-    if (busy) return false;
-    setBusy(true);
-    try {
-      const result = await call('config:set', { customPrompts, profilePromptIds });
-      if (!result.ok) {
-        setError(result.message);
-        return false;
-      }
-      await onSettingsChanged();
-      return true;
-    } finally {
-      setBusy(false);
+    const result = await call('config:set', { customPrompts, profilePromptIds });
+    if (!result.ok) {
+      setError(result.message);
+      return false;
     }
+    await onSettingsChanged();
+    return true;
   }
 
   async function save(): Promise<void> {
-    if (!selected) return;
+    if (!selected || !dirty) return;
     setError(null);
     const problem = validate();
     if (problem) return setError(problem);
@@ -142,7 +145,7 @@ export function Prompts({
   }
 
   async function create(copyDefault = false): Promise<void> {
-    if (busy || settings.customPrompts.length >= MAX_CUSTOM_PROMPTS) return;
+    if (atLimit) return;
     const id = crypto.randomUUID();
     const base = copyDefault ? 'Copy of Default prompt' : 'Custom prompt';
     const existing = new Set(
@@ -165,7 +168,7 @@ export function Prompts({
   }
 
   async function duplicate(): Promise<void> {
-    if (busy || !selected || settings.customPrompts.length >= MAX_CUSTOM_PROMPTS) return;
+    if (!selected || atLimit) return;
     setError(null);
     const problem = validate();
     if (problem) return setError(problem);
@@ -189,7 +192,7 @@ export function Prompts({
   }
 
   async function useForProfile(): Promise<void> {
-    if (!activeProfileId) return;
+    if (!activeProfileId || activeSelection === selectedId) return;
     setError(null);
     const profilePromptIds = { ...settings.profilePromptIds };
     if (selectedId === DEFAULT_PROMPT_ID) delete profilePromptIds[activeProfileId];
@@ -282,24 +285,24 @@ export function Prompts({
       <button
         type="button"
         data-testid="prompt-create"
-        disabled={busy || settings.customPrompts.length >= MAX_CUSTOM_PROMPTS}
-        onClick={() => void create(!selected)}
+        aria-disabled={writing.busy || atLimit || undefined}
+        onClick={() => void writing.run(() => create(!selected))}
       >
         Create custom prompt
       </button>
       <button
         type="button"
         data-testid="prompt-save"
-        disabled={busy || !selected || !dirty}
-        onClick={() => void save()}
+        aria-disabled={writing.busy || !selected || !dirty || undefined}
+        onClick={() => void writing.run(save)}
       >
         Save
       </button>
       <button
         type="button"
         data-testid="prompt-duplicate"
-        disabled={busy || !selected || settings.customPrompts.length >= MAX_CUSTOM_PROMPTS}
-        onClick={() => void duplicate()}
+        aria-disabled={writing.busy || !selected || atLimit || undefined}
+        onClick={() => void writing.run(duplicate)}
       >
         Duplicate
       </button>
@@ -307,8 +310,10 @@ export function Prompts({
         type="button"
         className="secondary-button"
         data-testid="prompt-restore"
-        disabled={!selected}
-        onClick={() => setText(SHIPPED_SYSTEM_PROMPT)}
+        aria-disabled={!selected || undefined}
+        onClick={() => {
+          if (selected) setText(SHIPPED_SYSTEM_PROMPT);
+        }}
       >
         Restore default text
       </button>
@@ -316,8 +321,8 @@ export function Prompts({
         type="button"
         className="secondary-button"
         data-testid="prompt-delete"
-        disabled={busy || !selected}
-        onClick={() => void remove()}
+        aria-disabled={writing.busy || !selected || undefined}
+        onClick={() => void writing.run(remove)}
       >
         Delete
       </button>
@@ -330,8 +335,10 @@ export function Prompts({
       <button
         type="button"
         data-testid="prompt-use-for-profile"
-        disabled={busy || !activeProfileId || activeSelection === selectedId}
-        onClick={() => void useForProfile()}
+        aria-disabled={
+          writing.busy || !activeProfileId || activeSelection === selectedId || undefined
+        }
+        onClick={() => void writing.run(useForProfile)}
       >
         Use for this profile
       </button>

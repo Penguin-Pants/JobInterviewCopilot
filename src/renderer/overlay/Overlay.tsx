@@ -14,6 +14,7 @@ import { defaultSettings } from '../../shared/defaults.js';
 import type { Settings } from '../../shared/types.js';
 import { reduceCards, shouldShowIdle } from './cards.js';
 import { HoldBuffer } from './holdBuffer.js';
+import { invokeLogged, retryWithBackoff } from './invoke.js';
 import { lastSeen } from './earlyPushes.js';
 import { resolveOverlayTheme } from './theme.js';
 import { ConsentReminder } from './components/ConsentReminder.js';
@@ -45,6 +46,13 @@ import './styles.css';
 
 /** What the renderer knows about the host machine until `CH-216` says otherwise. */
 const UNKNOWN_PLATFORM = { windowsBuild: 0, acrylicSupported: false };
+
+/**
+ * How hard `overlay:ready` is retried (FR-008). Six attempts, waiting 250 ms
+ * and then twice as long each time, cover about eight seconds.
+ */
+const READY_ATTEMPTS = 6;
+const READY_FIRST_RETRY_MS = 250;
 
 function Overlay(): JSX.Element {
   // Every one of these is seeded from `earlyPushes`, because the main process
@@ -267,13 +275,20 @@ function Overlay(): JSX.Element {
    * The double `requestAnimationFrame` is the paint, and the cleanup flag is
    * what keeps a superseded epoch, or StrictMode's simulated remount, from
    * reporting on behalf of a card that is no longer the one on screen.
+   *
+   * A failed report is retried with a growing delay. Nothing else would ever
+   * send it again, and until it lands no suggestion reaches the user.
    */
   useEffect(() => {
     if (consent === null) return;
     let cancelled = false;
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        if (!cancelled) void window.copilot.invoke('overlay:ready');
+        void retryWithBackoff(() => invokeLogged('overlay:ready'), {
+          attempts: READY_ATTEMPTS,
+          firstDelayMs: READY_FIRST_RETRY_MS,
+          cancelled: () => cancelled,
+        });
       });
     });
     return () => {
@@ -286,7 +301,7 @@ function Overlay(): JSX.Element {
     // The card is gone either way: `FR-006` is about the reminder being
     // dismissible, not about the main process knowing. The call is how the
     // session log can tell an acknowledged reminder from one left on screen.
-    void window.copilot.invoke('consent:dismiss');
+    void invokeLogged('consent:dismiss');
   }, []);
 
   /**
@@ -296,9 +311,10 @@ function Overlay(): JSX.Element {
    * the window's, so what the user sees is the resize actually applied rather
    * than a renderer-side guess that the main process may clamp.
    */
-  const setWindowSize = useCallback((size: { width: number; height: number }) => {
-    void window.copilot.invoke('overlay:setSize', size);
-  }, []);
+  const setWindowSize = useCallback(
+    (size: { width: number; height: number }) => invokeLogged('overlay:setSize', size),
+    [],
+  );
 
   const setFontSize = useCallback((px: number) => {
     // Shown at once, stored when the main process gets to it. The draft above
@@ -306,7 +322,7 @@ function Overlay(): JSX.Element {
     // what is on screen a moment later is what was stored, and the Dashboard
     // control and this one remain the same setting rather than two that drift.
     setPendingFontSizePx(px);
-    void window.copilot.invoke('overlay:setFontSize', { px });
+    void invokeLogged('overlay:setFontSize', { px });
   }, []);
 
   const idle = shouldShowIdle(cards, paused);
@@ -330,7 +346,9 @@ function Overlay(): JSX.Element {
    * `mousemove` on the window is enough, and it arrives even while the window
    * is ignoring mouse events, because it is created with `forward: true`. Only
    * a change is sent: the pointer produces a move event per pixel and this is
-   * an IPC call.
+   * an IPC call. The last answer is recorded only once the main process has
+   * taken it, so a failed report is sent again on the next move rather than
+   * never.
    *
    * Not run in interactive mode, where the whole window is clickable by the
    * user's own choice and there is nothing to decide.
@@ -341,6 +359,11 @@ function Overlay(): JSX.Element {
       lastHitTest.current = null;
       return;
     }
+    // The newest report in flight and its number, so a burst of moves does not
+    // send the same answer again.
+    let sending: boolean | null = null;
+    let sent = 0;
+    let stopped = false;
     const within = (box: DOMRect | undefined, x: number, y: number): boolean =>
       box !== undefined && x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
 
@@ -368,13 +391,23 @@ function Overlay(): JSX.Element {
         (reminderUp && card === undefined) ||
         within(card, event.clientX, event.clientY) ||
         onAControl;
-      if (over === lastHitTest.current) return;
-      lastHitTest.current = over;
-      void window.copilot.invoke('overlay:setPointerOverControls', { over });
+      // Compared with what the main process will hold once the report in
+      // flight lands, not with the last one it confirmed.
+      if (over === (sending ?? lastHitTest.current)) return;
+      const seq = (sent += 1);
+      sending = over;
+      void invokeLogged('overlay:setPointerOverControls', { over }).then((ok) => {
+        if (stopped) return;
+        // Answers arrive in the order the reports were sent, so the last one
+        // taken is what the main process holds.
+        if (ok) lastHitTest.current = over;
+        if (seq === sent) sending = null;
+      });
     };
     window.addEventListener('mousemove', report);
     return () => {
       window.removeEventListener('mousemove', report);
+      stopped = true;
       lastHitTest.current = null;
     };
   }, [reminderUp, interactive]);

@@ -2067,6 +2067,8 @@ src/
       App.tsx          the shell, the header and the section order
       state.ts         one hook per push channel, no second copy of main's state
       call.ts          the one invoke wrapper, so an IpcError cannot be ignored
+      inFlight.ts      one action at a time, busy shown as aria-disabled
+      focus.ts         focus after a render, for dialogs and the tab list
       format.ts        timer, money and size formats
       styles.css       theme tokens, light and dark
       sections/        ProviderSetup, CompanyProfiles, SessionHistory,
@@ -2075,6 +2077,8 @@ src/
       Overlay.tsx
       cards.ts         TASK-043, reduceCards and the card state (2.6a)
       holdBuffer.ts    TASK-064, FR-115, sits in front of cards.ts's reducer
+      invoke.ts        call.ts with failures logged, and the overlay:ready retry
+      sizeRequests.ts  FR-081, one resize request per frame, one in flight
       theme.ts         TASK-043, the contrast-floor computation (FR-093)
       styles.css
       components/      ConsentReminder, IdleCard, SuggestionCardView,
@@ -2089,6 +2093,7 @@ src/
     registry/llm.ts    ADR-022 LLM provider + model registry
     registry/selection.ts  TASK-042, the Dashboard's selection rules, pure
     ipc.ts             channel ids + zod schemas
+    ipc-error.ts       IpcError and isIpcError, without the schemas
     types.ts           the data model in section 2
 tests/
   unit/

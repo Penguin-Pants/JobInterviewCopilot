@@ -826,14 +826,3 @@ export type PushPayload<C extends PushChannel> = z.infer<(typeof pushChannels)[C
 
 export const INVOKE_CHANNEL_NAMES = Object.keys(invokeChannels) as InvokeChannel[];
 export const PUSH_CHANNEL_NAMES = Object.keys(pushChannels) as PushChannel[];
-
-/** Error shape returned when a payload fails its schema. Never a raw throw (CMP-10). */
-export interface IpcError {
-  __ipcError: true;
-  channel: string;
-  message: string;
-}
-
-export function isIpcError(value: unknown): value is IpcError {
-  return typeof value === 'object' && value !== null && '__ipcError' in value;
-}

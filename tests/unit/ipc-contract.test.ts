@@ -3,11 +3,11 @@ import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
   audioWorkerChannels,
   invokeChannels,
-  isIpcError,
   pushChannels,
   type InvokePayload,
   type InvokeResponse,
 } from '../../src/shared/ipc.js';
+import { isIpcError } from '../../src/shared/ipc-error.js';
 import type { Settings, SttCatalogProvider } from '../../src/shared/types.js';
 
 /** TC-002: a payload failing its schema is rejected, not forwarded. */

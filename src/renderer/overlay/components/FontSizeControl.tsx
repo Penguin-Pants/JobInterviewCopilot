@@ -16,7 +16,10 @@ import { SETTINGS_LIMITS } from '../../../shared/defaults.js';
  * affordance `FR-084` requires (`TC-117`).
  *
  * The buttons are real buttons and carry accessible names, so the overlay is
- * operable from the keyboard when it has focus (NFR-010).
+ * operable from the keyboard when it has focus (NFR-010). A button at its limit
+ * is `aria-disabled`, not `disabled`: the press that reaches the limit is made
+ * with focus on that button, and Chromium moves focus off a focused control
+ * that becomes `disabled` and does not give it back.
  *
  * The controls sit on `.overlay-surface`, like every other piece of text in
  * this window. Without it they were the one exception: the shell has no
@@ -48,7 +51,7 @@ export function FontSizeControl({ fontSizePx, onChange }: FontSizeControlProps):
   // chrome, not suggestion text, and a control that grew with the setting it
   // changes would take the most room exactly when there is least of it.
   const button =
-    'rounded-md px-2 py-0.5 text-[12px] leading-none disabled:opacity-40 ' +
+    'rounded-md px-2 py-0.5 text-[12px] leading-none aria-disabled:opacity-40 ' +
     'border border-[var(--overlay-border)] text-[var(--overlay-text)] ' +
     'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 ' +
     'focus-visible:outline-[var(--overlay-accent)]';
@@ -73,8 +76,10 @@ export function FontSizeControl({ fontSizePx, onChange }: FontSizeControlProps):
           data-testid="font-smaller"
           aria-label="Smaller overlay text"
           className={button}
-          disabled={fontSizePx <= min}
-          onClick={() => onChange(nextFontSize(fontSizePx, -FONT_STEP_PX))}
+          aria-disabled={fontSizePx <= min || undefined}
+          onClick={() => {
+            if (fontSizePx > min) onChange(nextFontSize(fontSizePx, -FONT_STEP_PX));
+          }}
         >
           A−
         </button>
@@ -91,8 +96,10 @@ export function FontSizeControl({ fontSizePx, onChange }: FontSizeControlProps):
           data-testid="font-larger"
           aria-label="Larger overlay text"
           className={button}
-          disabled={fontSizePx >= max}
-          onClick={() => onChange(nextFontSize(fontSizePx, FONT_STEP_PX))}
+          aria-disabled={fontSizePx >= max || undefined}
+          onClick={() => {
+            if (fontSizePx < max) onChange(nextFontSize(fontSizePx, FONT_STEP_PX));
+          }}
         >
           A+
         </button>

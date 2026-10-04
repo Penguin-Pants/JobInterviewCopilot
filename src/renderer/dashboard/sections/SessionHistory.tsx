@@ -9,7 +9,20 @@
 import { useCallback, useEffect, useRef, useState, type JSX } from 'react';
 import type { Profile, Session, SessionSummary } from '../../../shared/types.js';
 import { call } from '../call.js';
+import { focusLater } from '../focus.js';
 import { formatTimestamp, formatUsd } from '../format.js';
+import { useInFlight } from '../inFlight.js';
+
+const HEADING_ID = 'session-history-heading';
+const VIEWER_HEADING_ID = 'session-viewer-heading';
+
+function viewButtonId(sessionId: string): string {
+  return `session-view-button-${sessionId}`;
+}
+
+function deleteButtonId(sessionId: string): string {
+  return `session-delete-button-${sessionId}`;
+}
 
 export const TRANSCRIPT_PRIVACY_TEXT =
   'Session transcripts are saved on this computer as unencrypted local text files and are kept ' +
@@ -89,14 +102,34 @@ export function SessionHistory({ profiles, sessionRevision }: SessionHistoryProp
     void reload();
   }, [reload, sessionRevision]);
 
+  /**
+   * The transcript a Delete transcript press is asking about (FR-110).
+   *
+   * Deleting a transcript cannot be undone, and it was one click on a button
+   * that sits beside View transcript in every row. It now asks first, with the
+   * same non-modal `alertdialog` a profile delete uses.
+   */
+  const [pendingDelete, setPendingDelete] = useState<SessionSummary | null>(null);
+  const deleting = useInFlight();
+
+  function cancelDelete(): void {
+    if (pendingDelete) focusLater(deleteButtonId(pendingDelete.id));
+    setPendingDelete(null);
+  }
+
   async function remove(sessionId: string): Promise<void> {
     setError(null);
     const result = await call('session:delete', { sessionId });
     if (!result.ok) {
       setError(result.message);
+      focusLater(deleteButtonId(sessionId));
+      setPendingDelete(null);
       return;
     }
     if (opened?.id === sessionId) setOpened(null);
+    setPendingDelete(null);
+    // The row is gone, so focus goes to the section heading.
+    focusLater(HEADING_ID);
     await reload();
   }
 
@@ -108,11 +141,21 @@ export function SessionHistory({ profiles, sessionRevision }: SessionHistoryProp
       return;
     }
     setOpened(result.value);
+    // The transcript renders below every group, often off screen. Its heading
+    // takes focus so a keyboard or screen reader user lands on it (NFR-010).
+    focusLater(VIEWER_HEADING_ID);
+  }
+
+  function close(): void {
+    if (opened) focusLater(viewButtonId(opened.id));
+    setOpened(null);
   }
 
   return (
-    <section data-testid="section-session-history" aria-labelledby="session-history-heading">
-      <h2 id="session-history-heading">Session History</h2>
+    <section data-testid="section-session-history" aria-labelledby={HEADING_ID}>
+      <h2 id={HEADING_ID} tabIndex={-1}>
+        Session History
+      </h2>
 
       <p data-testid="transcript-privacy-note">{TRANSCRIPT_PRIVACY_TEXT}</p>
 
@@ -146,46 +189,91 @@ export function SessionHistory({ profiles, sessionRevision }: SessionHistoryProp
             ) : null}
             {sessions.length > 0 ? (
               <ul className="rows">
-                {sessions.map((summary) => (
-                  <li key={summary.id} data-testid={`session-${summary.id}`}>
-                    <span data-testid={`session-started-${summary.id}`}>
-                      {formatTimestamp(summary.startedAt)}
-                    </span>
-                    <span>{summary.entryCount} entries</span>
-                    <span>{formatUsd(summary.estimatedUsd)}</span>
-                    {summary.endReason === 'crash-recovered' ? (
-                      <span data-testid={`session-recovered-${summary.id}`}>
-                        Recovered after a crash
-                      </span>
-                    ) : null}
-                    <button
-                      type="button"
-                      data-testid={`session-view-${summary.id}`}
-                      onClick={() => void open(summary.id)}
-                    >
-                      View transcript
-                    </button>
-                    <button
-                      type="button"
-                      data-testid={`session-delete-${summary.id}`}
-                      onClick={() => void remove(summary.id)}
-                    >
-                      Delete transcript
-                    </button>
-                  </li>
-                ))}
+                {sessions.map((summary) => {
+                  // Every row has the same two buttons, so each name carries
+                  // its session. A list of identical "Delete transcript"
+                  // buttons gave a screen reader no way to tell them apart.
+                  const started = formatTimestamp(summary.startedAt);
+                  return (
+                    <li key={summary.id} data-testid={`session-${summary.id}`}>
+                      <span data-testid={`session-started-${summary.id}`}>{started}</span>
+                      <span>{summary.entryCount} entries</span>
+                      <span>{formatUsd(summary.estimatedUsd)}</span>
+                      {summary.endReason === 'crash-recovered' ? (
+                        <span data-testid={`session-recovered-${summary.id}`}>
+                          Recovered after a crash
+                        </span>
+                      ) : null}
+                      <button
+                        type="button"
+                        id={viewButtonId(summary.id)}
+                        data-testid={`session-view-${summary.id}`}
+                        aria-label={`View transcript of the session started ${started}`}
+                        onClick={() => void open(summary.id)}
+                      >
+                        View transcript
+                      </button>
+                      <button
+                        type="button"
+                        id={deleteButtonId(summary.id)}
+                        data-testid={`session-delete-${summary.id}`}
+                        aria-label={`Delete transcript of the session started ${started}`}
+                        onClick={() => setPendingDelete(summary)}
+                      >
+                        Delete transcript
+                      </button>
+                    </li>
+                  );
+                })}
               </ul>
             ) : null}
           </div>
         );
       })}
 
+      {pendingDelete ? (
+        <div
+          role="alertdialog"
+          aria-labelledby="session-delete-confirm-heading"
+          aria-describedby="session-delete-confirm-text"
+          data-testid="session-delete-confirm"
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') cancelDelete();
+          }}
+        >
+          <h3 id="session-delete-confirm-heading">
+            Delete the transcript of the session started {formatTimestamp(pendingDelete.startedAt)}?
+          </h3>
+          <p id="session-delete-confirm-text">
+            This deletes its {pendingDelete.entryCount} entries from this computer. It cannot be
+            undone.
+          </p>
+          <button
+            type="button"
+            data-testid="session-delete-confirm-yes"
+            aria-disabled={deleting.busy || undefined}
+            onClick={() => void deleting.run(() => remove(pendingDelete.id))}
+          >
+            Delete it
+          </button>
+          <button
+            type="button"
+            data-testid="session-delete-confirm-no"
+            // Focused on open, so the keyboard lands on the safe choice.
+            autoFocus
+            onClick={cancelDelete}
+          >
+            Keep it
+          </button>
+        </div>
+      ) : null}
+
       {opened ? (
-        <div data-testid="session-viewer" aria-labelledby="session-viewer-heading">
-          <h3 id="session-viewer-heading">
+        <div data-testid="session-viewer" role="region" aria-labelledby={VIEWER_HEADING_ID}>
+          <h3 id={VIEWER_HEADING_ID} tabIndex={-1}>
             {opened.profileNameSnapshot}, {formatTimestamp(opened.startedAt)}
           </h3>
-          <button type="button" data-testid="session-viewer-close" onClick={() => setOpened(null)}>
+          <button type="button" data-testid="session-viewer-close" onClick={close}>
             Close transcript
           </button>
           <ol data-testid="session-entries">
