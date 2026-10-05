@@ -1128,7 +1128,7 @@ the five session channels wired into bootstrap. `npm run typecheck`,
 | **An append is awaitable and writes immediately**, rather than being queued for a flush timer | `FR-105` asks for an entry on disk within 2 seconds, and `FR-106` requires the LLM layer to *await* the cancelled generation's append before its replacement starts. A timer satisfies neither cleanly: it can be outlived by the very crash it exists for, and it gives the caller nothing to await. Writing now makes "within 2 s" trivially true |
 | **Every append goes on one promise chain** | Two callers can append concurrently, which is exactly what a cancelled generation racing its replacement does. The chain makes disk order equal `seq` order without a lock (`FR-106`, TC-134) |
 | **The compacted `.json` is written to a temporary file and renamed** | A crash between writing the `.json` and deleting the `.ndjson` would otherwise leave a half-written `.json` whose source had already gone. The rename is atomic, so one of the two files is always complete |
-| **Only the *final* line of an `.ndjson` may be discarded** | A torn tail is the crash signature. A malformed line anywhere else means the writer did not write whole lines, which is a defect rather than a crash, so it throws instead of being silently dropped (`FR-107`) |
+| **Only the *final* line of an `.ndjson` may be discarded** | A torn tail is the crash signature. A malformed line anywhere else means the writer did not write whole lines, which is a defect rather than a crash, so it throws instead of being silently dropped (`FR-107`). **Superseded by ADR-054:** the throw made one bad line cost the whole session, so such a line is now skipped and reported, and the writer finishes short writes and truncates failed ones |
 | **`start` never clears a lock; only `recover` does** | A lock held by a live process must refuse the start. Clearing it on the start path would silently overwrite a running session's transcript. Recovery runs when no session of ours exists, so any lock it finds is from a process that is gone (`FR-108`) |
 
 **Spec gap found and closed, recorded in the architecture document (DoD 9).**
@@ -2434,6 +2434,19 @@ language-model catalog's missing requirement and test case ids,
 **Blockers.** None for this work. The build plan's only open acceptance work is
 still `TASK-051`'s manual release checklist, which needs Windows hardware.
 
+## Audio capture audit, 2026-10-04
+
+**Status: COMPLETE, 2026-10-04.** Five confirmed findings on the capture path,
+fixed with tests. No requirement and no IPC contract changed.
+
+| Defect | Consequence | Fix | Verified by |
+|---|---|---|---|
+| **A stop during a start was a no-op** | The start finished after the stop, registered its graph and kept the microphone or system audio captured for the rest of the session (`NFR-002`). Two overlapping starts orphaned the first stream and context | One queue for `CH-301` and `CH-302`, and a per-source generation that a start re-checks after each await | `audio-worker.test.ts` |
+| **A failed teardown skipped `idle`** | A context close that rejected left the state unreported, the sequence counters unreset and the rejection unhandled (`FR-046`) | Each teardown step is guarded and `idle` is always sent | `audio-worker.test.ts` |
+| **Nothing handled a renderer crash** | A dead audio worker left both streams `running` with no chunks and no badge. A dead overlay left an empty always-on-top window | The host reports the worker's streams as `error`, which feeds the restart path. The overlay and the Dashboard are reloaded, at most three times (`reloadOnRendererCrash`) | `audio-host.test.ts`, `windows.test.ts` |
+| **The worker window could leak** | Two overlapping starts built two windows, and a failed load left its window alive. A restart that rejected left the stream in `starting` | The window build is shared and a failed one is destroyed. A failed start or restart marks the stream `error`. The supervisor now reports every state change and the reset on stop to the badge | `audio-host.test.ts`, `audio-supervisor.test.ts` |
+| **The worker window guardrail tested dead code** | `createAudioWorkerWindow` had no caller. The live window in `audio-host.ts` copied its preferences by hand, with no test | The dead function is deleted. The host uses the shared `hardenedWebPreferences`, and the guardrail asserts the live window (`TC-004`, `TC-007`) | `audio-host.test.ts` |
+
 ## Renderer UX audit, 2026-10-04
 
 **Status: COMPLETE, 2026-10-04.** Fixes for confirmed findings of an audit of
@@ -2455,7 +2468,7 @@ step a user sees is the transcript delete confirmation.
 | An empty cost threshold was saved as $0 (`FR-109`) | `parseThresholds` treats an empty field as invalid and shows the existing message | `dashboard-actions.test.ts` |
 | Review follow-up. Keep it and Escape still closed the transcript delete dialog while `session:delete` was in flight, which looked like a cancel, and a second row could open its own dialog that the first delete's answer then closed (`FR-110`) | While the delete is in flight, Keep it and every row's Delete transcript are `aria-disabled` and do nothing, and Escape does not close the dialog. A settled delete closes only its own dialog. One rule, `pendingDeleteAfter`, decides every change | `dashboard-actions.test.ts`, and a `guardrails.test.ts` pin that every route goes through it |
 | Review follow-up. A settled transcript delete moved focus to the heading even when the user had moved on during the round trip (`NFR-010`) | Focus moves only when it is still in the dialog or on the deleted row. `focusWithin` in `dashboard/focus.ts` is the one rule, and the profile dialog uses it too | `dashboard-actions.test.ts` |
-| Review follow-up. A late `overlay:ready` or a retry from the previous session could reach the main process after `OverlayGate.reset` and before the renewed reminder had painted, and open the next interview's gate early (`FR-006`, `FR-008`, `ADR-016`) | `CH-122` names its session. The gate records the session at each `reset` and refuses a report for any other one. `reportReady` in `overlay/invoke.ts` stops its retry as soon as a newer `state:session` push names another session, or when the main process refuses it | `overlay-surface.test.ts`, `overlay-requests.test.ts`, `ipc-contract.test.ts` |
+| Review follow-up. A late `overlay:ready` or a retry from the previous session could reach the main process after `OverlayGate.reset` and before the renewed reminder had painted, and open the next interview's gate early (`FR-006`, `FR-008`, `ADR-016`) | `CH-122` names its session. The gate records the session at each `reset`. While a session runs it refuses a report for any other session, and after a stop it refuses a late report for the session that stopped. With no session held it accepts the report, which is how the overlay E2E suite drives sessions. `reportReady` in `overlay/invoke.ts` stops its retry as soon as a newer `state:session` push names another session, or when the main process refuses it | `overlay-surface.test.ts`, `overlay-requests.test.ts`, `ipc-contract.test.ts` |
 
 **Not run here.** The Playwright E2E suite runs on the Windows runner only.
 `toBeDisabled()` counts `aria-disabled`, so its existing assertions on Start,

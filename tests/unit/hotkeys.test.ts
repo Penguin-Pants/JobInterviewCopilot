@@ -181,3 +181,39 @@ describe('FR-009 startup conflicts are retried, not forgotten', () => {
     expect(manager.current('togglePause')).toBeUndefined();
   });
 });
+
+/**
+ * Regression: a refused rebind still recorded its accelerator as desired. The
+ * next Reset Overlay then registered it on top of the old binding without
+ * releasing the old one, so both keys fired the action and settings named only
+ * one of them (FR-009, FR-030, TC-034).
+ */
+describe('a refused rebind is not retried later', () => {
+  it('reregisterAll keeps the previous accelerator after a refused rebind', () => {
+    const handler = vi.fn();
+    manager.register('togglePause', 'Control+Shift+P', handler);
+    shortcuts.takenByOthers.add('Control+Alt+Q');
+    expect(manager.rebind('togglePause', 'Control+Alt+Q').ok).toBe(false);
+
+    // The other application releases the key before the user resets the overlay.
+    shortcuts.takenByOthers.delete('Control+Alt+Q');
+    manager.reregisterAll();
+
+    expect(manager.desiredFor('togglePause')).toBe('Control+Shift+P');
+    expect(manager.current('togglePause')).toBe('Control+Shift+P');
+    expect([...shortcuts.held.keys()]).toEqual(['Control+Shift+P']);
+  });
+
+  it('reregisterAll releases the old key when it takes a retried one for the same action', () => {
+    manager.register('togglePause', 'Control+Shift+P', () => {});
+    // A startup registration that lost a conflict is retried, by design.
+    shortcuts.takenByOthers.add('F8');
+    expect(manager.register('togglePause', 'F8', () => {}).ok).toBe(false);
+
+    shortcuts.takenByOthers.delete('F8');
+    manager.reregisterAll();
+
+    expect(manager.current('togglePause')).toBe('F8');
+    expect([...shortcuts.held.keys()]).toEqual(['F8']);
+  });
+});

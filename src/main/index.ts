@@ -50,6 +50,7 @@ import {
   hasTrueCaptureExclusion,
   overlayBoundsFor,
   OVERLAY_SIZE,
+  reloadOnRendererCrash,
   resolveOverlayPosition,
   saveOverlayBounds,
   supportsAcrylic,
@@ -215,6 +216,17 @@ let consentReminderPending = false;
 let pointerOverControls = false;
 
 /**
+ * Settles once bootstrap has built the windows: true when they exist, false
+ * when bootstrap failed first. `second-instance` is registered at module load,
+ * so without this gate a second launch during startup built an orphan
+ * Dashboard or read `config` before it existed (TC-009).
+ */
+let resolveBootstrapReady: (ready: boolean) => void = () => {};
+const bootstrapReady = new Promise<boolean>((resolve) => {
+  resolveBootstrapReady = resolve;
+});
+
+/**
  * A single instance owns the app. A second launch focuses the existing
  * Dashboard rather than opening a second set of windows (TC-009).
  */
@@ -226,7 +238,11 @@ if (!app.requestSingleInstanceLock()) {
     // second launch is the user's way back to it. Returning early here left
     // them with no Dashboard and no way to open one short of killing the
     // background process.
-    void focusOrRecreateDashboard();
+    bootstrapReady
+      .then((ready) => (ready ? focusOrRecreateDashboard() : focusAnyWindow()))
+      .catch((err: unknown) =>
+        getLogger().error('second launch could not show the Dashboard', err),
+      );
   });
   // Released on the failure path too. `startKnowledgeBase` is the only caller
   // of `markProfilesReady`, and it runs on the last line of `bootstrap`, so a
@@ -234,8 +250,24 @@ if (!app.requestSingleInstanceLock()) {
   // nothing would ever settle. The old behavior on that path was an empty list:
   // degraded, but the app still rendered.
   void bootstrap().catch((err) => {
-    getLogger().error('bootstrap failed', err);
+    try {
+      getLogger().error('bootstrap failed', err);
+    } catch {
+      // The logger is the first thing bootstrap builds. It may not exist.
+    }
     markProfilesReady();
+    resolveBootstrapReady(false);
+    // With no window, the process would hold the single-instance lock with
+    // nothing on screen, and every later launch would be swallowed by it. So
+    // the user is told and the app quits, and the next launch starts clean.
+    // A failure after the windows exist leaves the app running, degraded.
+    if (BrowserWindow.getAllWindows().length === 0) {
+      dialog.showErrorBox(
+        'Interview Copilot could not start',
+        'Startup failed before any window opened. Details are in main.log in the app data folder.',
+      );
+      app.quit();
+    }
   });
 }
 
@@ -255,7 +287,11 @@ async function bootstrap(): Promise<void> {
     dir: userData,
     onCorrupt: (path, reason) => getLogger().warn('settings quarantined', { path, reason }),
   });
-  secrets = new SecretVaultStore({ dir: userData, safeStorage });
+  secrets = new SecretVaultStore({
+    dir: userData,
+    safeStorage,
+    onWarn: (message, detail) => getLogger().warn(message, detail),
+  });
   llmCatalog = new LlmCatalogService({
     dir: userData,
     keyFor: (provider) => secrets.peek(provider),
@@ -285,17 +321,18 @@ async function bootstrap(): Promise<void> {
       // view rather than waiting for the first chunk to prove it.
       audio.noteStreamState(source, state as StreamState, error);
       if (state === 'error') {
+        // Never rejects. A failed restart lands in `error` (FR-045).
         void audio.handleStreamEnded(source, error ?? 'The audio stream ended.');
       }
-      push(dashboardWindow?.webContents, 'state:audio', {
-        interviewer: audio.statusFor('interviewer').state,
-        candidate: audio.statusFor('candidate').state,
-      });
     },
   });
 
   audio = new AudioSupervisor({
     worker: audioHost,
+    // Pushed from the supervisor, not from the worker's report, so a state the
+    // supervisor sets on its own reaches the badge too: a restart that failed
+    // after its `starting` had already been pushed was otherwise never shown.
+    onStreamState: () => pushAudioState(),
     // Straight to the live loop, which pushes it to its stream's provider
     // session and releases it in the same turn. Outside a session the loop
     // holds no stream and drops the chunk rather than queueing it: a queue with
@@ -456,6 +493,7 @@ async function bootstrap(): Promise<void> {
     overlayWindow = win;
     wireOverlayWindow();
   });
+  resolveBootstrapReady(true);
 
   // The stored interaction mode, applied to the window just built (FR-083).
   // `createOverlayWindow` always starts a window click-through, because that is
@@ -585,6 +623,21 @@ async function startKnowledgeBase(): Promise<void> {
 }
 
 /** Bring the Dashboard forward, creating it again when it has been closed. */
+/**
+ * Bring forward whatever window a failed bootstrap left open (TC-009).
+ *
+ * A bootstrap that fails after a window exists leaves the app running, and its
+ * state is not complete enough to build a Dashboard from. Showing the window
+ * that does exist is still better than a launch that does nothing.
+ */
+function focusAnyWindow(): void {
+  const win = BrowserWindow.getAllWindows().find((w) => !w.isDestroyed());
+  if (!win) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+}
+
 async function focusOrRecreateDashboard(): Promise<void> {
   if (!dashboardWindow || dashboardWindow.isDestroyed()) {
     await createDashboardWindow(config.get(), (win) => {
@@ -672,6 +725,8 @@ function wireDashboardWindow(): void {
   dashboardPromptDirty = false;
   allowDirtyDashboardClose = false;
   dashboardClosePromptOpen = false;
+  // A crashed renderer is reloaded, and the replay below runs again.
+  reloadOnRendererCrash(dashboardWindow, 'dashboard');
   /**
    * Replay the one-shot state to every Dashboard that loads (TASK-042).
    *
@@ -685,6 +740,8 @@ function wireDashboardWindow(): void {
    */
   dashboardWindow.webContents.on('did-finish-load', () => {
     pushSessionState();
+    // A reloaded renderer, after a crash for example, has no earlier push.
+    pushAudioState();
     push(dashboardWindow?.webContents, 'model:download', rag.getModelState());
     push(dashboardWindow?.webContents, 'state:providers', health.snapshot());
     // Both notices describe the machine rather than a moment, so a Dashboard
@@ -810,6 +867,9 @@ function wireOverlayWindow(): void {
   overlayWindow.webContents.on('did-start-loading', () => {
     overlayGate.noteClosed();
   });
+  // A crashed renderer left an empty always-on-top window. The reload takes
+  // the path above: the gate closes, and the consent reminder is replayed.
+  reloadOnRendererCrash(overlayWindow, 'overlay');
 
   overlayWindow.on('moved', () => {
     if (overlayWindow) saveOverlayBounds(overlayWindow, config);
@@ -1146,6 +1206,14 @@ const overlaySizeWrites = throttleWrites<{ width: number; height: number }>(({ w
   config.set({ overlayWindow: { ...config.get().overlayWindow, width, height } });
 }, OVERLAY_SIZE_WRITE_INTERVAL_MS);
 
+/** `state:audio`, read from the supervisor so every path reports the same thing. */
+function pushAudioState(): void {
+  push(dashboardWindow?.webContents, 'state:audio', {
+    interviewer: audio.statusFor('interviewer').state,
+    candidate: audio.statusFor('candidate').state,
+  });
+}
+
 /** `CH-201`, from the Session Manager rather than from a second copy of the state. */
 function pushSessionState(): void {
   const active = sessions.current;
@@ -1177,22 +1245,25 @@ function sendToOverlay(message: GatedMessage): void {
 /**
  * Maps the chosen providers onto credentials. The registry never reads settings
  * itself, so a provider swap is a rebind rather than a restart.
+ *
+ * It runs in bootstrap before any window exists, so it must not throw. The
+ * settings schema already rejects an unknown provider id (FR-037). If one gets
+ * through anyway, that capability keeps its previous binding and the fault is
+ * logged, rather than leaving the app running with no windows.
  */
 function bindHealthFromSettings(settings: Settings): void {
-  health.bind({
-    capability: 'stt',
-    primary: credentialFor(settings.providers.stt.primary.providerId),
-    backup: settings.providers.stt.backup
-      ? credentialFor(settings.providers.stt.backup.providerId)
-      : null,
-  });
-  health.bind({
-    capability: 'llm',
-    primary: credentialFor(settings.providers.llm.primary.providerId),
-    backup: settings.providers.llm.backup
-      ? credentialFor(settings.providers.llm.backup.providerId)
-      : null,
-  });
+  for (const capability of ['stt', 'llm'] as const) {
+    const { primary, backup } = settings.providers[capability];
+    try {
+      health.bind({
+        capability,
+        primary: credentialFor(primary.providerId),
+        backup: backup ? credentialFor(backup.providerId) : null,
+      });
+    } catch (err) {
+      getLogger().error('provider health binding failed', { capability, err });
+    }
+  }
 }
 
 /**

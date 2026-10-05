@@ -1,19 +1,28 @@
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { BrowserWindow } from 'electron';
 import { describe, expect, it } from 'vitest';
+import { initLogger } from '../../src/main/logger.js';
 import {
   hasTrueCaptureExclusion,
   overlayBoundsFor,
+  MAX_RENDERER_RELOADS,
   MIN_BUILD_FOR_ACRYLIC,
   MIN_BUILD_FOR_CAPTURE_EXCLUSION,
   overlayWindowOptions,
   OVERLAY_SIZE,
+  reloadOnRendererCrash,
   resolveOverlayPosition,
   supportsAcrylic,
   translucencyChangeNeedsRecreate,
   windowsBuildNumber,
 } from '../../src/main/windows.js';
 import { defaultSettings, SETTINGS_LIMITS } from '../../src/shared/defaults.js';
+
+initLogger({ dir: mkdtempSync(join(tmpdir(), 'icp-windows-')) });
 
 const DISPLAYS = [
   { id: 1, bounds: { x: 0, y: 0, width: 1920, height: 1080 } },
@@ -37,20 +46,20 @@ describe('TC-004 content protection is never disabled', () => {
     expect(offenders, `files disabling content protection: ${offenders.join(', ')}`).toEqual([]);
   });
 
-  it('the overlay and the audio worker both enable it', () => {
+  it('the overlay enables it', () => {
     // Named rather than counted. An assertion like "one fewer than the number
     // of windows" breaks confusingly the moment a window is added, and does not
-    // say which window is meant to be protected.
+    // say which window is meant to be protected. The audio worker's window is
+    // built by the audio host and asserted there, against the live code path
+    // (tests/unit/audio-host.test.ts).
     const source = readFileSync('src/main/windows.ts', 'utf8');
 
     const overlayFn = source.slice(
       source.indexOf('export async function createOverlayWindow'),
-      source.indexOf('export async function createAudioWorkerWindow'),
+      source.indexOf('export function overlayBoundsFor'),
     );
-    const workerFn = source.slice(source.indexOf('export async function createAudioWorkerWindow'));
 
     expect(overlayFn).toContain('setContentProtection(true)');
-    expect(workerFn).toContain('setContentProtection(true)');
   });
 
   it('the Dashboard is deliberately not content protected', () => {
@@ -268,5 +277,85 @@ describe('FR-083 click-through has exactly one applier', () => {
     );
     expect(applier).toContain('pointerOverControls');
     expect(applier).toContain('overlayInteractive');
+  });
+});
+
+/** A crashed overlay or Dashboard renderer is reloaded, not left blank (FR-008). */
+describe('renderer crash recovery', () => {
+  function fakeWindow(): {
+    win: BrowserWindow;
+    crash: (reason?: string) => void;
+    reloads: () => number;
+    destroyed: () => boolean;
+  } {
+    const webContents = new EventEmitter() as EventEmitter & { reload: () => void };
+    let reloads = 0;
+    let destroyed = false;
+    webContents.reload = () => {
+      reloads += 1;
+    };
+    const win = {
+      webContents,
+      isDestroyed: () => destroyed,
+      destroy: () => {
+        destroyed = true;
+      },
+    } as unknown as BrowserWindow;
+    return {
+      win,
+      crash: (reason = 'crashed') =>
+        webContents.emit('render-process-gone', {}, { reason, exitCode: 1 }),
+      reloads: () => reloads,
+      destroyed: () => destroyed,
+    };
+  }
+
+  it('reloads a window whose renderer crashed', () => {
+    const fake = fakeWindow();
+    reloadOnRendererCrash(fake.win, 'overlay');
+    fake.crash();
+    expect(fake.reloads()).toBe(1);
+    expect(fake.destroyed()).toBe(false);
+  });
+
+  it('closes a window that keeps crashing instead of reloading it forever', () => {
+    const fake = fakeWindow();
+    reloadOnRendererCrash(fake.win, 'overlay');
+    for (let i = 0; i <= MAX_RENDERER_RELOADS; i += 1) fake.crash();
+    expect(fake.reloads()).toBe(MAX_RENDERER_RELOADS);
+    expect(fake.destroyed()).toBe(true);
+  });
+
+  it('leaves a clean exit alone', () => {
+    const fake = fakeWindow();
+    reloadOnRendererCrash(fake.win, 'dashboard');
+    fake.crash('clean-exit');
+    expect(fake.reloads()).toBe(0);
+    expect(fake.destroyed()).toBe(false);
+  });
+
+  it('is wired to the overlay and the Dashboard', () => {
+    // index.ts is excluded from unit coverage, so the wiring is pinned here.
+    const source = readFileSync('src/main/index.ts', 'utf8');
+    const wiring = (fn: string, next: string): string =>
+      source.slice(source.indexOf(`function ${fn}`), source.indexOf(`function ${next}`));
+    expect(wiring('wireDashboardWindow', 'wireOverlayWindow')).toContain(
+      'reloadOnRendererCrash(dashboardWindow',
+    );
+    expect(wiring('wireOverlayWindow', 'registerHotkeys')).toContain(
+      'reloadOnRendererCrash(overlayWindow',
+    );
+  });
+
+  it('replays the audio state to a reloaded Dashboard', () => {
+    // A reloaded renderer starts with an empty early-push cache, so the badge
+    // stayed blank until the next stream transition unless the load replays it.
+    const source = readFileSync('src/main/index.ts', 'utf8');
+    const wiring = source.slice(
+      source.indexOf('function wireDashboardWindow'),
+      source.indexOf('function wireOverlayWindow'),
+    );
+    const onLoad = wiring.slice(wiring.indexOf("'did-finish-load'"));
+    expect(onLoad.slice(0, onLoad.indexOf('});'))).toContain('pushAudioState()');
   });
 });

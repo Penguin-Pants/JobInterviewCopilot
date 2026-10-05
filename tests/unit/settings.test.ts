@@ -366,3 +366,60 @@ describe('FR-025 provider separation is enforced on load', () => {
     expect(store.get().providers.stt.backup).toBeNull();
   });
 });
+
+/**
+ * A provider id outside the registries reached `credentialFor`, which throws,
+ * from `bindHealthFromSettings` before any window existed. Bootstrap then
+ * rejected and the app ran with no windows. A file written by an older build
+ * that named a since-removed provider was enough (FR-020, FR-033, FR-037).
+ */
+describe('FR-037 provider ids are checked against the registries', () => {
+  it('a stored unknown provider falls back to its default and keeps the rest of the file', () => {
+    const dir = tmp();
+    const stored = defaultSettings();
+    stored.theme.mode = 'dark';
+    stored.providers.stt.primary = { providerId: 'retired-speech', modelId: 'old-1' };
+    stored.providers.llm.backup = { providerId: 'retired-llm', modelId: 'old-2' };
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify(stored), 'utf8');
+
+    const seen: string[] = [];
+    const store = new ConfigStore({ dir, onCorrupt: (_p, reason) => seen.push(reason) });
+
+    expect(store.get().providers.stt.primary).toEqual(defaultSettings().providers.stt.primary);
+    expect(store.get().providers.llm.backup).toBeNull();
+    expect(store.get().theme.mode).toBe('dark');
+    expect(readdirSync(dir).some((n) => n.startsWith('settings.corrupt-'))).toBe(false);
+    expect(seen).toHaveLength(2);
+    expect(seen.join(' ')).toMatch(/retired-speech/);
+  });
+
+  it('a provider from the other capability registry is not accepted', () => {
+    const dir = tmp();
+    const stored = defaultSettings();
+    // Deepgram is a speech provider. It cannot serve suggestions.
+    stored.providers.llm.primary = { providerId: 'deepgram', modelId: 'nova-3' };
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify(stored), 'utf8');
+
+    const store = new ConfigStore({ dir });
+
+    expect(store.get().providers.llm.primary).toEqual(defaultSettings().providers.llm.primary);
+  });
+
+  it('set rejects an unknown provider and persists nothing', () => {
+    const dir = tmp();
+    const store = new ConfigStore({ dir });
+    const before = readFileSync(store.path, 'utf8');
+
+    expect(() =>
+      store.set({
+        providers: {
+          ...defaultSettings().providers,
+          stt: { primary: { providerId: 'retired-speech', modelId: 'old-1' }, backup: null },
+        },
+      }),
+    ).toThrow(/retired-speech|provider/i);
+
+    expect(readFileSync(store.path, 'utf8')).toBe(before);
+    expect(new ConfigStore({ dir }).get().providers.stt.primary.providerId).toBe('deepgram');
+  });
+});
