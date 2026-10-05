@@ -150,6 +150,14 @@ interface ProviderChoice { providerId: string; modelId: string; }
 type CredentialId = 'deepgram' | 'openai' | 'anthropic' | 'elevenlabs';
 ```
 
+A `providerId` must name an entry in that capability's registry (section 2.1a).
+`config:set` rejects an unknown one before anything is written. On load, a
+stored unknown id (for example a provider a later build removed) resets that
+primary to its default, or clears that backup, and is reported like a cleared
+duplicate backup. The rest of the file is kept. A `modelId` is not checked
+against the shipped registry, because the catalogs add account-discovered
+models at runtime (FR-118).
+
 ### 2.1a Provider registries (ADR-022)
 
 Three registries, `src/shared/registry/stt.ts`, `src/shared/registry/llm.ts` and
@@ -270,6 +278,12 @@ Keys are keyed by `CredentialId`, and a provider names the credential it uses.
 The OpenAI key serves OpenAI STT models and OpenAI LLM models alike. There is one
 OpenAI key, not two. The Dashboard must state this, and `CMP-12` keys health by
 credential for exactly this reason (ADR-017).
+
+A `secrets.bin` that exists but cannot be decrypted or parsed reads as "no key
+present". Before the next save writes over it, it is renamed to
+`secrets.bin.corrupt-<epochMillis>` in `userData` and a warning is logged with
+no key material. Writing the one new key over it destroyed every other key in
+the file.
 
 ### 2.3 Profile and documents
 
@@ -413,10 +427,12 @@ first turn happened to be spoken.
 
 Four further rules settled while implementing `TASK-040`:
 
-- **Only the final line of an `.ndjson` may be discarded.** A torn tail is the
-  crash signature. A malformed line anywhere else means the writer did not write
-  whole lines, which is a defect rather than a crash, so it is raised rather
-  than silently dropped.
+- **Only the final line of an `.ndjson` is discarded silently.** A torn tail is
+  the crash signature. A malformed line anywhere else is skipped, counted and
+  reported through `onError`, so compaction and recovery always complete. The
+  writer keeps lines whole: it finishes a short write and truncates a failed one
+  back to the last whole line (ADR-054, supersedes the `TASK-040` rule that
+  raised it).
 - **Compaction writes the `.json` through a temporary file and renames it.** A
   crash between writing the `.json` and deleting the `.ndjson` would otherwise
   leave a half-written `.json` whose source had already gone. The rename is
@@ -1508,6 +1524,24 @@ bounded retention, because unbounded accumulation, not copying, is what would pu
 220 MiB of interview audio in memory over one session. `CH-303` therefore sends
 by copy, every reference is released once its chunk is handed on, and deliberate
 buffering is bounded by a declared constant.
+
+**Ordering and recovery, added by the audio capture audit (2026-10-04).**
+
+- The worker runs `CH-301` and `CH-302` on one queue, in arrival order. Each
+  message also bumps a per-source generation on receipt, and a start re-checks
+  it after every await. A stop that lands during acquisition or the worklet load
+  therefore releases the stream and the context, and two overlapping starts
+  leave one graph (`NFR-002`, `FR-045`).
+- A stop reports `idle` for every graph, whether or not the flush or the
+  context close fails (`FR-046`).
+- `CMP-03a`'s host builds one worker window at a time and destroys a window
+  whose renderer did not load. When the worker renderer dies, the host reports
+  each stream it was running as `error`. The supervisor's restart path then
+  builds a new window. A restart that fails leaves the stream in `error`, and it
+  counts toward `MAX_STREAM_RESTARTS` (`FR-045`).
+- A crashed overlay or Dashboard renderer is reloaded, at most three times per
+  window, and then the window is closed. The overlay reload takes the gate's
+  `did-start-loading` path, so the consent reminder is shown again (`FR-008`).
 
 ---
 

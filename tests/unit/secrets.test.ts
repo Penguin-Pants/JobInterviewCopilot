@@ -1,4 +1,4 @@
-import { mkdtempSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -209,5 +209,64 @@ describe('vault rejects non-record payloads', () => {
 
     expect(await vault.set('deepgram', 'abc', alwaysValid)).toEqual({ ok: true });
     expect(vault.status().deepgram).toBe(true);
+  });
+});
+
+/**
+ * Regression: an unreadable vault read as empty, and the next save wrote that
+ * empty vault plus one key over secrets.bin. Every other key and every
+ * credential version in the file was destroyed by a save the user saw succeed.
+ */
+describe('an unreadable vault is moved aside before it is overwritten', () => {
+  function brokenThenWorking(): SafeStorageLike & { broken: boolean } {
+    const storage = {
+      broken: true,
+      isEncryptionAvailable: () => true,
+      encryptString: (plain: string) => Buffer.from(`enc:${plain}`, 'utf8'),
+      decryptString: (buf: Buffer): string => {
+        if (storage.broken) throw new Error('DPAPI: the data is invalid');
+        return buf.toString('utf8').replace(/^enc:/, '');
+      },
+    };
+    return storage;
+  }
+
+  it('reads as nothing present, and keeps the original bytes in a corrupt copy', async () => {
+    const dir = tmp();
+    const storage = brokenThenWorking();
+    const original = `enc:${JSON.stringify({ openaiApiKey: SAMPLE_KEY })}`;
+    writeFileSync(join(dir, 'secrets.bin'), original, 'utf8');
+    const warnings: string[] = [];
+    const vault = new SecretVaultStore({
+      dir,
+      safeStorage: storage,
+      onWarn: (message, detail) => warnings.push(`${message} ${JSON.stringify(detail)}`),
+    });
+
+    expect(vault.status().openai).toBe(false);
+    expect(vault.peek('openai')).toBeUndefined();
+
+    expect(await vault.set('deepgram', 'abc', alwaysValid)).toEqual({ ok: true });
+
+    const moved = readdirSync(dir).filter((n) => /^secrets\.bin\.corrupt-\d+$/.test(n));
+    expect(moved).toHaveLength(1);
+    expect(readFileSync(join(dir, moved[0]!), 'utf8')).toBe(original);
+    expect(warnings).toHaveLength(1);
+    expect(warnings.join('')).not.toContain(SAMPLE_KEY);
+
+    // The original is recoverable once decryption works again.
+    storage.broken = false;
+    expect(vault.peek('deepgram')).toBe('abc');
+    expect(storage.decryptString(readFileSync(join(dir, moved[0]!)))).toContain(SAMPLE_KEY);
+  });
+
+  it('a readable vault is never moved aside', async () => {
+    const dir = tmp();
+    const vault = new SecretVaultStore({ dir, safeStorage: fakeSafeStorage() });
+    await vault.set('openai', SAMPLE_KEY, alwaysValid);
+    await vault.set('deepgram', 'abc', alwaysValid);
+
+    expect(readdirSync(dir).filter((n) => n.includes('corrupt'))).toEqual([]);
+    expect(vault.peek('openai')).toBe(SAMPLE_KEY);
   });
 });

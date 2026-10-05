@@ -2331,6 +2331,33 @@ own card, because that card is newly visible; otherwise the next question could
 replace the retry's answer at once. `OverlayGate` already treats every `begin`
 as a new card, so a rebuilt overlay is replayed the replacement alone.
 
+### ADR-054: Transcript writes are whole or undone, and one bad line is skipped
+
+**Decided 2026-10-04** while fixing an audit finding in `CMP-08`.
+
+**Context.** `ADR-018` says each entry is one `write()` of one complete line,
+and `TASK-040` made a malformed line before the last one throw. But the writer
+ignored `bytesWritten`. A short write (for example on ENOSPC) left half a line,
+and the next good append fused onto it in the middle of the file. Compaction
+then threw every time, so `stop` could never finish and the lock stayed, and
+recovery threw on every launch. One bad line cost the whole interview.
+
+**Decision.**
+- `CMP-08` writes each line at the end of the last whole line, and repeats the
+  write until `bytesWritten` covers it. If a write fails, the file is truncated
+  back to that offset. If the truncate also fails, the next line overwrites the
+  partial one. A partial line has no newline, so anything left of it is a torn
+  tail. The file is opened for writing without append mode, because append mode
+  ignores the write position and on Windows cannot truncate.
+- `readNdjson` skips a malformed line before the last one and counts it. It
+  does not throw. Compaction and recovery report the count through `onError`
+  and complete. A torn final line is still dropped silently (`FR-107`).
+
+**Consequence.** This supersedes the `TASK-040` rule "a malformed line anywhere
+else is raised". The writer is now the guarantee that lines are whole, and the
+reader no longer turns a writer defect into permanent loss. A skipped line is
+visible in `main.log`, never silent.
+
 ### ADR-056: Streaming STT transport audit: open on accept, the OpenAI rate, the ElevenLabs protocol
 
 **Decided 2026-10-04** from an audit of the streaming STT adapters, with the
