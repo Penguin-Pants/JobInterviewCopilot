@@ -291,14 +291,17 @@ the file.
 which documents exist. `profile.json` is a derived index. A file that appears in
 `kb/` outside `doc:import` is adopted, not ignored. A file that disappears takes
 its record, chunks and vectors with it. A startup reconciliation pass runs before
-the watcher starts and resets any document left in a non-terminal state.
+the watcher starts and resets any document left in a non-terminal state. The
+pass ends by removing derived files that no record owns. When `profile.json`
+exists but cannot be read, every write is refused, so the pass does nothing and
+is tried again after 5 s, 30 s, 2 min and 10 min, then left to the next launch.
 
 ```ts
 interface Profile {
-  id: string;            // uuid v4
+  id: string;            // uuid v4, the folder name; never read from the file
   name: string;
   createdAt: string;     // ISO 8601
-  kbPath: string;        // absolute
+  kbPath: string;        // absolute, recomputed on every read
   documents: DocumentRecord[];
 }
 
@@ -306,9 +309,9 @@ interface DocumentRecord {
   id: string;                  // uuid v4
   profileId: string;
   originalFileName: string;
-  originalPath: string;        // inside kb/
+  originalPath: string;        // kb/<originalFileName>, recomputed on every read
   sourceFormat: 'md' | 'pdf' | 'docx';
-  derivedMarkdownPath: string | null;   // null when sourceFormat === 'md'
+  derivedMarkdownPath: string | null;   // null when sourceFormat === 'md'; else recomputed on read
   docType: DocType;
   docTypeSource: 'auto' | 'user';       // a user override is never re-guessed
   contentHash: string;                  // sha256 of original bytes
@@ -2120,7 +2123,9 @@ src/
       prompt.ts        TASK-031, section 6 assembled once for both providers
     overlay-gate.ts    FR-008, ADR-016, the overlay readiness buffer
     rag.ts             CMP-06 facade
-    rag/convert.ts     TASK-020, pdf-parse and mammoth to Markdown
+    rag/convert.ts     TASK-020, runs each conversion in a worker thread (ADR-055)
+    rag/convert-worker.ts  TASK-020, the worker entry, bundled as its own file
+    rag/extract.ts     TASK-020, pdf-parse and mammoth to Markdown
     rag/chunk.ts       TASK-021, pure and deterministic
     rag/embed.ts       TASK-022, @xenova/transformers, cache key, model gate
     rag/store.ts       TASK-020/022/024, profiles, chunks, vectors, the top-k scan
