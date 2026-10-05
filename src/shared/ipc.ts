@@ -198,7 +198,6 @@ export const settingsSchema = z.object({
     // The shipped default is true, the teleprompter behavior (FR-083).
     clickThrough: z.boolean(),
   }),
-  firstRun: z.object({ modelDownloaded: z.boolean() }),
 });
 
 const documentRecord = z.object({
@@ -816,7 +815,6 @@ export const audioWorkerChannels = {
 
 export type InvokeChannel = keyof typeof invokeChannels;
 export type PushChannel = keyof typeof pushChannels;
-export type AudioWorkerChannel = keyof typeof audioWorkerChannels;
 
 export type InvokePayload<C extends InvokeChannel> = z.infer<(typeof invokeChannels)[C]['payload']>;
 export type InvokeResponse<C extends InvokeChannel> = z.infer<

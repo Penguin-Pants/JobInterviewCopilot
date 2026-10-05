@@ -11,7 +11,7 @@ import type {
   TranscriptSource,
   ValidationResult,
 } from '../../../shared/types.js';
-import { classifyStatus, providerError } from '../stt.js';
+import { classifyStatus } from '../stt.js';
 import type { SttProvider, SttSession, SttSessionOptions } from '../stt.js';
 import type { ConnectSpec, SocketAdapterSpec, SocketFactory } from './socket-session.js';
 import { SocketSttSession } from './socket-session.js';
@@ -116,8 +116,3 @@ function validationReason(errorClass: ReturnType<typeof classifyStatus>): string
   if (errorClass === 'rate-limit') return 'Deepgram is rate limiting this key. Try again shortly.';
   return 'Deepgram could not confirm this key.';
 }
-
-// Re-exported so a caller that needs a typed error from this adapter does not
-// have to reach past the adapter for it.
-export const deepgramError = (cls: Parameters<typeof providerError>[1], message: string) =>
-  providerError('deepgram', cls, message);

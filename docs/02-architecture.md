@@ -141,7 +141,6 @@ interface Settings {
     displayId: string | null;
     clickThrough: boolean;              // default true (FR-083)
   };
-  firstRun: { modelDownloaded: boolean };
 }
 
 /** A provider and model pair. Both are registry keys, not a closed union. */

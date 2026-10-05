@@ -2,11 +2,14 @@
  * The PCM framing worklet. This file is the single source of truth: it ships as
  * a real asset and the unit tests evaluate this exact text (FR-041).
  *
- * It is a plain `.js` file, loaded through `new URL(..., import.meta.url)`, and
- * deliberately not a Blob. A `blob:` module URL is governed by `script-src`,
+ * It is a plain `.js` file in the renderer's `public/` directory, so Vite copies
+ * it to `out/renderer/` verbatim. The audio worker loads it by a URL resolved
+ * against the page's `location.href` (`workletModuleUrl()` in
+ * `audio-worker/pcm-worklet.ts`), which keeps it on the page's own origin. It is
+ * deliberately not a Blob: a `blob:` module URL is governed by `script-src`,
  * which the audio worker's policy restricts to `'self' file:`, so the Blob form
  * was rejected by CSP before either graph could start and no PCM was ever
- * emitted. Shipping it as an asset puts it on an allowed origin.
+ * emitted.
  */
 
 class PcmFramer extends AudioWorkletProcessor {
