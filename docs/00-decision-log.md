@@ -2358,6 +2358,50 @@ else is raised". The writer is now the guarantee that lines are whole, and the
 reader no longer turns a writer defect into permanent loss. A skipped line is
 visible in `main.log`, never silent.
 
+### ADR-055: A hard per-file ingest cap and a conversion timeout
+
+**Decided 2026-10-04** while fixing the knowledge base audit findings.
+
+**Context.** `FR-068`'s 2 MB and 200-chunk ceiling bounds a timing promise
+only: a document above it still processes. Nothing bounded what one file may
+cost. The whole file was read into memory, then read again by the converter,
+and `pdf-parse` had no timeout. A very large or hostile PDF could exhaust the
+main process's memory (`NFR-004`), or leave its document in `converting` for the
+rest of the process, with every later pass for that path queued behind it.
+
+**Decision.** Two hard limits, in `KB_INGEST_LIMITS` in `src/shared/defaults.ts`,
+separate from `KB_CEILING`:
+
+1. **50 MB per file.** The file is checked with `stat` before it is read, and the
+   length is checked again after the read. An import checks the source with
+   `stat` before it copies anything into `kb/`. A file above the cap gets an
+   `error` row that names the limit and no path. 50 MB is 25 times the ceiling, so a resume, a job
+   description or a long PDF of company notes with images stays well inside it,
+   and `FR-068`'s "above the ceiling the document is still processed" still
+   holds for every document between 2 MB and 50 MB.
+2. **120 seconds per conversion.** A conversion that runs longer fails its
+   document with an `error` row. PDF and DOCX conversion run in a worker thread,
+   one per conversion, and the converter gets an `AbortSignal`. On abort the
+   thread is terminated. An abort signal alone could not bound the work: mammoth
+   takes no signal, a parse that does not yield in the main thread also delays
+   the timer that should stop it, and a signal that aborted before its listener
+   was added does not replay the event. Terminating the thread stops the parse
+   in every case, so no parse runs on after its document failed or beside a
+   retry of the same file. A signal that is already aborted starts no thread.
+
+The file is read once, and those bytes are both hashed and converted, so the
+cache key always describes the content that was converted.
+
+**Consequence.** `withinReembedCeiling`, which only tests called, is removed;
+the tests compare against `KB_CEILING` directly. The Dashboard's retry action
+works on both new error rows as on any other. `TC-163` covers both limits.
+The parsers move to `rag/extract.ts`, which the worker entry
+`rag/convert-worker.ts` imports. electron-vite bundles that entry as its own
+file through a `?modulePath` import, and `vitest.config.ts` does the same for
+tests. The worker loads `mammoth` and `pdf-parse` from inside `app.asar`, so
+`asarUnpack` does not change. Each conversion copies the file's bytes once more,
+into the worker, which the 50 MB cap bounds.
+
 ### ADR-057: Trust boundaries: the main process checks who sent each message
 
 **Decided 2026-10-04** while fixing audit findings on the IPC boundary.

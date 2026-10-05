@@ -31,6 +31,21 @@ export const KB_CEILING = {
 } as const;
 
 /**
+ * Hard limits on one ingest (ADR-055).
+ *
+ * Separate from {@link KB_CEILING} on purpose. The ceiling only bounds a timing
+ * promise, and a document above it still processes (FR-068). These bound what
+ * one file may cost at all: a file above `maxFileBytes` is never read, and a
+ * conversion that runs past `conversionTimeoutMs` fails its document instead of
+ * pinning it in `converting` for the rest of the process. Both fail as an
+ * `error` row the Dashboard shows.
+ */
+export const KB_INGEST_LIMITS = {
+  maxFileBytes: 50 * 1024 * 1024,
+  conversionTimeoutMs: 120_000,
+} as const;
+
+/**
  * The shipped overlay size, and the range the user may resize it to (FR-081).
  *
  * Kept in `shared` rather than beside the window code, because three parties
