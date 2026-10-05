@@ -63,7 +63,7 @@ export class HotkeyManager {
       return { ok: false, error: describeConflict(accelerator) };
     }
 
-    this.bindings.set(action, accelerator);
+    this.take(action, accelerator);
     return { ok: true };
   }
 
@@ -79,8 +79,10 @@ export class HotkeyManager {
     if (!handler) return { ok: false, error: `No handler registered for ${action}.` };
 
     const previous = this.bindings.get(action);
-    this.desired.set(action, accelerator);
-    if (previous === accelerator) return { ok: true };
+    if (previous === accelerator) {
+      this.desired.set(action, accelerator);
+      return { ok: true };
+    }
 
     // Free the old accelerator only for the duration of the attempt when the
     // new one is the same key held by this app under another action.
@@ -96,6 +98,19 @@ export class HotkeyManager {
       return { ok: false, error: describeConflict(accelerator) };
     }
 
+    this.take(action, accelerator);
+    return { ok: true };
+  }
+
+  /**
+   * Record a held accelerator for an action, releasing the one it replaces.
+   *
+   * Outside `register`, `desired` changes only here. A refused rebind used to
+   * record its accelerator as desired, so the next `reregisterAll` took it on
+   * top of the old one: both keys fired and settings named one (FR-030).
+   */
+  private take(action: HotkeyAction, accelerator: string): void {
+    const previous = this.bindings.get(action);
     if (previous && previous !== accelerator) {
       try {
         this.shortcuts.unregister(previous);
@@ -103,9 +118,8 @@ export class HotkeyManager {
         getLogger().warn('releasing previous accelerator failed', { previous, err });
       }
     }
-
     this.bindings.set(action, accelerator);
-    return { ok: true };
+    this.desired.set(action, accelerator);
   }
 
   /** The accelerator currently bound to an action, if any. */
@@ -128,12 +142,11 @@ export class HotkeyManager {
       const handler = this.handlers.get(action);
       if (!handler) continue;
       try {
-        if (this.shortcuts.isRegistered(accelerator)) {
-          this.bindings.set(action, accelerator);
-          continue;
-        }
-        if (this.shortcuts.register(accelerator, handler)) {
-          this.bindings.set(action, accelerator);
+        if (
+          this.shortcuts.isRegistered(accelerator) ||
+          this.shortcuts.register(accelerator, handler)
+        ) {
+          this.take(action, accelerator);
         }
       } catch (err) {
         getLogger().warn('hotkey re-registration failed', { action, accelerator, err });

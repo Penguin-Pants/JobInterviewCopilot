@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import { SETTINGS_LIMITS } from './defaults.js';
+import { findLlmProvider } from './registry/llm.js';
+import { findSttProvider } from './registry/stt.js';
 import {
   DEFAULT_PROMPT_ID,
   DEFAULT_PROMPT_NAME,
@@ -24,11 +26,30 @@ import {
 
 const ok = z.object({ ok: z.literal(true) });
 
-const providerChoice = z.object({
-  providerId: z.string().min(1),
-  modelId: z.string().min(1),
-  effort: z.string().min(1).optional(),
-});
+/**
+ * A provider choice for one capability (FR-037).
+ *
+ * The provider id must name an entry in that capability's registry. An unknown
+ * id reached `credentialFor`, which throws, and that stopped bootstrap before
+ * any window opened. The model id is not checked here: both catalogs can add
+ * account-discovered models at runtime, so a model missing from the shipped
+ * registry is not provably invalid (FR-118).
+ */
+function providerChoiceFor(capability: string, known: (providerId: string) => boolean) {
+  return z.object({
+    providerId: z
+      .string()
+      .min(1)
+      .refine(known, {
+        error: (issue) => `"${String(issue.input)}" is not a known ${capability} provider.`,
+      }),
+    modelId: z.string().min(1),
+    effort: z.string().min(1).optional(),
+  });
+}
+
+const sttChoice = providerChoiceFor('speech', (id) => findSttProvider(id) !== null);
+const llmChoice = providerChoiceFor('suggestion', (id) => findLlmProvider(id) !== null);
 
 const credentialId = z.enum(['deepgram', 'openai', 'anthropic', 'elevenlabs']);
 const docType = z.enum(['resume', 'company-notes', 'job-description']);
@@ -126,8 +147,8 @@ export const settingsSchema = z.object({
   schemaVersion: z.literal(7),
   activeProfileId: z.string(),
   providers: z.object({
-    stt: z.object({ primary: providerChoice, backup: providerChoice.nullable() }),
-    llm: z.object({ primary: providerChoice, backup: providerChoice.nullable() }),
+    stt: z.object({ primary: sttChoice, backup: sttChoice.nullable() }),
+    llm: z.object({ primary: llmChoice, backup: llmChoice.nullable() }),
   }),
   llmModelCutoffs: z.object({
     openai: z.string().nullable(),
