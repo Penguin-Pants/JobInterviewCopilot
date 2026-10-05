@@ -88,8 +88,9 @@ export function supportsAcrylic(build = windowsBuildNumber()): boolean {
 /**
  * Lock every renderer down the same way (FR-086, TC-007).
  * sandbox and contextIsolation on, node integration off, no exceptions.
+ * Exported for the audio worker, whose window the audio host builds.
  */
-function hardenedWebPreferences(
+export function hardenedWebPreferences(
   preload: string,
 ): BrowserWindowConstructorOptions['webPreferences'] {
   return {
@@ -159,12 +160,47 @@ function schemeOf(url: string): string {
   }
 }
 
+/** How many renderer crashes a window is reloaded through before it closes. */
+export const MAX_RENDERER_RELOADS = 3;
+
+/**
+ * Reload a window whose renderer died (FR-008, NFR-008).
+ *
+ * Nothing reacted before. A crashed overlay stayed on screen as an empty
+ * always-on-top window and a crashed Dashboard stayed blank. A reload is the
+ * path the overlay gate already handles: `did-start-loading` closes the gate
+ * and `did-finish-load` replays the consent reminder and the session state
+ * (ADR-016). A renderer that keeps crashing is closed after
+ * `MAX_RENDERER_RELOADS` rather than reloaded forever.
+ */
+export function reloadOnRendererCrash(
+  win: BrowserWindow,
+  label: string,
+  maxReloads = MAX_RENDERER_RELOADS,
+): void {
+  let reloads = 0;
+  win.webContents.on('render-process-gone', (_event, details) => {
+    if (win.isDestroyed() || details.reason === 'clean-exit') return;
+    getLogger().error('renderer gone', {
+      window: label,
+      reason: details.reason,
+      exitCode: details.exitCode,
+    });
+    if (reloads >= maxReloads) {
+      win.destroy();
+      return;
+    }
+    reloads += 1;
+    win.webContents.reload();
+  });
+}
+
 /* v8 ignore start -- these wrappers bind directly to Electron and cannot run in
    a plain Node test process. Their logic is extracted into the pure, unit
    tested functions above (overlayWindowOptions, resolveOverlayPosition,
    windowsBuildNumber); what remains here is Electron plumbing, covered on the
    Windows runner by TC-005, TC-007, TC-008 and TC-148. */
-function preloadPath(name: string): string {
+export function preloadPath(name: string): string {
   return join(__dirname, `../preload/${name}.js`);
 }
 
@@ -174,7 +210,7 @@ function rendererEntry(name: string): { url?: string; file?: string } {
   return { file: join(__dirname, `../renderer/${name}/index.html`) };
 }
 
-async function loadRenderer(win: BrowserWindow, name: string): Promise<void> {
+export async function loadRenderer(win: BrowserWindow, name: string): Promise<void> {
   const entry = rendererEntry(name);
   if (entry.url) await win.loadURL(entry.url);
   else if (entry.file) await win.loadFile(entry.file);
@@ -349,26 +385,6 @@ export async function createOverlayWindow(
   onCreated?.(win);
 
   await loadRenderer(win, 'overlay');
-  return win;
-}
-
-/**
- * The hidden audio worker (CMP-03b, ADR-005).
- *
- * It never shows and has no UI. It is content-protected as a precaution: it
- * should never be visible to anything, capture included.
- */
-export async function createAudioWorkerWindow(): Promise<BrowserWindow> {
-  const win = new BrowserWindow({
-    width: 320,
-    height: 240,
-    show: false,
-    skipTaskbar: true,
-    webPreferences: hardenedWebPreferences(preloadPath('audioWorker')),
-  });
-  win.setContentProtection(true);
-  applyNavigationLockdown(win);
-  await loadRenderer(win, 'audio-worker');
   return win;
 }
 

@@ -1,6 +1,11 @@
 import { join } from 'node:path';
 import { BrowserWindow, desktopCapturer, session, type Session } from 'electron';
-import { applyNavigationLockdown } from './windows.js';
+import {
+  applyNavigationLockdown,
+  hardenedWebPreferences,
+  loadRenderer,
+  preloadPath,
+} from './windows.js';
 import { getLogger } from './logger.js';
 import type { AudioWorkerHandle } from './audio.js';
 import { appRendererUrlCheck, isTopLevelAppFrame, type SenderFrame } from './ipc/sender.js';
@@ -159,14 +164,23 @@ export function handleWorkerMessage(
   }
 }
 
-/* v8 ignore start -- binds directly to BrowserWindow and cannot run in a plain
-   Node test process. The two behaviours worth asserting, the display-media
-   handler and the permission handler, take an injected Session and are tested
-   above; what remains here is window plumbing, exercised on Windows by the E2E
-   suite and the loopback spike. */
-/** Creates the hidden worker window and speaks CH-301 to CH-304 to it. */
+/**
+ * Creates the hidden worker window and speaks CH-301 to CH-304 to it.
+ *
+ * The window is the one place this app builds it, so its guardrails are
+ * asserted here against a fake BrowserWindow: the shared hardened preferences
+ * and content protection before the load (FR-086, TC-004, TC-007).
+ */
 export class ElectronAudioWorkerHost implements AudioWorkerHandle {
   private window: BrowserWindow | null = null;
+  /**
+   * The window still loading, shared by every start that arrives meanwhile.
+   * Two overlapping starts each built a window before, and the one not kept
+   * still listened for IPC and still held capture.
+   */
+  private creating: Promise<BrowserWindow> | null = null;
+  /** The streams the worker was told to run, for the crash report. */
+  private readonly active = new Set<TranscriptSource>();
 
   constructor(private readonly options: AudioHostOptions) {}
 
@@ -186,15 +200,19 @@ export class ElectronAudioWorkerHost implements AudioWorkerHandle {
 
   async start(streams: readonly TranscriptSource[]): Promise<void> {
     const win = await this.ensureWindow();
+    for (const source of streams) this.active.add(source);
     win.webContents.send('audio:start', { streams: [...streams] });
   }
 
   async stop(): Promise<void> {
+    this.active.clear();
     if (!this.window || this.window.isDestroyed()) return;
     this.window.webContents.send('audio:stop');
   }
 
   async destroy(): Promise<void> {
+    this.active.clear();
+    this.creating = null;
     if (!this.window) return;
     const win = this.window;
     this.window = null;
@@ -202,23 +220,59 @@ export class ElectronAudioWorkerHost implements AudioWorkerHandle {
   }
 
   private async ensureWindow(): Promise<BrowserWindow> {
+    if (this.creating) return this.creating;
     if (this.window && !this.window.isDestroyed()) return this.window;
 
+    const creating = this.createWindow();
+    this.creating = creating;
+    try {
+      return await creating;
+    } finally {
+      if (this.creating === creating) this.creating = null;
+    }
+  }
+
+  /**
+   * The worker renderer died (FR-045).
+   *
+   * Nothing else notices: the worker reports `error` only while it runs, so a
+   * dead renderer left both streams reading `running` with no chunks and no
+   * badge. Each stream it was running is reported failed, which feeds the
+   * supervisor's restart and badge path, and the window is dropped so the
+   * restart builds a fresh one.
+   */
+  private handleRendererGone(win: BrowserWindow, details: Electron.RenderProcessGoneDetails): void {
+    // A window this host already let go of, by destroy or by an earlier crash.
+    if (this.window !== win) return;
+    this.window = null;
+    if (!win.isDestroyed()) win.destroy();
+    getLogger().error('audio worker renderer gone', {
+      reason: details.reason,
+      exitCode: details.exitCode,
+    });
+
+    const failed = [...this.active];
+    this.active.clear();
+    for (const source of failed) {
+      this.options.onStreamState({
+        source,
+        state: 'error',
+        error: `The audio worker stopped unexpectedly (${details.reason}).`,
+      });
+    }
+  }
+
+  private async createWindow(): Promise<BrowserWindow> {
     const win = new BrowserWindow({
       width: 320,
       height: 240,
       show: false,
       skipTaskbar: true,
-      webPreferences: {
-        preload: join(__dirname, '../preload/audioWorker.js'),
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true,
-      },
+      webPreferences: hardenedWebPreferences(preloadPath('audioWorker')),
     });
 
     // Content protected as a precaution. It should never be visible to
-    // anything, capture included.
+    // anything, capture included. Never turned off (FR-005, TC-004).
     win.setContentProtection(true);
 
     // The same lockdown every other window gets, and it matters more here.
@@ -244,16 +298,30 @@ export class ElectronAudioWorkerHost implements AudioWorkerHandle {
       ),
     );
 
+    win.webContents.on('render-process-gone', (_event, details) => {
+      this.handleRendererGone(win, details);
+    });
+
     win.on('closed', () => {
       if (this.window === win) this.window = null;
     });
 
-    const devServer = process.env.ELECTRON_RENDERER_URL;
-    if (devServer) await win.loadURL(`${devServer}/audio-worker/index.html`);
-    else await win.loadFile(join(__dirname, '../renderer/audio-worker/index.html'));
-
+    // Held from construction rather than from the end of the load, so a
+    // `destroy()` during the load reaches this window instead of missing it.
     this.window = win;
+    try {
+      await loadRenderer(win, 'audio-worker');
+    } catch (err) {
+      // A window whose renderer never loaded is useless and still listens.
+      if (this.window === win) this.window = null;
+      if (!win.isDestroyed()) win.destroy();
+      throw err;
+    }
+    // Destroyed while it loaded, by `destroy()` or a crash. Starting capture
+    // in it now would be a start nobody can stop.
+    if (this.window !== win || win.isDestroyed()) {
+      throw new Error('The audio worker window closed while it loaded.');
+    }
     return win;
   }
 }
-/* v8 ignore stop */

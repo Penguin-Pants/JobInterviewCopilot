@@ -19,6 +19,8 @@ interface Script {
   servesLlm?: boolean;
   sttThrows?: boolean;
   llmThrows?: boolean;
+  healthThrows?: boolean;
+  refreshRejects?: boolean;
 }
 
 function harness(script: Script = {}) {
@@ -45,10 +47,15 @@ function harness(script: Script = {}) {
       },
       refresh: () => {
         calls.push('llm.refresh');
-        return Promise.resolve();
+        return script.refreshRejects ? Promise.reject(new Error('offline')) : Promise.resolve();
       },
     },
-    health: { noteKeySaved: (credentialId) => calls.push(`health.noteKeySaved:${credentialId}`) },
+    health: {
+      noteKeySaved: (credentialId) => {
+        calls.push(`health.noteKeySaved:${credentialId}`);
+        if (script.healthThrows) throw new Error('health registry is not bound');
+      },
+    },
     servesLlm: () => script.servesLlm ?? true,
     warn: (message) => warnings.push(message),
   };
@@ -109,6 +116,29 @@ describe('TC-196 a validated key save invalidates what the old key produced', ()
       'STT catalog cache invalidation could not be persisted',
       'LLM catalog cache invalidation could not be persisted',
     ]);
+  });
+
+  it('reports a stored key as saved when health cannot take the news, and still refreshes', async () => {
+    const { deps, calls, warnings } = harness({ healthThrows: true });
+
+    await expect(saveProviderKey(deps, 'openai', 'sk-new')).resolves.toEqual({ ok: true });
+
+    expect(calls).toEqual(EVERY_STEP);
+    expect(warnings).toEqual(['provider health could not note the saved key']);
+  });
+
+  it('a failed background refresh is warned about, not left unhandled', async () => {
+    const { deps, warnings } = harness({ refreshRejects: true });
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      await expect(saveProviderKey(deps, 'openai', 'sk-new')).resolves.toEqual({ ok: true });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
+    expect(unhandled).not.toHaveBeenCalled();
+    expect(warnings).toEqual(['LLM catalog refresh after a key save failed']);
   });
 
   /** Pinned from source, because `index.ts` cannot be imported by a test. */

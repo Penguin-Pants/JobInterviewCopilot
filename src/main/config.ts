@@ -18,6 +18,8 @@ import {
 } from '../shared/defaults.js';
 import { settingsSchema } from '../shared/ipc.js';
 import { DEFAULT_PROMPT_NAME } from '../shared/prompts.js';
+import { findLlmProvider } from '../shared/registry/llm.js';
+import { findSttProvider } from '../shared/registry/stt.js';
 import type { Settings } from '../shared/types.js';
 
 /**
@@ -241,8 +243,13 @@ function clampNullable(
  * opposite of what TC-033 asks for. A file that `clampSettings` cannot even
  * walk is missing a whole section; the schema then reports it as invalid.
  */
-export function settleStored(raw: UnknownRecord): ReturnType<typeof settingsSchema.safeParse> {
-  const migrated = migrate(raw);
+export function settleStored(
+  raw: UnknownRecord,
+  onReplaced?: Parameters<typeof replaceUnknownProviders>[1],
+): ReturnType<typeof settingsSchema.safeParse> {
+  // A provider this build removed is repaired first, so one stale field does
+  // not quarantine the rest of the file (FR-037).
+  const migrated = replaceUnknownProviders(migrate(raw), onReplaced);
   let candidate: unknown = migrated;
   try {
     candidate = clampSettings(migrated as unknown as Settings);
@@ -339,6 +346,43 @@ export function dropInvalidBackups(
   return next;
 }
 
+const KNOWN_PROVIDER: Record<'stt' | 'llm', (providerId: string) => boolean> = {
+  stt: (id) => findSttProvider(id) !== null,
+  llm: (id) => findLlmProvider(id) !== null,
+};
+
+/**
+ * Replace a stored provider choice that names no registry entry (FR-033, FR-037).
+ *
+ * Runs on the raw, migrated file before the schema check. A file from an older
+ * build can name a provider this build removed. The schema rejects that id, so
+ * without this step one stale field would quarantine every other setting. A
+ * primary falls back to the shipped default choice and a backup is cleared.
+ * Anything that is not a choice object is left for the schema to judge.
+ */
+export function replaceUnknownProviders(
+  raw: UnknownRecord,
+  onReplaced?: (capability: 'stt' | 'llm', slot: 'primary' | 'backup', providerId: string) => void,
+): UnknownRecord {
+  if (!isPlainObject(raw.providers)) return raw;
+  const defaults = defaultSettings().providers;
+  const providers: UnknownRecord = { ...raw.providers };
+  for (const capability of ['stt', 'llm'] as const) {
+    const pair = providers[capability];
+    if (!isPlainObject(pair)) continue;
+    const next: UnknownRecord = { ...pair };
+    for (const slot of ['primary', 'backup'] as const) {
+      const choice = next[slot];
+      if (!isPlainObject(choice) || typeof choice.providerId !== 'string') continue;
+      if (KNOWN_PROVIDER[capability](choice.providerId)) continue;
+      next[slot] = slot === 'primary' ? { ...defaults[capability].primary } : null;
+      onReplaced?.(capability, slot, choice.providerId);
+    }
+    providers[capability] = next;
+  }
+  return { ...raw, providers };
+}
+
 function isPlainObject(v: unknown): v is UnknownRecord {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
@@ -416,8 +460,14 @@ export class ConfigStore {
       defaults: defaultSettings() as unknown as StoreShape,
     });
 
-    // Migrate and clamp whatever survived, then write it back once.
-    const parsed = settleStored(this.store.store as UnknownRecord);
+    // Migrate, repair and clamp whatever survived, then write it back once.
+    const parsed = settleStored(this.store.store as UnknownRecord, (capability, slot, providerId) =>
+      options.onCorrupt?.(
+        this.pathFor(options.dir),
+        `${capability} ${slot} provider "${providerId}" is not in this build's registry and ` +
+          `was ${slot === 'primary' ? 'reset to the default' : 'cleared'} (FR-037)`,
+      ),
+    );
     let settled = parsed.success ? (parsed.data as Settings) : defaultSettings();
 
     // The separation invariant has to hold on load too. A hand-edited or
