@@ -664,8 +664,11 @@ Adapter notes:
   `partial_transcript` maps to `isFinal: false`, `committed_transcript` to
   `isFinal: true` and to `endpoint`. Error frames (`auth_error`,
   `quota_exceeded`, `rate_limited` and the rest) end the session with their
-  class. `close` sends an empty chunk with `commit: true` and waits for the
-  committed transcript (ADR-056).
+  class. A rejected payload (`invalid_request`, `input_error`,
+  `chunk_size_exceeded`) is classed `server`, not `client`: it is not a
+  credential fault, so it must not put the key into `config-required`.
+  `close` sends an empty chunk with `commit: true` and drains until the
+  provider closes or the drain bound passes (ADR-056).
 - `openai` `whisper-1`: the one non-streaming model. Buffers 4000 ms, posts an
   in-memory WAV body, emits one final event per request, never an interim, never
   an endpoint. Held to `NFR-017`. (ADR-022)

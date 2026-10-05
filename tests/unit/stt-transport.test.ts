@@ -337,6 +337,12 @@ describe('provider error frames', () => {
     ['rate_limited', 'rate-limit'],
     ['transcriber_error', 'server'],
     ['error', 'server'],
+    // A bad payload is not a bad credential. Classed as `client` it was
+    // non-retryable, and with no backup the key went to `config-required`,
+    // which a new key cannot fix (ADR-024).
+    ['invalid_request', 'server'],
+    ['input_error', 'server'],
+    ['chunk_size_exceeded', 'server'],
   ] as const)('maps an ElevenLabs %s frame to %s', async (messageType, cls) => {
     const { factory, sockets } = fakeFactory();
     const pending = createElevenLabsProvider(factory).open(ELEVENLABS, 'interviewer', 'k', OPTIONS);

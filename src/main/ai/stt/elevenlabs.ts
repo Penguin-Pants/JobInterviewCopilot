@@ -88,9 +88,13 @@ const ERROR_CLASSES: Record<string, ErrorClass> = {
   transcriber_error: 'server',
   session_time_limit_exceeded: 'server',
   error: 'server',
-  invalid_request: 'client',
-  input_error: 'client',
-  chunk_size_exceeded: 'client',
+  // A rejected payload, not a rejected credential. As `client` it was
+  // non-retryable, so with no backup the key went to `config-required`, which a
+  // new key cannot fix (ADR-024). As `server` the session is reopened and the
+  // health machine retries and degrades instead.
+  invalid_request: 'server',
+  input_error: 'server',
+  chunk_size_exceeded: 'server',
 };
 
 const NOTICES = new Set(['commit_throttled', 'insufficient_audio_activity']);
