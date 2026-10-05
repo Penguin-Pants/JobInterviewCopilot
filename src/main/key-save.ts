@@ -49,7 +49,13 @@ export async function saveProviderKey(
   } catch (error) {
     deps.warn('STT catalog cache invalidation could not be persisted', error);
   }
-  deps.health.noteKeySaved(credentialId);
+  // Guarded for the same reason: the key is stored, so a throw here must not
+  // report a failed save or skip the language-model steps below.
+  try {
+    deps.health.noteKeySaved(credentialId);
+  } catch (error) {
+    deps.warn('provider health could not note the saved key', error);
+  }
   if (deps.servesLlm(credentialId)) {
     // Guarded like the entry above. Unguarded, a failed write threw out of the
     // handler after the key was saved, so the Dashboard reported a stored key
@@ -59,7 +65,11 @@ export async function saveProviderKey(
     } catch (error) {
       deps.warn('LLM catalog cache invalidation could not be persisted', error);
     }
-    void deps.llmCatalog.refresh();
+    // Not awaited, so the save answers at once. Caught, so a refresh that
+    // fails offline is a warning rather than an unhandled rejection.
+    deps.llmCatalog.refresh().catch((error: unknown) => {
+      deps.warn('LLM catalog refresh after a key save failed', error);
+    });
   }
   return result;
 }

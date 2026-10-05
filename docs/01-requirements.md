@@ -363,7 +363,10 @@ supported ceiling of 2 MB and 200 chunks, the change must be reflected in query
 results within 5 seconds of the file system settling. Above the ceiling the
 document is still processed, the 5-second target does not apply, and the
 Dashboard shows progress for that document. The ceiling must be stated in the
-Dashboard, not just in this document.
+Dashboard, not just in this document. Separately, a file above the hard per-file
+cap of 50 MB is not read, nor copied into `kb/` by an import, and a conversion
+that runs longer than 120 seconds is stopped; both end in an `error` row the
+Dashboard shows. (ADR-055)
 
 **FR-069** Every document must belong to exactly one profile. Deleting a profile
 must delete, from disk, its documents in `kb/`, its derived Markdown, its chunk
@@ -609,9 +612,11 @@ carries a monotonic `seq` assigned at append time. A cancelled generation must b
 appended, carrying the bullets already flushed, before the entry for the
 replacing generation is appended. (ADR-018)
 
-**FR-107** Each transcript entry must be written as one call of one complete line
-ending in a newline. Compaction must discard an unparseable final line and
-recover the rest. When both a `.json` and a `.ndjson` exist for one session, the
+**FR-107** Each transcript entry must be written as one complete line ending
+in a newline. A short write must be completed and a failed write undone, so
+the file never holds part of a line followed by another entry (ADR-054). Compaction must discard an unparseable final line and
+recover the rest. A malformed line before the last one must be skipped and
+reported, never fatal (ADR-054). When both a `.json` and a `.ndjson` exist for one session, the
 `.json` wins and the `.ndjson` is deleted. (ADR-018)
 
 **FR-108** A session lock file must prevent a second session across process

@@ -483,6 +483,55 @@ describe('NFR-009 app lifecycle handlers are registered before slow startup work
 });
 
 /**
+ * TC-009 regression: `second-instance` is registered at module load, before
+ * bootstrap has built the config store or the first Dashboard. A second launch
+ * in that window built an orphan Dashboard or read `config` before it existed,
+ * and the rejection was dropped by a bare `void`.
+ */
+describe('TC-009 a second launch waits for bootstrap', () => {
+  const source = (): string => readFileSync('src/main/index.ts', 'utf8');
+
+  it('the second-instance handler awaits bootstrap and catches its own failure', () => {
+    const text = source();
+    const start = text.indexOf("app.on('second-instance'");
+    expect(start).toBeGreaterThan(-1);
+    const handler = text.slice(start, text.indexOf('});', start));
+    expect(handler).toContain('bootstrapReady');
+    expect(handler).toContain('.catch(');
+    expect(handler).not.toMatch(/void focusOrRecreateDashboard\(\);/);
+  });
+
+  it('bootstrap marks itself ready only once the windows exist', () => {
+    const text = source();
+    const bootstrap = text.slice(
+      text.indexOf('async function bootstrap('),
+      text.indexOf('async function startKnowledgeBase('),
+    );
+    const ready = bootstrap.indexOf('resolveBootstrapReady(true)');
+    expect(ready).toBeGreaterThan(-1);
+    expect(ready).toBeGreaterThan(bootstrap.indexOf('await createOverlayWindow('));
+  });
+
+  it('a bootstrap that fails with no window tells the user and quits', () => {
+    const text = source();
+    const failure = text.slice(text.indexOf('void bootstrap().catch('));
+    const body = failure.slice(0, failure.indexOf('async function bootstrap('));
+    expect(body).toContain('resolveBootstrapReady(false)');
+    expect(body).toContain('dialog.showErrorBox(');
+    expect(body).toContain('app.quit()');
+  });
+
+  it('a second launch after a partial bootstrap still brings a window forward', () => {
+    // Bootstrap can fail after a window exists, and the app then stays up. A
+    // launch that did nothing in that state left the user no way back to it.
+    const text = source();
+    const start = text.indexOf("app.on('second-instance'");
+    const handler = text.slice(start, text.indexOf('});', start));
+    expect(handler).toContain('focusAnyWindow()');
+  });
+});
+
+/**
  * TASK-040 regressions found by the Codex review on the pull request. Each is a
  * property of how bootstrap wires the Session Manager, so each is asserted
  * against `index.ts` rather than against a component that cannot see the wiring.
@@ -1072,6 +1121,27 @@ describe('TASK-044 live loop wiring', () => {
     const loop = handler.indexOf('await live.start(');
     expect(pushed).toBeGreaterThan(-1);
     expect(pushed).toBeLessThan(loop);
+  });
+
+  /**
+   * NFR-001, ADR-011. Fired and forgotten, the warm-up raced the loop, so the
+   * first question could still pay the ONNX load. It is awaited after the
+   * state push, which must not wait for it (FR-088), and before the loop.
+   */
+  it('session:start loads the cached model before the loop comes up', () => {
+    const handler = handlerBody('session:start');
+    const pushed = handler.indexOf('pushSessionState()');
+    const warm = handler.indexOf('await rag.warmModel(');
+    const loop = handler.indexOf('await live.start(');
+    expect(handler).not.toContain('void rag.warmModel(');
+    expect(warm, 'the warm-up must be awaited').toBeGreaterThan(-1);
+    expect(pushed).toBeLessThan(warm);
+    expect(warm).toBeLessThan(loop);
+  });
+
+  /** A profile switched to is warmed then, so session start rarely waits at all. */
+  it('profile:activate warms the newly active profile', () => {
+    expect(handlerBody('profile:activate')).toContain('rag.warmModel(id)');
   });
 
   /**

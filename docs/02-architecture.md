@@ -149,6 +149,14 @@ interface ProviderChoice { providerId: string; modelId: string; }
 type CredentialId = 'deepgram' | 'openai' | 'anthropic' | 'elevenlabs';
 ```
 
+A `providerId` must name an entry in that capability's registry (section 2.1a).
+`config:set` rejects an unknown one before anything is written. On load, a
+stored unknown id (for example a provider a later build removed) resets that
+primary to its default, or clears that backup, and is reported like a cleared
+duplicate backup. The rest of the file is kept. A `modelId` is not checked
+against the shipped registry, because the catalogs add account-discovered
+models at runtime (FR-118).
+
 ### 2.1a Provider registries (ADR-022)
 
 Three registries, `src/shared/registry/stt.ts`, `src/shared/registry/llm.ts` and
@@ -268,20 +276,29 @@ The OpenAI key serves OpenAI STT models and OpenAI LLM models alike. There is on
 OpenAI key, not two. The Dashboard must state this, and `CMP-12` keys health by
 credential for exactly this reason (ADR-017).
 
+A `secrets.bin` that exists but cannot be decrypted or parsed reads as "no key
+present". Before the next save writes over it, it is renamed to
+`secrets.bin.corrupt-<epochMillis>` in `userData` and a warning is logged with
+no key material. Writing the one new key over it destroyed every other key in
+the file.
+
 ### 2.3 Profile and documents
 
 **Authority rule (ADR-014, FR-077).** The `kb/` folder is the source of truth for
 which documents exist. `profile.json` is a derived index. A file that appears in
 `kb/` outside `doc:import` is adopted, not ignored. A file that disappears takes
 its record, chunks and vectors with it. A startup reconciliation pass runs before
-the watcher starts and resets any document left in a non-terminal state.
+the watcher starts and resets any document left in a non-terminal state. The
+pass ends by removing derived files that no record owns. When `profile.json`
+exists but cannot be read, every write is refused, so the pass does nothing and
+is tried again after 5 s, 30 s, 2 min and 10 min, then left to the next launch.
 
 ```ts
 interface Profile {
-  id: string;            // uuid v4
+  id: string;            // uuid v4, the folder name; never read from the file
   name: string;
   createdAt: string;     // ISO 8601
-  kbPath: string;        // absolute
+  kbPath: string;        // absolute, recomputed on every read
   documents: DocumentRecord[];
 }
 
@@ -289,9 +306,9 @@ interface DocumentRecord {
   id: string;                  // uuid v4
   profileId: string;
   originalFileName: string;
-  originalPath: string;        // inside kb/
+  originalPath: string;        // kb/<originalFileName>, recomputed on every read
   sourceFormat: 'md' | 'pdf' | 'docx';
-  derivedMarkdownPath: string | null;   // null when sourceFormat === 'md'
+  derivedMarkdownPath: string | null;   // null when sourceFormat === 'md'; else recomputed on read
   docType: DocType;
   docTypeSource: 'auto' | 'user';       // a user override is never re-guessed
   contentHash: string;                  // sha256 of original bytes
@@ -410,10 +427,12 @@ first turn happened to be spoken.
 
 Four further rules settled while implementing `TASK-040`:
 
-- **Only the final line of an `.ndjson` may be discarded.** A torn tail is the
-  crash signature. A malformed line anywhere else means the writer did not write
-  whole lines, which is a defect rather than a crash, so it is raised rather
-  than silently dropped.
+- **Only the final line of an `.ndjson` is discarded silently.** A torn tail is
+  the crash signature. A malformed line anywhere else is skipped, counted and
+  reported through `onError`, so compaction and recovery always complete. The
+  writer keeps lines whole: it finishes a short write and truncates a failed one
+  back to the last whole line (ADR-054, supersedes the `TASK-040` rule that
+  raised it).
 - **Compaction writes the `.json` through a temporary file and renames it.** A
   crash between writing the `.json` and deleting the `.ndjson` would otherwise
   leave a half-written `.json` whose source had already gone. The rename is
@@ -1473,6 +1492,24 @@ bounded retention, because unbounded accumulation, not copying, is what would pu
 by copy, every reference is released once its chunk is handed on, and deliberate
 buffering is bounded by a declared constant.
 
+**Ordering and recovery, added by the audio capture audit (2026-10-04).**
+
+- The worker runs `CH-301` and `CH-302` on one queue, in arrival order. Each
+  message also bumps a per-source generation on receipt, and a start re-checks
+  it after every await. A stop that lands during acquisition or the worklet load
+  therefore releases the stream and the context, and two overlapping starts
+  leave one graph (`NFR-002`, `FR-045`).
+- A stop reports `idle` for every graph, whether or not the flush or the
+  context close fails (`FR-046`).
+- `CMP-03a`'s host builds one worker window at a time and destroys a window
+  whose renderer did not load. When the worker renderer dies, the host reports
+  each stream it was running as `error`. The supervisor's restart path then
+  builds a new window. A restart that fails leaves the stream in `error`, and it
+  counts toward `MAX_STREAM_RESTARTS` (`FR-045`).
+- A crashed overlay or Dashboard renderer is reloaded, at most three times per
+  window, and then the window is closed. The overlay reload takes the gate's
+  `did-start-loading` path, so the consent reminder is shown again (`FR-008`).
+
 ---
 
 ### 4.4 Runtime LLM catalog channels
@@ -2050,7 +2087,9 @@ src/
       prompt.ts        TASK-031, section 6 assembled once for both providers
     overlay-gate.ts    FR-008, ADR-016, the overlay readiness buffer
     rag.ts             CMP-06 facade
-    rag/convert.ts     TASK-020, pdf-parse and mammoth to Markdown
+    rag/convert.ts     TASK-020, runs each conversion in a worker thread (ADR-055)
+    rag/convert-worker.ts  TASK-020, the worker entry, bundled as its own file
+    rag/extract.ts     TASK-020, pdf-parse and mammoth to Markdown
     rag/chunk.ts       TASK-021, pure and deterministic
     rag/embed.ts       TASK-022, @xenova/transformers, cache key, model gate
     rag/store.ts       TASK-020/022/024, profiles, chunks, vectors, the top-k scan

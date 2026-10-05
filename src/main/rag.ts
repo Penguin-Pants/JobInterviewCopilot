@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { copyFile, readFile, readdir, stat } from 'node:fs/promises';
+import { copyFile, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { existsSync, mkdirSync } from 'node:fs';
 import { basename, extname, join, resolve } from 'node:path';
-import { KB_CEILING } from '../shared/defaults.js';
+import { KB_INGEST_LIMITS } from '../shared/defaults.js';
 import type { DocType, DocumentRecord, DocumentState, Profile } from '../shared/types.js';
 import { guessDocType } from './rag/autotag.js';
 import { CHUNKER_VERSION, chunkMarkdown, ensureHeadings } from './rag/chunk.js';
@@ -12,6 +12,8 @@ import {
   convertToMarkdown,
   sourceFormatFor,
   SUPPORTED_EXTENSIONS,
+  type ConversionResult,
+  type SourceFormat,
 } from './rag/convert.js';
 import {
   contentHashFor,
@@ -85,7 +87,33 @@ export interface RagEngineOptions {
   onError?: (message: string, detail: unknown) => void;
   /** Debounce for the ingest queue. Lowered in tests (FR-068). */
   debounceMs?: number;
+  /** Injected so a test can hold or stall a conversion. Defaults to the real converter. */
+  convert?: typeof convertToMarkdown;
+  /** How long one conversion may run before its document fails. Lowered in tests (ADR-055). */
+  conversionTimeoutMs?: number;
+  /** Injected so a test fires the reconciliation retry by hand (ADR-014). */
+  timers?: Partial<EngineTimers>;
 }
+
+/** The two timer calls the engine makes, injectable like the trigger's. */
+export interface EngineTimers {
+  setTimeout(fn: () => void, ms: number): unknown;
+  clearTimeout(handle: unknown): void;
+}
+
+const REAL_TIMERS: EngineTimers = {
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (handle) => {
+    clearTimeout(handle as ReturnType<typeof setTimeout>);
+  },
+};
+
+/**
+ * The waits before each new reconciliation attempt for a profile whose index
+ * could not be read (ADR-014). Bounded: an index that stays unreadable for
+ * about a quarter of an hour is left to the next launch, and the log says so.
+ */
+const RECONCILE_RETRY_MS = [5_000, 30_000, 120_000, 600_000] as const;
 
 /**
  * The knowledge base engine (CMP-06, TASK-020 to TASK-025).
@@ -104,6 +132,10 @@ export class RagEngine {
   private readonly modelsRoot: string;
   /** Cached chunk sets per profile, so a query is not a directory scan (TC-078). */
   private readonly cache = new Map<string, ChunkSet[]>();
+  /** The cache rebuild running per profile. A query awaits it rather than reading again. */
+  private readonly rebuilds = new Map<string, Promise<ChunkSet[]>>();
+  /** Bumped by every invalidation, so a rebuild that raced one reads again. */
+  private readonly generations = new Map<string, number>();
   /**
    * In-flight ingests, keyed by file path.
    *
@@ -115,8 +147,12 @@ export class RagEngine {
    * PDF, whose parse outlasts the watcher's 500 ms debounce.
    */
   private readonly inFlight = new Map<string, Promise<void>>();
+  private readonly timers: EngineTimers;
+  /** The pending reconciliation retry per profile, and how many came before it. */
+  private readonly retries = new Map<string, { handle: unknown; attempt: number }>();
 
   constructor(private readonly options: RagEngineOptions) {
+    this.timers = { ...REAL_TIMERS, ...options.timers };
     this.modelsRoot = join(options.userDataDir, 'models');
     mkdirSync(this.modelsRoot, { recursive: true });
 
@@ -176,13 +212,18 @@ export class RagEngine {
   }
 
   async stop(): Promise<void> {
+    for (const profileId of [...this.retries.keys()]) this.cancelRetry(profileId);
     this.queue.dispose();
     await this.watcher.closeAll();
   }
 
-  /** Resolves once no file is queued or being processed. Used by tests and shutdown. */
+  /**
+   * Resolves once no file is queued or being processed, and the query cache
+   * those ingests cleared has been rebuilt. Used by tests and shutdown.
+   */
   async drain(): Promise<void> {
     await this.queue.drain();
+    while (this.rebuilds.size > 0) await Promise.allSettled([...this.rebuilds.values()]);
   }
 
   /* ---------------------------------------------------------------- *
@@ -206,9 +247,9 @@ export class RagEngine {
    * never in a generic error and never in a hang: the caller can always show a
    * sentence and a retry button.
    *
-   * Session start never calls this. A live session may start with no model;
-   * retrieval then returns an empty chunk set and the prompt is built from the
-   * question and candidate context alone (ADR-011).
+   * Session start never downloads through this. It calls {@link warmModel},
+   * which only loads a model already on disk. A live session may start with no
+   * model at all (ADR-011).
    */
   async ensureModelReady(options: { userInitiated?: boolean } = {}): Promise<ModelDownloadState> {
     // A failed attempt is terminal until someone asks again. Ingestion calls
@@ -231,6 +272,23 @@ export class RagEngine {
       this.setModelState({ kind: 'unavailable', reason: (err as Error).message });
     }
     return this.modelState;
+  }
+
+  /**
+   * Load a cached model into memory before the first question (NFR-001, ADR-011).
+   *
+   * `index.ts` calls this at startup, on `profile:activate`, and at session
+   * start, where it is awaited before the live loop starts. Reconciliation never loads the model when every document is a
+   * cache hit, so without this the first question's `embed` loaded ONNX and the
+   * tokenizer inside the question-to-suggestion budget.
+   *
+   * Never downloads: a model that is not on disk is left to the Dashboard's
+   * retry action (ADR-026). Never throws, so a caller may await it or not.
+   */
+  async warmModel(profileId: string): Promise<void> {
+    if (!this.embedder.isReady()) return;
+    if (!this.store.get(profileId)?.documents.some((d) => d.state === 'ready')) return;
+    await this.ensureModelReady();
   }
 
   /* ---------------------------------------------------------------- *
@@ -264,14 +322,14 @@ export class RagEngine {
    * would queue a removal against a profile that no longer exists.
    */
   async deleteProfile(profileId: string): Promise<void> {
+    this.cancelRetry(profileId);
     await this.watcher.unwatch(profileId);
-    this.cache.delete(profileId);
     // A profile that does not exist, and an id that is not a uuid at all, are
     // both a no-op rather than a throw: deleting something already gone is the
     // caller getting what they asked for. `store.delete` still refuses an
     // unsafe id outright, so this is a contract, not the guard.
-    if (!this.store.get(profileId)) return;
-    this.store.delete(profileId);
+    if (this.store.get(profileId)) this.store.delete(profileId);
+    this.invalidate(profileId);
   }
 
   /* ---------------------------------------------------------------- *
@@ -309,21 +367,49 @@ export class RagEngine {
         continue;
       }
 
-      const target = await this.uniqueKbPath(profileId, fileName);
-      try {
-        // COPYFILE_EXCL, so the copy fails rather than overwriting. `existsSync`
-        // in `uniqueKbPath` is a check, not a claim: two concurrent imports of
-        // the same filename both miss and pick the same target, and a plain
-        // copy would silently replace the first import with the second, which is
-        // the outcome that helper exists to prevent.
-        await copyFile(source, target, constants.COPYFILE_EXCL);
-      } catch (err) {
+      // Checked on the source, before the copy. `processFile` checks again,
+      // but by then a multi-gigabyte file was already copied into userData,
+      // which is the cost the cap exists to avoid (ADR-055). A stat failure is
+      // left to the copy below, which reports its errno.
+      if (await isAboveFileCap(source)) {
+        records.push(
+          this.storeErrorRecord(
+            profileId,
+            fileName,
+            join(this.store.kbDir(profileId), fileName),
+            tooLargeMessage(),
+          ),
+        );
+        continue;
+      }
+
+      // COPYFILE_EXCL, so the copy fails rather than overwriting. `existsSync`
+      // in `uniqueKbPath` is a check, not a claim: two concurrent imports of the
+      // same filename both miss and pick the same target, and a plain copy would
+      // silently replace the first import with the second. EEXIST is therefore
+      // the other import winning that name, so this one takes the next free
+      // name rather than reporting an error. Bounded, so a folder that keeps
+      // refilling cannot spin this loop forever.
+      let target = '';
+      let copyError: unknown = null;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        target = await this.uniqueKbPath(profileId, fileName);
+        try {
+          await copyFile(source, target, constants.COPYFILE_EXCL);
+          copyError = null;
+          break;
+        } catch (err) {
+          copyError = err;
+          if (errnoOf(err) !== 'EEXIST') break;
+        }
+      }
+      if (copyError !== null) {
         records.push(
           this.storeErrorRecord(
             profileId,
             basename(target),
             target,
-            `Could not copy the file into the knowledge base: ${(err as Error).message}`,
+            `Could not copy the file into the knowledge base (${errnoOf(copyError)}).`,
           ),
         );
         continue;
@@ -404,17 +490,20 @@ export class RagEngine {
       this.options.onError?.('ingest failed', { err, profileId, path });
       // Best effort: leave a row the user can see and retry, rather than a
       // document silently stuck mid-pipeline until the next relaunch (FR-079).
+      // Update-only: with no record, the document was deleted mid-ingest or
+      // its very first write failed, and neither should get a row back. The
+      // errno, not the message: a Node fs message embeds the absolute path.
       try {
         const format = sourceFormatFor(basename(path));
-        if (format) {
-          const existing = this.findByPath(profileId, path);
+        const existing = this.findByPath(profileId, path);
+        if (format && existing) {
           this.fail(
             profileId,
-            existing?.id ?? randomUUID(),
+            existing.id,
             basename(path),
             path,
             format,
-            `Ingest failed: ${(err as Error).message}`,
+            `Ingest failed (${errnoOf(err)}).`,
           );
         }
       } catch {
@@ -427,26 +516,41 @@ export class RagEngine {
     const fileName = basename(path);
     const format = sourceFormatFor(fileName);
     if (!format) return;
-    if (!existsSync(path)) {
-      await this.removeByPath(profileId, path);
-      return;
-    }
 
     const existing = this.findByPath(profileId, path);
     const docId = existing?.id ?? randomUUID();
+    // Only a file with no record when this pass began may get one. Every later
+    // write is update-only, so a document the user deletes while this pass
+    // awaits stays deleted instead of being inserted again (FR-077). A file
+    // with no record cannot be deleted from the Dashboard, so nothing can race
+    // its first insert.
+    const adopt = existing === null;
 
+    // Stat, then read once, then convert those same bytes. The stat keeps a
+    // multi-gigabyte file out of memory entirely, and a second read inside the
+    // converter could see a different file than the one hashed below, so the
+    // cache key would describe content that was never converted (ADR-055).
     let bytes: Buffer;
     try {
+      if ((await stat(path)).size > KB_INGEST_LIMITS.maxFileBytes) {
+        this.fail(profileId, docId, fileName, path, format, tooLargeMessage(), adopt);
+        return;
+      }
       bytes = await readFile(path);
     } catch (err) {
-      this.fail(
-        profileId,
-        docId,
-        fileName,
-        path,
-        format,
-        `Could not read the file: ${(err as Error).message}`,
-      );
+      // Gone is not a failure: the file was deleted, so its record goes too.
+      if (errnoOf(err) === 'ENOENT') {
+        await this.removeByPath(profileId, path);
+        return;
+      }
+      // The errno, not the message: a Node fs message embeds the absolute path.
+      const message = `Could not read the file (${errnoOf(err)}).`;
+      this.fail(profileId, docId, fileName, path, format, message, adopt);
+      return;
+    }
+    // The file can grow between the stat and the read.
+    if (bytes.byteLength > KB_INGEST_LIMITS.maxFileBytes) {
+      this.fail(profileId, docId, fileName, path, format, tooLargeMessage(), adopt);
       return;
     }
 
@@ -454,13 +558,12 @@ export class RagEngine {
 
     // Cache hit: same bytes, same chunker, same model, and a readable pair on
     // disk. Zero embedding calls (FR-067, TC-069).
-    if (
-      existing &&
-      existing.state === 'ready' &&
-      existing.embeddingKey === embeddingKey &&
-      this.store.readChunkSet(profileId, docId) !== null
-    ) {
-      return;
+    if (existing && existing.state === 'ready' && existing.embeddingKey === embeddingKey) {
+      const cached = await this.store.readChunkSet(profileId, docId);
+      if (cached !== null) {
+        this.adoptCachedChunks(profileId, docId, path, embeddingKey, cached);
+        return;
+      }
     }
 
     // The tokenizer and the vectors both need the model, so ingestion waits for
@@ -468,22 +571,31 @@ export class RagEngine {
     // pass once the model arrives, which is why this is not an error (ADR-011).
     const model = await this.ensureModelReady();
     if (model.kind !== 'ready') {
-      this.publish(profileId, {
-        ...this.baseRecord(profileId, docId, fileName, path, format, existing),
-        state: 'pending',
-        errorMessage: null,
-      });
+      this.publish(
+        profileId,
+        {
+          ...this.baseRecord(profileId, docId, fileName, path, format, existing),
+          state: 'pending',
+          errorMessage: null,
+        },
+        adopt,
+      );
       return;
     }
 
-    // A null publish means the profile was deleted while this ingest ran. Stop
-    // rather than carrying on and writing derived files nothing owns (FR-069).
+    // A null publish means the profile, or this document, was deleted while
+    // this ingest ran. Stop rather than writing derived files nothing owns
+    // (FR-069, FR-077).
     if (
-      !this.publish(profileId, {
-        ...this.baseRecord(profileId, docId, fileName, path, format, existing),
-        state: 'converting',
-        errorMessage: null,
-      })
+      !this.publish(
+        profileId,
+        {
+          ...this.baseRecord(profileId, docId, fileName, path, format, existing),
+          state: 'converting',
+          errorMessage: null,
+        },
+        adopt,
+      )
     ) {
       return;
     }
@@ -491,32 +603,40 @@ export class RagEngine {
     let markdown: string;
     let extractionQuality: DocumentRecord['extractionQuality'];
     try {
-      const converted = await convertToMarkdown(path, format);
+      const converted = await this.convertWithTimeout(bytes, format);
       markdown = ensureHeadings(converted.markdown);
       extractionQuality = converted.extractionQuality;
     } catch (err) {
-      const message =
-        err instanceof ConversionError
-          ? err.message
-          : `Conversion failed: ${(err as Error).message}`;
+      if (!(err instanceof ConversionError)) {
+        this.options.onError?.('conversion failed', { err, profileId });
+      }
+      const message = err instanceof ConversionError ? err.message : 'Conversion failed.';
       this.fail(profileId, docId, fileName, path, format, message);
       return;
     }
 
+    // Re-read after the conversion's await. A delete during it must end this
+    // pass here, before a derived file is written for a record that is gone,
+    // and an override set during it must not be guessed over.
+    const converted = this.findByPath(profileId, path);
+    if (!converted) return;
+
     // A user override is never re-guessed, not even after the file changes
     // (FR-064, FR-079, TC-073).
     const docType: DocType =
-      existing?.docTypeSource === 'user' ? existing.docType : guessDocType(fileName, markdown);
+      converted.docTypeSource === 'user' ? converted.docType : guessDocType(fileName, markdown);
 
+    // No await between the check above and this write, so no delete can land
+    // between them.
     const derivedMarkdownPath =
       format === 'md' ? null : this.store.writeDerivedMarkdown(profileId, docId, markdown);
     if (format !== 'md' && derivedMarkdownPath === null) return; // Deleted mid-ingest.
 
     if (
       !this.publish(profileId, {
-        ...this.baseRecord(profileId, docId, fileName, path, format, existing),
+        ...this.baseRecord(profileId, docId, fileName, path, format, converted),
         docType,
-        docTypeSource: existing?.docTypeSource ?? 'auto',
+        docTypeSource: converted.docTypeSource,
         derivedMarkdownPath,
         extractionQuality,
         state: 'embedding',
@@ -541,28 +661,24 @@ export class RagEngine {
         chunks.map((c) => c.text),
         info.dimensions,
       );
-      // Re-read rather than reusing the snapshot taken before three awaits.
-      // During a 30-second PDF the user can set the doc type, or delete the
-      // document outright, and the stale snapshot silently overwrote both: the
-      // override reverted to the guess, and a deleted document reappeared as
-      // `ready` with no file behind it and its chunks served by `query`.
+      // Re-read rather than reusing the snapshot taken before the embed. During
+      // a 30-second PDF the user can set the doc type, or delete the document
+      // outright, and the stale snapshot silently overwrote both: the override
+      // reverted to the guess, and a deleted document reappeared as `ready`
+      // with no file behind it and its chunks served by `query`.
       const current = this.findByPath(profileId, path);
-      // `!current` alone, not `!current && existing`. By this point the pipeline
-      // has published at least the `embedding` record, so a missing record means
-      // it was deleted, whether or not one existed when the ingest began. Gating
-      // on `existing` meant a first ingest could not be cancelled at all: the
-      // document came back `ready`, its kb/ file gone and its chunks queryable
-      // (FR-077).
       if (!current) return;
 
-      if (!this.store.writeChunkSet(profileId, docId, chunks, vectors)) return;
-      this.cache.delete(profileId);
-
-      const settledType = current?.docTypeSource === 'user' ? current.docType : docType;
+      // The chunks carry the type known now, so an override that landed during
+      // the embed needs no second write. Vectors do not depend on it (FR-064).
+      const settledType = current.docTypeSource === 'user' ? current.docType : docType;
+      const settled =
+        settledType === docType ? chunks : chunks.map((c) => ({ ...c, docType: settledType }));
+      if (!this.store.writeChunkSet(profileId, docId, settled, vectors)) return;
       this.publish(profileId, {
-        ...this.baseRecord(profileId, docId, fileName, path, format, current ?? existing),
+        ...this.baseRecord(profileId, docId, fileName, path, format, current),
         docType: settledType,
-        docTypeSource: current?.docTypeSource ?? 'auto',
+        docTypeSource: current.docTypeSource,
         derivedMarkdownPath,
         extractionQuality,
         contentHash: contentHashFor(bytes),
@@ -571,27 +687,15 @@ export class RagEngine {
         state: 'ready',
         errorMessage: null,
       });
-
-      // The chunks were written with the type known before the override landed.
-      if (settledType !== docType) {
-        const written = this.store.readChunkSet(profileId, docId);
-        if (written) {
-          this.store.writeChunkSet(
-            profileId,
-            docId,
-            written.chunks.map((chunk) => ({ ...chunk, docType: settledType })),
-            written.vectors,
-          );
-          this.cache.delete(profileId);
-        }
-      }
+      // After the `ready` record, not before: the rebuild reads which documents
+      // are ready, and started earlier it cached this one's absence.
+      this.invalidate(profileId);
     } catch (err) {
       // A half-written pair must not outlive the failure that produced it, and
       // neither must the memoized copy: `query` returned the previous content of
       // a document that is now `error` with no files on disk, for the rest of
       // the process.
       this.store.deleteChunkSet(profileId, docId);
-      this.cache.delete(profileId);
       this.fail(
         profileId,
         docId,
@@ -600,6 +704,74 @@ export class RagEngine {
         format,
         `Embedding failed: ${(err as Error).message}`,
       );
+    }
+  }
+
+  /**
+   * Make a cached pair's chunk metadata name this profile and this document.
+   *
+   * A profile folder copied under a new id has its records rebased on read,
+   * but its `chunks.json` still names the original profile. The bytes and the
+   * model match, so the pair is a cache hit, and `query` on the copy returned
+   * chunks that claimed to belong to the original. Only metadata is rewritten:
+   * the vectors do not depend on either id, so nothing is re-embedded (FR-067,
+   * FR-069).
+   */
+  private adoptCachedChunks(
+    profileId: string,
+    docId: string,
+    path: string,
+    embeddingKey: string,
+    cached: ChunkSet,
+  ): void {
+    if (cached.chunks.every((c) => c.profileId === profileId && c.docId === docId)) return;
+    // Re-read after the chunk read's await, as `setDocType` does. A delete or a
+    // re-embed during it must not be overwritten with this older pair.
+    const current = this.findByPath(profileId, path);
+    if (!current || current.id !== docId || current.embeddingKey !== embeddingKey) return;
+    const chunks = cached.chunks.map((chunk, index) => ({
+      ...chunk,
+      id: `${docId}#${index}`,
+      profileId,
+      docId,
+      docType: current.docType,
+    }));
+    if (this.store.writeChunkSet(profileId, docId, chunks, cached.vectors)) {
+      this.invalidate(profileId);
+    }
+  }
+
+  /**
+   * Convert, failing rather than waiting forever (ADR-055).
+   *
+   * A parse with no bound left its document in `converting` for the rest of the
+   * process, and `inFlight` queued every later pass for that path behind it. On
+   * timeout the signal aborts, and the real converter terminates the worker
+   * thread the parse runs in, so no parse runs on after its document failed or
+   * beside a retry. The timer runs in this thread and the parse does not, so a
+   * busy parse cannot delay it. The race stays for an injected converter that
+   * ignores the signal.
+   */
+  private async convertWithTimeout(bytes: Buffer, format: SourceFormat): Promise<ConversionResult> {
+    const limitMs = this.options.conversionTimeoutMs ?? KB_INGEST_LIMITS.conversionTimeoutMs;
+    const controller = new AbortController();
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        const seconds = Math.max(1, Math.round(limitMs / 1000));
+        // Rejected before the abort, so this reason wins the race over
+        // whatever the stopped converter rejects with.
+        reject(
+          new ConversionError(`Conversion took too long (over ${seconds} s) and was stopped.`),
+        );
+        controller.abort();
+      }, limitMs);
+    });
+    try {
+      const convert = this.options.convert ?? convertToMarkdown;
+      return await Promise.race([convert(bytes, format, controller.signal), timeout]);
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -634,7 +806,7 @@ export class RagEngine {
     const record = this.findByPath(profileId, path);
     if (!record) return;
     this.store.removeDocument(profileId, record.id);
-    this.cache.delete(profileId);
+    this.invalidate(profileId);
     // No CH-213 push. Its `state` is a `DocumentState`, and a removed document
     // has none: reporting `ready` told the Dashboard to draw a row for a
     // document that no longer exists. The Dashboard re-reads `profile:list`.
@@ -673,7 +845,7 @@ export class RagEngine {
       docType = assignment;
     }
 
-    // Re-read after the await. `upsertDocument` replaces the whole record, so
+    // Re-read after the await. `updateDocument` replaces the whole record, so
     // writing back the copy read before `readDocumentMarkdown` sent a document
     // that had just finished embedding back to `state: 'embedding'` with
     // `chunkCount: 0`, where it span forever and contributed to no query until
@@ -681,23 +853,31 @@ export class RagEngine {
     const latest = this.store.findDocument(profileId, docId);
     if (!latest) return null; // Deleted while we were reading its Markdown.
 
-    const updated = this.store.upsertDocument({
+    const updated = this.store.updateDocument({
       ...latest,
       docType,
       docTypeSource: assignment === 'auto' ? 'auto' : 'user',
     });
+    if (!updated) return null;
 
-    const set = this.store.readChunkSet(profileId, docId);
-    if (set) {
+    const set = await this.store.readChunkSet(profileId, docId);
+    // Checked again after the read. A delete during it must not get its chunk
+    // files back, and a re-embed during it wrote a newer pair, already carrying
+    // this type, that the stale one read here must not replace. The type is
+    // compared too: a second type change during the read keeps the embedding
+    // key, and this older request finishing last wrote its type into the
+    // chunks while the record showed the newer one. That request writes the
+    // chunks itself (FR-064, FR-079).
+    const now = this.store.findDocument(profileId, docId);
+    if (set && now && now.embeddingKey === updated.embeddingKey && now.docType === docType) {
       this.store.writeChunkSet(
         profileId,
         docId,
         set.chunks.map((chunk) => ({ ...chunk, docType })),
         set.vectors,
       );
-      this.cache.delete(profileId);
+      this.invalidate(profileId);
     }
-    if (!updated) return null;
     return updated;
   }
 
@@ -734,7 +914,7 @@ export class RagEngine {
     // next reconciliation drops anyway because `kb/` is the authority.
     if (!existsSync(record.originalPath)) {
       return (
-        this.store.upsertDocument({
+        this.store.updateDocument({
           ...record,
           state: 'error',
           errorMessage:
@@ -751,10 +931,9 @@ export class RagEngine {
     const record = this.store.findDocument(profileId, docId);
     if (!record) return;
     this.store.removeDocument(profileId, docId);
-    this.cache.delete(profileId);
+    this.invalidate(profileId);
     // The file itself goes too: `kb/` is the authority, so leaving it there
     // would have the watcher adopt it straight back (ADR-014, FR-077).
-    const { rm } = await import('node:fs/promises');
     await rm(record.originalPath, { force: true });
   }
 
@@ -780,6 +959,15 @@ export class RagEngine {
   async reconcile(profileId: string): Promise<void> {
     const profile = this.store.get(profileId);
     if (!profile) return;
+    // An index that exists but cannot be read refuses every write, so this
+    // pass would convert and embed every document only to discard each
+    // result, and the watcher's `ignoreInitial` meant nothing retried them for
+    // the rest of the process. Wait and run the pass again instead (ADR-014).
+    if (this.store.isIndexUnreadable(profileId)) {
+      this.scheduleRetry(profileId);
+      return;
+    }
+    this.cancelRetry(profileId);
     const kbDir = this.store.kbDir(profileId);
     mkdirSync(kbDir, { recursive: true });
 
@@ -818,7 +1006,7 @@ export class RagEngine {
         this.store.removeDocument(profileId, record.id);
       }
     }
-    this.cache.delete(profileId);
+    this.invalidate(profileId);
 
     const remaining = this.store.get(profileId)?.documents ?? [];
     const known = new Map(remaining.map((d) => [normalizePath(d.originalPath), d]));
@@ -843,10 +1031,43 @@ export class RagEngine {
       // exactly what `processFile`'s cache check needs in order to decide. An
       // unchanged file still performs zero embedding calls (FR-067).
       if (record.state !== 'ready') {
-        this.store.upsertDocument({ ...record, state: 'pending', errorMessage: null });
+        this.store.updateDocument({ ...record, state: 'pending', errorMessage: null });
       }
       await this.processFile(profileId, path);
     }
+
+    // Last, once every adoption has stored its record (FR-069, ADR-014).
+    this.store.pruneDerived(profileId);
+  }
+
+  /** Run {@link reconcile} again later for a profile whose index could not be read. */
+  private scheduleRetry(profileId: string): void {
+    const previous = this.retries.get(profileId);
+    if (previous?.handle != null) return; // One is already waiting.
+    const attempt = previous?.attempt ?? 0;
+    const delay = RECONCILE_RETRY_MS[attempt];
+    if (delay === undefined) {
+      this.retries.delete(profileId);
+      this.options.onError?.('the profile index stayed unreadable, so it was not reconciled', {
+        profileId,
+      });
+      return;
+    }
+    const handle = this.timers.setTimeout(() => {
+      // Cleared first, so the pass below can schedule the next attempt.
+      this.retries.set(profileId, { handle: null, attempt: attempt + 1 });
+      this.reconcile(profileId).catch((err: unknown) => {
+        this.options.onError?.('could not reconcile a profile', { err, profileId });
+      });
+    }, delay);
+    this.retries.set(profileId, { handle, attempt });
+  }
+
+  /** Cancel a profile's pending retry and forget its attempt count. */
+  private cancelRetry(profileId: string): void {
+    const retry = this.retries.get(profileId);
+    if (retry?.handle != null) this.timers.clearTimeout(retry.handle);
+    this.retries.delete(profileId);
   }
 
   /* ---------------------------------------------------------------- *
@@ -873,17 +1094,24 @@ export class RagEngine {
    */
   async query(profileId: string, text: string, k = 3): Promise<RetrievedChunk[]> {
     if (text.trim().length === 0) return [];
-    const candidates = this.chunkSetsFor(profileId);
+    let candidates: ChunkSet[];
+    try {
+      candidates = await this.chunkSetsFor(profileId);
+    } catch (err) {
+      this.options.onError?.('query failed: the notes could not be read', err);
+      throw new RetrievalUnavailableError('the notes could not be read', err);
+    }
     // Nothing to search is genuinely empty, and it is checked first so a
     // profile with no documents never depends on the model at all (TC-077).
     if (candidates.length === 0) return [];
 
-    // Never loaded on the live path. `embed` loads the model on demand, and if
-    // the cache was cleared since these documents were embedded, the first
-    // question of an interview would start a 90 MB download inside the
-    // question-to-suggestion budget. Reaching here means ready documents exist
-    // and their notes cannot be searched, which is a failure rather than an
-    // empty result (ADR-011, ADR-036).
+    // Never downloaded on the live path. If the model cache was cleared since
+    // these documents were embedded, `embed` would start a 90 MB download
+    // inside the question-to-suggestion budget. Reaching here means ready
+    // documents exist and their notes cannot be searched, which is a failure
+    // rather than an empty result (ADR-011, ADR-036). `isReady` is also true for
+    // a model that is only on disk, which `embed` then loads; `warmModel` runs
+    // at startup and at session start so that load is normally done already.
     if (!this.embedder.isReady()) {
       this.options.onError?.('query failed: the embedding model is not available', {
         state: this.modelState,
@@ -911,24 +1139,54 @@ export class RagEngine {
    * Loaded once per profile and held until an ingest invalidates it. Reading
    * 5000 chunks from disk on every question would put file IO inside the
    * question-to-suggestion latency budget (NFR-001, TC-078).
+   *
+   * Concurrent callers share one rebuild. A rebuild that an invalidation raced
+   * reads again before it resolves, so no caller gets sets read before the
+   * change that invalidated them.
    */
-  private chunkSetsFor(profileId: string): ChunkSet[] {
+  private chunkSetsFor(profileId: string): Promise<ChunkSet[]> {
     const cached = this.cache.get(profileId);
-    if (cached) return cached;
+    if (cached) return Promise.resolve(cached);
+    const running = this.rebuilds.get(profileId);
+    if (running) return running;
+    const rebuild = this.rebuildChunkSets(profileId).finally(() => {
+      if (this.rebuilds.get(profileId) === rebuild) this.rebuilds.delete(profileId);
+    });
+    this.rebuilds.set(profileId, rebuild);
+    return rebuild;
+  }
 
-    const profile = this.store.get(profileId);
-    if (!profile) return [];
-
-    const sets: ChunkSet[] = [];
-    for (const record of profile.documents) {
-      if (record.state !== 'ready') continue;
-      const set = this.store.readChunkSet(profileId, record.id);
-      // A pair that fails its row count is skipped rather than half-served. The
-      // next reconciliation pass re-embeds it (FR-078, TC-141).
-      if (set) sets.push(set);
+  private async rebuildChunkSets(profileId: string): Promise<ChunkSet[]> {
+    for (;;) {
+      const generation = this.generations.get(profileId) ?? 0;
+      const sets: ChunkSet[] = [];
+      for (const record of this.store.get(profileId)?.documents ?? []) {
+        if (record.state !== 'ready') continue;
+        const set = await this.store.readChunkSet(profileId, record.id);
+        // A pair that fails its row count is skipped rather than half-served.
+        // The next reconciliation pass re-embeds it (FR-078, TC-141).
+        if (set) sets.push(set);
+      }
+      if (generation !== (this.generations.get(profileId) ?? 0)) continue;
+      if (this.store.get(profileId)) this.cache.set(profileId, sets);
+      return sets;
     }
-    this.cache.set(profileId, sets);
-    return sets;
+  }
+
+  /**
+   * Drop a profile's cached chunk sets and rebuild them now, off the live path.
+   *
+   * Clearing alone left the rebuild to the next question, which then decoded
+   * every vector file inside the question-to-suggestion budget (NFR-001).
+   */
+  private invalidate(profileId: string): void {
+    this.cache.delete(profileId);
+    this.generations.set(profileId, (this.generations.get(profileId) ?? 0) + 1);
+    this.chunkSetsFor(profileId).catch((err: unknown) => {
+      // Nothing is cached, so the next query reads again and reports the
+      // failure itself (ADR-036).
+      this.options.onError?.('could not rebuild the knowledge base cache', { err, profileId });
+    });
   }
 
   /* ---------------------------------------------------------------- *
@@ -971,9 +1229,15 @@ export class RagEngine {
     };
   }
 
-  /** Store a record and report its state on CH-213. */
-  private publish(profileId: string, record: DocumentRecord): DocumentRecord | null {
-    const stored = this.store.upsertDocument(record);
+  /**
+   * Store a record and report its state on CH-213.
+   *
+   * `adopt` inserts a record that is missing. Only the first write for a file
+   * that had no record may pass it; every other transition is update-only, so
+   * a document deleted mid-ingest stays deleted (FR-077).
+   */
+  private publish(profileId: string, record: DocumentRecord, adopt = false): DocumentRecord | null {
+    const stored = adopt ? this.store.upsertDocument(record) : this.store.updateDocument(record);
     if (stored)
       this.options.onDocumentProgress?.(stored.id, stored.state, percentFor(stored.state));
     return stored;
@@ -986,17 +1250,23 @@ export class RagEngine {
     path: string,
     format: DocumentRecord['sourceFormat'],
     message: string,
+    adopt = false,
   ): void {
     // Every failure path, not only the embed one. A conversion or read failure
     // leaves the previous chunk pair on disk and in the cache, so a query kept
-    // answering from content the Dashboard shows as failed.
-    this.cache.delete(profileId);
+    // answering from content the Dashboard shows as failed. Invalidated after
+    // the record is written, because the rebuild starts by reading the records.
     const existing = this.findByPath(profileId, path);
-    this.publish(profileId, {
-      ...this.baseRecord(profileId, docId, fileName, path, format, existing),
-      state: 'error',
-      errorMessage: message,
-    });
+    this.publish(
+      profileId,
+      {
+        ...this.baseRecord(profileId, docId, fileName, path, format, existing),
+        state: 'error',
+        errorMessage: message,
+      },
+      adopt,
+    );
+    this.invalidate(profileId);
   }
 
   /** A record for a file that never got as far as being read (TC-063). */
@@ -1016,7 +1286,7 @@ export class RagEngine {
       state: 'error',
       errorMessage: message,
     };
-    return this.publish(profileId, record) ?? record;
+    return this.publish(profileId, record, true) ?? record;
   }
 }
 
@@ -1054,12 +1324,23 @@ function percentFor(state: DocumentState): number {
   }
 }
 
-/**
- * Whether a document qualifies for the 5-second re-embed target (FR-068, TC-163).
- *
- * Above the ceiling the document still processes and still reports progress; only
- * the timing promise lapses.
- */
-export function withinReembedCeiling(byteLength: number, chunkCount: number): boolean {
-  return byteLength <= KB_CEILING.maxBytes && chunkCount <= KB_CEILING.maxChunks;
+/** The errno of a failure, never its message: a Node fs message embeds the absolute path. */
+function errnoOf(err: unknown): string {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return typeof code === 'string' ? code : 'unknown error';
+}
+
+/** True when a file is above the hard per-file cap. False when it cannot be stat'ed (ADR-055). */
+async function isAboveFileCap(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).size > KB_INGEST_LIMITS.maxFileBytes;
+  } catch {
+    return false;
+  }
+}
+
+/** The row text for a file above the hard per-file cap (ADR-055). */
+function tooLargeMessage(): string {
+  const megabytes = KB_INGEST_LIMITS.maxFileBytes / (1024 * 1024);
+  return `This file is larger than the ${megabytes} MB limit for one document.`;
 }

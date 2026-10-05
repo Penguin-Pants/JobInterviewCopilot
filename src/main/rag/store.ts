@@ -9,7 +9,9 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { documentRecordSchema } from '../../shared/ipc.js';
 import type { Chunk, DocumentRecord, Profile } from '../../shared/types.js';
 
 /**
@@ -101,6 +103,8 @@ function assertSafeId(kind: 'profile' | 'document', value: string): string {
  */
 export class ProfileStore {
   private readonly root: string;
+  /** Profiles recovered from an index that exists but could not be read. Never written. */
+  private readonly unreadable = new WeakSet<Profile>();
 
   constructor(private readonly options: ProfileStoreOptions) {
     this.root = join(options.userDataDir, 'profiles');
@@ -169,37 +173,85 @@ export class ProfileStore {
   /**
    * Read one profile.
    *
-   * @returns null when the profile does not exist or its index is unreadable. An
-   * unreadable index is not fatal: `kb/` is the authority, so the reconciliation
-   * pass can rebuild the index from the folder (ADR-014).
+   * Every path in the result is computed from `profileId` and this store's
+   * root, never read from the file. userData can move between installs and a
+   * profile folder can be copied under a new id. Trusting the stored `id`
+   * sent a copy's writes into the original's folder, and trusting a stored
+   * `originalPath` made reconciliation see every document as gone after a move:
+   * it dropped and re-embedded all of them and lost every doc type override.
+   *
+   * @returns null when the profile does not exist. An unreadable index is not
+   * fatal: `kb/` is the authority, so the reconciliation pass can rebuild the
+   * index from the folder (ADR-014).
    */
   get(profileId: string): Profile | null {
     // An unsafe id is answered as "no such profile" rather than thrown, so the
     // IPC guard that calls this reads as a lookup miss and the renderer gets the
     // same message for a malicious id as for a stale one.
     if (!SAFE_ID.test(profileId)) return null;
-    const file = this.profileFile(profileId);
-    if (!existsSync(file)) return this.recover(profileId);
+    let text: string;
     try {
-      const parsed = JSON.parse(readFileSync(file, 'utf8')) as Partial<Profile>;
-      if (typeof parsed?.id !== 'string' || typeof parsed.name !== 'string') return null;
-      return {
-        id: parsed.id,
-        name: parsed.name,
-        createdAt:
-          typeof parsed.createdAt === 'string' ? parsed.createdAt : new Date(0).toISOString(),
-        // kbPath is absolute and userData can move between installs, so it is
-        // recomputed on every read rather than trusted from the file.
-        kbPath: this.kbDir(profileId),
-        // A missing or non-array `documents` made every later `.find` and
-        // `.findIndex` throw a TypeError up through `reconcile` and out of
-        // `start`. `kb/` is the authority, so an empty index is not a loss:
-        // reconciliation rebuilds it (ADR-014).
-        documents: Array.isArray(parsed.documents) ? parsed.documents : [],
-      };
-    } catch {
-      return this.recover(profileId);
+      text = readFileSync(this.profileFile(profileId), 'utf8');
+    } catch (err) {
+      const recovered = this.recover(profileId, '');
+      // Missing means there is no name to lose. Any other failure, an antivirus
+      // lock or a permission change, may be hiding a good one, so this copy is
+      // listed but never written back over the file (ADR-014).
+      if (recovered && (err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        this.unreadable.add(recovered);
+      }
+      return recovered;
     }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return this.recover(profileId, text);
+    }
+    const fields = (parsed ?? {}) as Partial<Record<keyof Profile, unknown>>;
+    if (typeof fields.name !== 'string') return this.recover(profileId, text);
+    return {
+      id: profileId,
+      name: fields.name,
+      createdAt:
+        typeof fields.createdAt === 'string' ? fields.createdAt : new Date(0).toISOString(),
+      kbPath: this.kbDir(profileId),
+      // A missing or non-array `documents` made every later `.find` and
+      // `.findIndex` throw a TypeError up through `reconcile` and out of
+      // `start`. `kb/` is the authority, so an empty index is not a loss:
+      // reconciliation rebuilds it (ADR-014).
+      documents: Array.isArray(fields.documents)
+        ? this.readDocuments(profileId, fields.documents)
+        : [],
+    };
+  }
+
+  /**
+   * The valid rows of a stored `documents` array, with their paths rebased.
+   *
+   * A row that fails the schema is dropped, not repaired. A `null` row made
+   * `.find` throw out of reconcile, and the file is still in `kb/`, so the next
+   * reconciliation adopts it again (ADR-014).
+   */
+  private readDocuments(profileId: string, rows: unknown[]): DocumentRecord[] {
+    const documents: DocumentRecord[] = [];
+    for (const row of rows) {
+      const result = documentRecordSchema.safeParse(row);
+      if (!result.success) continue;
+      const record = result.data;
+      // Both feed a path below, so both must stay inside their folder.
+      if (!SAFE_ID.test(record.id) || !isPlainFileName(record.originalFileName)) continue;
+      documents.push({
+        ...record,
+        profileId,
+        originalPath: join(this.kbDir(profileId), record.originalFileName),
+        derivedMarkdownPath:
+          record.derivedMarkdownPath === null
+            ? null
+            : this.derivedMarkdownPath(profileId, record.id),
+      });
+    }
+    return documents;
   }
 
   /**
@@ -215,16 +267,21 @@ export class ProfileStore {
    * index from a leftover directory: `delete` removes `kb/` before it removes
    * the record, so an interrupted delete has no `kb/` and stays deleted.
    *
+   * The name and creation time are read back from the damaged text where they
+   * survive. The next write persists whatever this returns, so a placeholder
+   * here used to replace the user's name for good. `write` puts both fields
+   * before `documents`, so a truncated file almost always still has them.
+   *
    * @returns a profile with an empty document list, which reconciliation refills
    * from `kb/`, or null when there is nothing to recover.
    */
-  private recover(profileId: string): Profile | null {
+  private recover(profileId: string, damaged: string): Profile | null {
     const kb = this.kbDir(profileId);
     if (!existsSync(kb)) return null;
     return {
       id: profileId,
-      name: 'Recovered profile',
-      createdAt: new Date(0).toISOString(),
+      name: salvageString(damaged, 'name') ?? 'Recovered profile',
+      createdAt: salvageString(damaged, 'createdAt') ?? new Date(0).toISOString(),
       kbPath: kb,
       documents: [],
     };
@@ -292,12 +349,16 @@ export class ProfileStore {
   /**
    * Insert or replace one document record, stamping `updatedAt`.
    *
-   * @returns the stored record, or null when the profile is gone. A document
-   * whose profile was deleted mid-import is dropped rather than recreating the
-   * profile directory the user just asked to be removed.
+   * The engine inserts only to adopt a file that had no record. A later
+   * transition goes through {@link updateDocument}.
+   *
+   * @returns the stored record, or null when the profile is gone or its index
+   * cannot be read. A document whose profile was deleted mid-import is dropped
+   * rather than recreating the profile directory the user just asked to be
+   * removed.
    */
   upsertDocument(record: DocumentRecord): DocumentRecord | null {
-    const profile = this.get(record.profileId);
+    const profile = this.writable(record.profileId);
     if (!profile) return null;
     const stamped: DocumentRecord = { ...record, updatedAt: new Date().toISOString() };
     const index = profile.documents.findIndex((d) => d.id === record.id);
@@ -307,15 +368,87 @@ export class ProfileStore {
     return stamped;
   }
 
+  /**
+   * Replace one existing document record, stamping `updatedAt`.
+   *
+   * Every mid-ingest transition goes through here rather than through
+   * {@link upsertDocument}. An ingest runs across several awaits, and a document
+   * deleted during one of them must stay deleted: an insert brought it back,
+   * embedded it and published it `ready` (FR-077).
+   *
+   * @returns the stored record, or null when the profile or the record is gone,
+   * or the index cannot be read.
+   */
+  updateDocument(record: DocumentRecord): DocumentRecord | null {
+    const profile = this.writable(record.profileId);
+    if (!profile) return null;
+    const index = profile.documents.findIndex((d) => d.id === record.id);
+    if (index === -1) return null;
+    const stamped: DocumentRecord = { ...record, updatedAt: new Date().toISOString() };
+    profile.documents[index] = stamped;
+    this.write(profile);
+    return stamped;
+  }
+
+  /**
+   * True when the profile's index exists but cannot be read right now (ADR-014).
+   *
+   * Every write is refused while this holds, so a reconciliation pass would
+   * convert and embed every document only to discard the result. The engine
+   * waits and tries the pass again instead.
+   */
+  isIndexUnreadable(profileId: string): boolean {
+    const profile = this.get(profileId);
+    return profile !== null && this.unreadable.has(profile);
+  }
+
+  /** {@link get}, or null when writing the result back would overwrite an unreadable index. */
+  private writable(profileId: string): Profile | null {
+    const profile = this.get(profileId);
+    return profile && !this.unreadable.has(profile) ? profile : null;
+  }
+
   /** Remove a document record and the derived files that belong to it (FR-077). */
   removeDocument(profileId: string, docId: string): void {
-    const profile = this.get(profileId);
+    const profile = this.writable(profileId);
     if (profile) {
       profile.documents = profile.documents.filter((d) => d.id !== docId);
       this.write(profile);
     }
     this.deleteChunkSet(profileId, docId);
     rmSync(this.derivedMarkdownPath(profileId, docId), { force: true });
+  }
+
+  /**
+   * Remove derived files that no record in the index owns (FR-069, ADR-014).
+   *
+   * A row dropped by {@link readDocuments} loses its record, and its file in
+   * `kb/` is adopted again under a new id. Nothing then names the old id, so
+   * its Markdown, chunks and vectors stayed in `derived/` forever.
+   *
+   * Synchronous from the listing to the last removal, so no ingest can run in
+   * between. An ingest stores its record before it writes a derived file, so a
+   * file listed here whose id is not in the index really is an orphan. Skipped
+   * when the index cannot be read, because its document list is then empty.
+   */
+  pruneDerived(profileId: string): void {
+    const profile = this.writable(profileId);
+    if (!profile) return;
+    const owned = new Set(profile.documents.map((d) => d.id));
+    const dir = this.derivedDir(profileId);
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      return; // No derived folder yet.
+    }
+    for (const entry of entries) {
+      // `<docId>.md`, `<docId>.chunks.json`, `<docId>.vectors.bin`, each with
+      // an optional `.tmp`. A name that is not ours is left alone.
+      const id = entry.slice(0, entry.indexOf('.'));
+      if (!SAFE_ID.test(id) || owned.has(id)) continue;
+      rmSync(join(dir, entry), { force: true });
+    }
   }
 
   /* ---------------------------------------------------------------- *
@@ -420,22 +553,28 @@ export class ProfileStore {
   /**
    * Read a document's chunks and vectors (FR-078, TC-141).
    *
+   * Async, because the query cache is rebuilt from here and a sync read of
+   * every vector file blocked the main thread inside the question-to-suggestion
+   * budget (NFR-001).
+   *
    * @returns null when either file is missing, unparseable, when the two files
    * carry different `pairId`s, when the vector row count disagrees with the
    * chunk count, or when a chunk row is not a chunk. The caller discards both and
    * re-embeds. Serving a partial result would answer a query with vectors that
    * belong to different text, which looks like a bad model rather than a bad
-   * read.
+   * read. Any read failure other than ENOENT throws, so a caller can tell "not
+   * there" from "cannot be reached" (ADR-036).
    */
-  readChunkSet(profileId: string, docId: string): ChunkSet | null {
-    const chunksPath = this.chunksPath(profileId, docId);
-    const vectorsPath = this.vectorsPath(profileId, docId);
-    if (!existsSync(chunksPath) || !existsSync(vectorsPath)) return null;
+  async readChunkSet(profileId: string, docId: string): Promise<ChunkSet | null> {
+    // No `existsSync` first. A delete between the check and the read threw a
+    // raw ENOENT out of `query`; a missing file is simply a missing pair.
+    const text = await readUnlessMissing(this.chunksPath(profileId, docId));
+    if (text === null) return null;
 
     let chunks: Chunk[];
     let pairId: string;
     try {
-      const parsed: unknown = JSON.parse(readFileSync(chunksPath, 'utf8'));
+      const parsed: unknown = JSON.parse(text.toString('utf8'));
       const file = parsed as Partial<ChunkFile>;
       if (typeof file?.pairId !== 'string' || !Array.isArray(file.chunks)) return null;
       // Every row, not just the array. A file truncated to a valid JSON prefix or
@@ -449,7 +588,8 @@ export class ProfileStore {
       return null;
     }
 
-    const bytes = readFileSync(vectorsPath);
+    const bytes = await readUnlessMissing(this.vectorsPath(profileId, docId));
+    if (bytes === null) return null;
     const stride = this.options.dimensions;
     const vectorBytes = chunks.length * stride * Float32Array.BYTES_PER_ELEMENT;
     if (bytes.byteLength !== vectorBytes + PAIR_ID_BYTES) return null;
@@ -457,12 +597,12 @@ export class ProfileStore {
     // the two renames when the edit did not change the chunk count.
     if (bytes.subarray(vectorBytes).toString('ascii') !== pairId) return null;
 
-    // Copy rather than view the Buffer: a Node Buffer can be a slice of a shared
-    // pool, so a view would read whatever else that pool holds.
+    // One copy into a fresh, aligned buffer, then a typed view over it. A view
+    // straight over the Buffer is unsafe: it can be a slice of a shared pool at
+    // an offset that is not a multiple of 4. Byte order is native, which is how
+    // `writeChunkSet` wrote it.
     const vectors = new Float32Array(chunks.length * stride);
-    for (let i = 0; i < vectors.length; i += 1) {
-      vectors[i] = bytes.readFloatLE(i * Float32Array.BYTES_PER_ELEMENT);
-    }
+    new Uint8Array(vectors.buffer).set(bytes.subarray(0, vectorBytes));
     return { chunks, vectors };
   }
 
@@ -496,6 +636,33 @@ function isChunk(value: unknown): value is Chunk {
     typeof c.sourceFile === 'string' &&
     typeof c.tokenCount === 'number'
   );
+}
+
+/** A whole file, or null when it does not exist. Any other failure throws. */
+async function readUnlessMissing(path: string): Promise<Buffer | null> {
+  try {
+    return await readFile(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+/** A bare file name: no separator, no `.` or `..`, so a join stays in its folder. */
+function isPlainFileName(name: string): boolean {
+  return name.length > 0 && name !== '.' && name !== '..' && !/[\\/\0]/.test(name);
+}
+
+/** The first string value of `key` in possibly truncated JSON, or null. */
+function salvageString(text: string, key: string): string | null {
+  const match = new RegExp(`"${key}"\\s*:\\s*("(?:[^"\\\\]|\\\\.)*")`).exec(text);
+  if (!match?.[1]) return null;
+  try {
+    const value: unknown = JSON.parse(match[1]);
+    return typeof value === 'string' && value.length > 0 ? value : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Write a text file through a temp name and one rename (FR-078). */

@@ -2330,3 +2330,74 @@ The hold buffer restarts `FR-115`'s hold when the shown generation replaces its
 own card, because that card is newly visible; otherwise the next question could
 replace the retry's answer at once. `OverlayGate` already treats every `begin`
 as a new card, so a rebuilt overlay is replayed the replacement alone.
+
+### ADR-054: Transcript writes are whole or undone, and one bad line is skipped
+
+**Decided 2026-10-04** while fixing an audit finding in `CMP-08`.
+
+**Context.** `ADR-018` says each entry is one `write()` of one complete line,
+and `TASK-040` made a malformed line before the last one throw. But the writer
+ignored `bytesWritten`. A short write (for example on ENOSPC) left half a line,
+and the next good append fused onto it in the middle of the file. Compaction
+then threw every time, so `stop` could never finish and the lock stayed, and
+recovery threw on every launch. One bad line cost the whole interview.
+
+**Decision.**
+- `CMP-08` writes each line at the end of the last whole line, and repeats the
+  write until `bytesWritten` covers it. If a write fails, the file is truncated
+  back to that offset. If the truncate also fails, the next line overwrites the
+  partial one. A partial line has no newline, so anything left of it is a torn
+  tail. The file is opened for writing without append mode, because append mode
+  ignores the write position and on Windows cannot truncate.
+- `readNdjson` skips a malformed line before the last one and counts it. It
+  does not throw. Compaction and recovery report the count through `onError`
+  and complete. A torn final line is still dropped silently (`FR-107`).
+
+**Consequence.** This supersedes the `TASK-040` rule "a malformed line anywhere
+else is raised". The writer is now the guarantee that lines are whole, and the
+reader no longer turns a writer defect into permanent loss. A skipped line is
+visible in `main.log`, never silent.
+
+### ADR-055: A hard per-file ingest cap and a conversion timeout
+
+**Decided 2026-10-04** while fixing the knowledge base audit findings.
+
+**Context.** `FR-068`'s 2 MB and 200-chunk ceiling bounds a timing promise
+only: a document above it still processes. Nothing bounded what one file may
+cost. The whole file was read into memory, then read again by the converter,
+and `pdf-parse` had no timeout. A very large or hostile PDF could exhaust the
+main process's memory (`NFR-004`), or leave its document in `converting` for the
+rest of the process, with every later pass for that path queued behind it.
+
+**Decision.** Two hard limits, in `KB_INGEST_LIMITS` in `src/shared/defaults.ts`,
+separate from `KB_CEILING`:
+
+1. **50 MB per file.** The file is checked with `stat` before it is read, and the
+   length is checked again after the read. An import checks the source with
+   `stat` before it copies anything into `kb/`. A file above the cap gets an
+   `error` row that names the limit and no path. 50 MB is 25 times the ceiling, so a resume, a job
+   description or a long PDF of company notes with images stays well inside it,
+   and `FR-068`'s "above the ceiling the document is still processed" still
+   holds for every document between 2 MB and 50 MB.
+2. **120 seconds per conversion.** A conversion that runs longer fails its
+   document with an `error` row. PDF and DOCX conversion run in a worker thread,
+   one per conversion, and the converter gets an `AbortSignal`. On abort the
+   thread is terminated. An abort signal alone could not bound the work: mammoth
+   takes no signal, a parse that does not yield in the main thread also delays
+   the timer that should stop it, and a signal that aborted before its listener
+   was added does not replay the event. Terminating the thread stops the parse
+   in every case, so no parse runs on after its document failed or beside a
+   retry of the same file. A signal that is already aborted starts no thread.
+
+The file is read once, and those bytes are both hashed and converted, so the
+cache key always describes the content that was converted.
+
+**Consequence.** `withinReembedCeiling`, which only tests called, is removed;
+the tests compare against `KB_CEILING` directly. The Dashboard's retry action
+works on both new error rows as on any other. `TC-163` covers both limits.
+The parsers move to `rag/extract.ts`, which the worker entry
+`rag/convert-worker.ts` imports. electron-vite bundles that entry as its own
+file through a `?modulePath` import, and `vitest.config.ts` does the same for
+tests. The worker loads `mammoth` and `pdf-parse` from inside `app.asar`, so
+`asarUnpack` does not change. Each conversion copies the file's bytes once more,
+into the worker, which the 50 MB cap bounds.

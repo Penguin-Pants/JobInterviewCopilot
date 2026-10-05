@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { redact } from './logger.js';
 import type { CredentialId, SecretStatus, SecretVault, ValidationResult } from '../shared/types.js';
 
@@ -51,15 +51,22 @@ export interface SecretVaultStoreOptions {
   /** Directory holding secrets.bin. Injected so tests never touch real userData. */
   dir: string;
   safeStorage: SafeStorageLike;
+  /** Told when an unreadable vault is moved aside. Never given key material. */
+  onWarn?: (message: string, detail: Record<string, unknown>) => void;
 }
+
+/** What is on disk: no file, a vault, or a file that exists but cannot be read. */
+type VaultRead = { state: 'absent' | 'ok'; vault: SecretVault } | { state: 'unreadable' };
 
 export class SecretVaultStore {
   private readonly dir: string;
   private readonly safeStorage: SafeStorageLike;
+  private readonly onWarn: SecretVaultStoreOptions['onWarn'];
 
   constructor(options: SecretVaultStoreOptions) {
     this.dir = options.dir;
     this.safeStorage = options.safeStorage;
+    this.onWarn = options.onWarn;
     mkdirSync(this.dir, { recursive: true });
   }
 
@@ -68,8 +75,8 @@ export class SecretVaultStore {
     return join(this.dir, 'secrets.bin');
   }
 
-  private read(): SecretVault {
-    if (!existsSync(this.file)) return {};
+  private load(): VaultRead {
+    if (!existsSync(this.file)) return { state: 'absent', vault: {} };
     if (!this.safeStorage.isEncryptionAvailable()) throw new EncryptionUnavailableError();
     try {
       const plain = this.safeStorage.decryptString(readFileSync(this.file));
@@ -79,12 +86,39 @@ export class SecretVaultStore {
       // success while storing nothing and status() would stay false. Only a
       // plain record is a vault.
       const isPlainRecord = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed);
-      return isPlainRecord ? (parsed as SecretVault) : {};
+      return isPlainRecord
+        ? { state: 'ok', vault: parsed as SecretVault }
+        : { state: 'unreadable' };
     } catch {
-      // An unreadable vault is treated as empty. The user re-enters their keys.
-      // The file is left alone rather than deleted, so nothing is destroyed.
-      return {};
+      return { state: 'unreadable' };
     }
+  }
+
+  /** The vault for reading. An unreadable file reads as empty: nothing is present. */
+  private read(): SecretVault {
+    const loaded = this.load();
+    return loaded.state === 'unreadable' ? {} : loaded.vault;
+  }
+
+  /**
+   * The vault for a read, modify, write cycle.
+   *
+   * An unreadable file is moved aside first, never written over. Writing the
+   * empty vault plus one new key over it destroyed every other key and every
+   * credential version in the file. The copy stays in userData, so the keys
+   * come back if decryption works again (for example after a Windows profile
+   * repair), and the user re-enters keys meanwhile (FR-021).
+   */
+  private readForWrite(): SecretVault {
+    const loaded = this.load();
+    if (loaded.state !== 'unreadable') return loaded.vault;
+    let target = `${this.file}.corrupt-${Date.now()}`;
+    for (let n = 1; existsSync(target); n += 1) target = `${this.file}.corrupt-${Date.now() + n}`;
+    renameSync(this.file, target);
+    this.onWarn?.('the key vault could not be read and was moved aside', {
+      movedTo: basename(target),
+    });
+    return {};
   }
 
   private write(vault: SecretVault): void {
@@ -140,7 +174,7 @@ export class SecretVaultStore {
       };
     }
 
-    const vault = this.read();
+    const vault = this.readForWrite();
     vault[VAULT_FIELD[credentialId]] = key;
     vault.credentialVersions = { ...vault.credentialVersions, [credentialId]: randomUUID() };
     this.write(vault);
@@ -170,7 +204,7 @@ export class SecretVaultStore {
 
   /** Remove one credential. Used when a user clears a key. */
   clear(credentialId: CredentialId): void {
-    const vault = this.read();
+    const vault = this.readForWrite();
     delete vault[VAULT_FIELD[credentialId]];
     if (vault.credentialVersions) delete vault.credentialVersions[credentialId];
     this.write(vault);
