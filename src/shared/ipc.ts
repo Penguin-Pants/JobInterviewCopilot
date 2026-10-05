@@ -240,6 +240,9 @@ const documentRecord = z.object({
   updatedAt: z.string(),
 });
 
+/** The store validates every `profile.json` row against this too (ADR-014). */
+export const documentRecordSchema = documentRecord;
+
 const profile = z.object({
   id: z.string(),
   name: z.string(),
