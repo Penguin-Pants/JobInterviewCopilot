@@ -1474,6 +1474,24 @@ bounded retention, because unbounded accumulation, not copying, is what would pu
 by copy, every reference is released once its chunk is handed on, and deliberate
 buffering is bounded by a declared constant.
 
+**Ordering and recovery, added by the audio capture audit (2026-10-04).**
+
+- The worker runs `CH-301` and `CH-302` on one queue, in arrival order. Each
+  message also bumps a per-source generation on receipt, and a start re-checks
+  it after every await. A stop that lands during acquisition or the worklet load
+  therefore releases the stream and the context, and two overlapping starts
+  leave one graph (`NFR-002`, `FR-045`).
+- A stop reports `idle` for every graph, whether or not the flush or the
+  context close fails (`FR-046`).
+- `CMP-03a`'s host builds one worker window at a time and destroys a window
+  whose renderer did not load. When the worker renderer dies, the host reports
+  each stream it was running as `error`. The supervisor's restart path then
+  builds a new window. A restart that fails leaves the stream in `error`, and it
+  counts toward `MAX_STREAM_RESTARTS` (`FR-045`).
+- A crashed overlay or Dashboard renderer is reloaded, at most three times per
+  window, and then the window is closed. The overlay reload takes the gate's
+  `did-start-loading` path, so the consent reminder is shown again (`FR-008`).
+
 ---
 
 ### 4.4 Runtime LLM catalog channels

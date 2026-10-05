@@ -50,6 +50,7 @@ import {
   hasTrueCaptureExclusion,
   overlayBoundsFor,
   OVERLAY_SIZE,
+  reloadOnRendererCrash,
   resolveOverlayPosition,
   saveOverlayBounds,
   supportsAcrylic,
@@ -285,17 +286,18 @@ async function bootstrap(): Promise<void> {
       // view rather than waiting for the first chunk to prove it.
       audio.noteStreamState(source, state as StreamState, error);
       if (state === 'error') {
+        // Never rejects. A failed restart lands in `error` (FR-045).
         void audio.handleStreamEnded(source, error ?? 'The audio stream ended.');
       }
-      push(dashboardWindow?.webContents, 'state:audio', {
-        interviewer: audio.statusFor('interviewer').state,
-        candidate: audio.statusFor('candidate').state,
-      });
     },
   });
 
   audio = new AudioSupervisor({
     worker: audioHost,
+    // Pushed from the supervisor, not from the worker's report, so a state the
+    // supervisor sets on its own reaches the badge too: a restart that failed
+    // after its `starting` had already been pushed was otherwise never shown.
+    onStreamState: () => pushAudioState(),
     // Straight to the live loop, which pushes it to its stream's provider
     // session and releases it in the same turn. Outside a session the loop
     // holds no stream and drops the chunk rather than queueing it: a queue with
@@ -672,6 +674,8 @@ function wireDashboardWindow(): void {
   dashboardPromptDirty = false;
   allowDirtyDashboardClose = false;
   dashboardClosePromptOpen = false;
+  // A crashed renderer is reloaded, and the replay below runs again.
+  reloadOnRendererCrash(dashboardWindow, 'dashboard');
   /**
    * Replay the one-shot state to every Dashboard that loads (TASK-042).
    *
@@ -685,6 +689,8 @@ function wireDashboardWindow(): void {
    */
   dashboardWindow.webContents.on('did-finish-load', () => {
     pushSessionState();
+    // A reloaded renderer, after a crash for example, has no earlier push.
+    pushAudioState();
     push(dashboardWindow?.webContents, 'model:download', rag.getModelState());
     push(dashboardWindow?.webContents, 'state:providers', health.snapshot());
     // Both notices describe the machine rather than a moment, so a Dashboard
@@ -810,6 +816,9 @@ function wireOverlayWindow(): void {
   overlayWindow.webContents.on('did-start-loading', () => {
     overlayGate.noteClosed();
   });
+  // A crashed renderer left an empty always-on-top window. The reload takes
+  // the path above: the gate closes, and the consent reminder is replayed.
+  reloadOnRendererCrash(overlayWindow, 'overlay');
 
   overlayWindow.on('moved', () => {
     if (overlayWindow) saveOverlayBounds(overlayWindow, config);
@@ -1145,6 +1154,14 @@ const overlaySizeWrites = throttleWrites<{ width: number; height: number }>(({ w
   // `moved` and `resized` handlers rather than from here.
   config.set({ overlayWindow: { ...config.get().overlayWindow, width, height } });
 }, OVERLAY_SIZE_WRITE_INTERVAL_MS);
+
+/** `state:audio`, read from the supervisor so every path reports the same thing. */
+function pushAudioState(): void {
+  push(dashboardWindow?.webContents, 'state:audio', {
+    interviewer: audio.statusFor('interviewer').state,
+    candidate: audio.statusFor('candidate').state,
+  });
+}
 
 /** `CH-201`, from the Session Manager rather than from a second copy of the state. */
 function pushSessionState(): void {

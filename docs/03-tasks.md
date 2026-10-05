@@ -2433,3 +2433,16 @@ language-model catalog's missing requirement and test case ids,
 
 **Blockers.** None for this work. The build plan's only open acceptance work is
 still `TASK-051`'s manual release checklist, which needs Windows hardware.
+
+## Audio capture audit, 2026-10-04
+
+**Status: COMPLETE, 2026-10-04.** Five confirmed findings on the capture path,
+fixed with tests. No requirement and no IPC contract changed.
+
+| Defect | Consequence | Fix | Verified by |
+|---|---|---|---|
+| **A stop during a start was a no-op** | The start finished after the stop, registered its graph and kept the microphone or system audio captured for the rest of the session (`NFR-002`). Two overlapping starts orphaned the first stream and context | One queue for `CH-301` and `CH-302`, and a per-source generation that a start re-checks after each await | `audio-worker.test.ts` |
+| **A failed teardown skipped `idle`** | A context close that rejected left the state unreported, the sequence counters unreset and the rejection unhandled (`FR-046`) | Each teardown step is guarded and `idle` is always sent | `audio-worker.test.ts` |
+| **Nothing handled a renderer crash** | A dead audio worker left both streams `running` with no chunks and no badge. A dead overlay left an empty always-on-top window | The host reports the worker's streams as `error`, which feeds the restart path. The overlay and the Dashboard are reloaded, at most three times (`reloadOnRendererCrash`) | `audio-host.test.ts`, `windows.test.ts` |
+| **The worker window could leak** | Two overlapping starts built two windows, and a failed load left its window alive. A restart that rejected left the stream in `starting` | The window build is shared and a failed one is destroyed. A failed start or restart marks the stream `error`. The supervisor now reports every state change and the reset on stop to the badge | `audio-host.test.ts`, `audio-supervisor.test.ts` |
+| **The worker window guardrail tested dead code** | `createAudioWorkerWindow` had no caller. The live window in `audio-host.ts` copied its preferences by hand, with no test | The dead function is deleted. The host uses the shared `hardenedWebPreferences`, and the guardrail asserts the live window (`TC-004`, `TC-007`) | `audio-host.test.ts` |
