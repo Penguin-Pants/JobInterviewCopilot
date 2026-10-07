@@ -16,6 +16,18 @@ import { defaultSettings } from '../../src/shared/defaults.js';
 
 type Invoker = (event: unknown, payload: unknown) => Promise<unknown>;
 
+const APP_PAGE = 'file:///app/out/renderer/dashboard/index.html';
+
+/** The two app windows and one that is neither, as the router sees them. */
+const dashboard = { name: 'dashboard' };
+const overlay = { name: 'overlay' };
+const stranger = { name: 'audio-worker' };
+
+/** An invoke event from `sender`'s top-level frame, on `url`. */
+function eventFrom(sender: object, url = APP_PAGE, parent: unknown = null): unknown {
+  return { sender, senderFrame: { url, parent } };
+}
+
 /** A fake ipcMain that records handlers so they can be invoked directly. */
 class FakeIpcMain {
   readonly handlers = new Map<string, Invoker>();
@@ -25,10 +37,15 @@ class FakeIpcMain {
   removeHandler(channel: string): void {
     this.handlers.delete(channel);
   }
-  invoke(channel: string, payload: unknown): Promise<unknown> {
+  /** Invokes as the Dashboard unless told otherwise, which is what most channels need. */
+  invoke(
+    channel: string,
+    payload: unknown,
+    event: unknown = eventFrom(dashboard),
+  ): Promise<unknown> {
     const handler = this.handlers.get(channel);
     if (!handler) throw new Error(`no handler for ${channel}`);
-    return handler({}, payload);
+    return handler(event, payload);
   }
 }
 
@@ -41,7 +58,15 @@ beforeEach(() => {
   initLogger({ dir: logDir });
   ipc = new FakeIpcMain();
   // The fake satisfies the two methods the router uses.
-  router = new IpcRouter(ipc as unknown as IpcMain);
+  router = new IpcRouter(ipc as unknown as IpcMain, {
+    roleOf: (sender) =>
+      (sender as unknown) === dashboard
+        ? 'dashboard'
+        : (sender as unknown) === overlay
+          ? 'overlay'
+          : null,
+    isAppUrl: (url) => url.startsWith('file:///app/out/renderer/'),
+  });
 });
 
 describe('TC-002 router payload validation', () => {
@@ -158,5 +183,57 @@ describe('push validation', () => {
     push(null, 'overlay:consent', { text: 'x' });
 
     expect(destroyed.sent).toHaveLength(0);
+  });
+});
+
+/**
+ * Audit regression (FR-086): the router checked the payload and never the
+ * sender. A compromised overlay could call `secrets:set` or `config:set` by
+ * going around its own preload.
+ */
+describe('FR-086 router sender check', () => {
+  it('refuses a channel the sending window is not allowed', async () => {
+    const handler = vi.fn(() => ({ ok: true as const }));
+    router.handle('session:delete', handler);
+
+    const result = await ipc.invoke('session:delete', { sessionId: 's1' }, eventFrom(overlay));
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(isIpcError(result)).toBe(true);
+    expect(readFileSync(join(logDir, 'main.log'), 'utf8')).toContain('ipc sender rejected');
+  });
+
+  it('lets each window use its own channels', async () => {
+    router.handle('session:delete', () => ({ ok: true as const }));
+    router.handle('consent:dismiss', () => ({ ok: true as const }));
+
+    expect(await ipc.invoke('session:delete', { sessionId: 's1' })).toEqual({ ok: true });
+    expect(await ipc.invoke('consent:dismiss', undefined, eventFrom(overlay))).toEqual({
+      ok: true,
+    });
+    // And not each other's.
+    expect(isIpcError(await ipc.invoke('consent:dismiss', undefined))).toBe(true);
+  });
+
+  it('refuses contents that belong to no app window', async () => {
+    const handler = vi.fn(() => defaultSettings());
+    router.handle('config:get', handler);
+
+    expect(isIpcError(await ipc.invoke('config:get', undefined, eventFrom(stranger)))).toBe(true);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('refuses a known window whose frame is not an app page', async () => {
+    const handler = vi.fn(() => defaultSettings());
+    router.handle('config:get', handler);
+
+    const remote = eventFrom(dashboard, 'https://attacker.example/');
+    const child = eventFrom(dashboard, APP_PAGE, {});
+    const gone = { sender: dashboard, senderFrame: null };
+
+    for (const event of [remote, child, gone]) {
+      expect(isIpcError(await ipc.invoke('config:get', undefined, event))).toBe(true);
+    }
+    expect(handler).not.toHaveBeenCalled();
   });
 });

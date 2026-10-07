@@ -65,6 +65,20 @@ export const SETTINGS_LIMITS = {
   turnEndGapMs: { min: 500, max: 1500 },
   overlayWidthPx: { min: 320, max: 1600 },
   overlayHeightPx: { min: 180, max: 1200 },
+  // The trigger guard and the candidate context (FR-051, FR-052). The Dashboard
+  // does not edit these, so the ranges bound a hand-edited file. A context of
+  // 0 turns or 0 characters is allowed and means "send no candidate context".
+  minTurnWords: { min: 1, max: 20 },
+  minTurnChars: { min: 1, max: 200 },
+  candidateContextTurns: { min: 0, max: 10 },
+  candidateContextChars: { min: 0, max: 4000 },
+  // The two warning thresholds (FR-031). Zero means "not set": the cost meter
+  // never warns on a threshold of zero or less (FR-109), so zero stays valid.
+  costUsd: { min: 0, max: 1000 },
+  timeMinutes: { min: 0, max: 1440 },
+  // The consent reminder (FR-006, FR-032). Never blank: a blank reminder is no
+  // reminder. The maximum keeps it a card the overlay can show.
+  consentReminderChars: { min: 1, max: 1000 },
 } as const;
 
 export function defaultSettings(): Settings {

@@ -11,7 +11,11 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { INVOKE_CHANNEL_NAMES, type InvokeChannel } from '../../src/shared/ipc.js';
+import {
+  INVOKE_CHANNEL_NAMES,
+  invokeChannelsFor,
+  type InvokeChannel,
+} from '../../src/shared/ipc.js';
 
 /**
  * The lint rules that carry guardrails rather than style.
@@ -199,9 +203,7 @@ describe('TC-008 content security policy', () => {
  */
 describe('FR-086 preload invoke allowlists', () => {
   it('the overlay may invoke only the six channels its UI needs', () => {
-    const source = readFileSync('src/preload/overlay.ts', 'utf8');
-    const block = /ALLOWED_INVOKE[^=]*=\s*\[([^\]]*)\]/s.exec(source)?.[1] ?? '';
-    const channels = [...block.matchAll(/'([^']+)'/g)].map((m) => m[1]).sort();
+    const channels: string[] = invokeChannelsFor('overlay').sort();
 
     // The fourth is `overlay:setFontSize` (CH-126, TASK-043) and the fifth is
     // `overlay:setSize` (CH-127, TASK-052). `FR-093` wants the text size
@@ -218,7 +220,7 @@ describe('FR-086 preload invoke allowlists', () => {
       'overlay:setSize',
     ]);
     for (const forbidden of ['secrets:set', 'config:set', 'hotkey:rebind', 'session:start']) {
-      expect(block, `overlay must not reach ${forbidden}`).not.toContain(forbidden);
+      expect(channels, `overlay must not reach ${forbidden}`).not.toContain(forbidden);
     }
   });
 
@@ -246,8 +248,12 @@ describe('FR-086 preload invoke allowlists', () => {
 describe('ADR-016 consent renders before readiness is reported', () => {
   it('the renderer waits for the consent text before reporting ready', () => {
     const source = readFileSync('src/renderer/overlay/Overlay.tsx', 'utf8');
-    expect(source).toMatch(/if \(consent === null[^)]*\) return;/);
-    expect(source).toContain('reportReady(readyFor.sessionId');
+    // Keyed on whether the text has arrived and on the session boundary, never
+    // on the text itself: an edit must not report a dismissed card ready again.
+    expect(source).toContain('readinessKey(consent, readyFor)');
+    expect(source).toMatch(/if \(readyKey === null\) return;/);
+    expect(source).toMatch(/\}, \[readyKey\]\);/);
+    expect(source).toContain('reportReady(readyKey.sessionId');
   });
 
   it('the renderer stops a readiness retry as soon as a push names another session', () => {
@@ -306,15 +312,16 @@ describe('FR-008 an overlay reload re-arms the readiness gate', () => {
    * FR-093, TASK-043. A queued `CH-126` write is older than any `config:set`
    * that follows it, and the throttle re-reads the theme when it fires. Without
    * this the overlay's stale size would be written back over a Dashboard change
-   * made in the meantime, reversing the user's last action.
+   * made in the meantime, reversing the user's last action. When it is dropped
+   * is asserted in `config-apply.test.ts`; this pins that the real throttle is
+   * what `config:set` drops.
    */
   it('drops a queued overlay font write when a newer theme is stored', () => {
     const handler = source.slice(
       source.indexOf("router.handle('config:set'"),
       source.indexOf("router.handle('secrets:set'"),
     );
-    expect(handler).toContain('overlayFontSizeWrites.cancel()');
-    expect(handler).toMatch(/patch\.theme !== undefined/);
+    expect(handler).toContain('cancelQueuedFontSize: () => overlayFontSizeWrites.cancel()');
   });
 });
 
@@ -654,7 +661,9 @@ describe('TASK-040 session wiring', () => {
  * declared in the contract and handled in main, but never added to the
  * Dashboard preload's allowlist, so FR-079's retry and ADR-026's
  * "model not downloaded, retry" action did not exist end to end. Nothing
- * failed: the allowlist is a plain array, so an omission is invisible.
+ * failed: the allowlist was a plain array, so an omission was invisible. The
+ * access table is exhaustive by type now, and this still pins which window
+ * each channel belongs to.
  */
 describe('FR-086 the preload allowlists account for every invoke channel', () => {
   /** Channels that belong to a window other than the Dashboard, named on purpose. */
@@ -678,31 +687,15 @@ describe('FR-086 the preload allowlists account for every invoke channel', () =>
   ];
 
   it('the Dashboard may invoke every channel not explicitly reserved to another window', () => {
-    const source = readFileSync('src/preload/dashboard.ts', 'utf8');
-    const list = source.slice(
-      source.indexOf('const ALLOWED_INVOKE'),
-      source.indexOf('const ALLOWED_PUSH'),
-    );
+    const list = invokeChannelsFor('dashboard');
 
     const missing = INVOKE_CHANNEL_NAMES.filter(
-      (name) => !NOT_DASHBOARD.includes(name) && !list.includes(`'${name}'`),
+      (name) => !NOT_DASHBOARD.includes(name) && !list.includes(name),
     );
     expect(
       missing,
       `declared and handled but not exposed to the Dashboard: ${missing.join(', ')}`,
     ).toEqual([]);
-  });
-
-  it('every channel the Dashboard lists is a real channel', () => {
-    const source = readFileSync('src/preload/dashboard.ts', 'utf8');
-    const list = source.slice(
-      source.indexOf('const ALLOWED_INVOKE'),
-      source.indexOf('const ALLOWED_PUSH'),
-    );
-    const listed = [...list.matchAll(/'([a-z]+:[a-zA-Z]+)'/g)].map((m) => m[1]!);
-
-    expect(listed.length).toBeGreaterThan(0);
-    for (const name of listed) expect(INVOKE_CHANNEL_NAMES).toContain(name);
   });
 });
 
@@ -863,9 +856,20 @@ describe('ADR-028 loopback acquisition details', () => {
     expect(source).toContain('removeTrack(track)');
   });
 
-  it('media permission is granted only to the audio worker', () => {
+  it('a failed stream is restarted even when recording its state throws', () => {
+    // Audit regression: a throw from noteStreamState or its push skipped the
+    // restart, so a failed stream stayed down (FR-045).
+    const source = readFileSync('src/main/index.ts', 'utf8');
+    const handler = source.slice(source.indexOf('onStreamState: ({ source, state, error })'));
+    expect(handler.slice(0, 900)).toMatch(
+      /try \{\s*audio\.noteStreamState\([^)]*\);\s*\} finally \{\s*if \(state === 'error'\)/,
+    );
+  });
+
+  it('capture permissions are granted only to the audio worker', () => {
     const source = readFileSync('src/main/audio-host.ts', 'utf8');
-    expect(source).toMatch(/permission === 'media' && isAudioWorker\(contents\)/);
+    expect(source).toMatch(/CAPTURE_PERMISSIONS\.has\(permission\) && isAudioWorker\(contents\)/);
+    expect(source).toContain("new Set(['media', 'display-capture'])");
   });
 
   it('electron-audio-loopback is not imported anywhere', () => {
@@ -1437,6 +1441,28 @@ describe('the packaged smoke test prints no checkout path', () => {
   it('names the executable by its file name only', () => {
     expect(script).not.toMatch(/\$\{exe\}/);
     expect(script).toContain('${basename(exe)}');
+  });
+});
+
+/**
+ * Audit regression (ADR-057): the packaged binary had no Electron fuses, so
+ * `ELECTRON_RUN_AS_NODE` or `NODE_OPTIONS` could run arbitrary code with the
+ * app's identity, and the app could be loaded from outside its archive.
+ */
+describe('ADR-057 the packaged binary flips its fuses', () => {
+  const builder = readFileSync('electron-builder.yml', 'utf8');
+  const fuses = /^electronFuses:\n((?:[ ]{2}.*\n)+)/m.exec(builder)?.[1] ?? '';
+
+  it('turns off the ways to run code outside the app entry point', () => {
+    expect(fuses).toMatch(/^\s+runAsNode: false$/m);
+    expect(fuses).toMatch(/^\s+enableNodeOptionsEnvironmentVariable: false$/m);
+    expect(fuses).toMatch(/^\s+onlyLoadAppFromAsar: true$/m);
+    expect(fuses).toMatch(/^\s+enableEmbeddedAsarIntegrityValidation: true$/m);
+  });
+
+  it('leaves the inspector fuse alone, which smoke:packaged launches through', () => {
+    // Playwright's Electron launcher passes --inspect=0 and waits for it.
+    expect(fuses).not.toMatch(/enableNodeCliInspectArguments: false/);
   });
 });
 

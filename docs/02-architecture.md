@@ -123,16 +123,16 @@ interface Settings {
   };
   trigger: {
     turnEndGapMs: number;                  // 500 .. 1500, default 800
-    minTurnWords: number;                  // default 3
-    minTurnChars: number;                  // default 12
-    candidateContextTurns: number;         // default 2
-    candidateContextChars: number;         // default 400
+    minTurnWords: number;                  // 1 .. 20, default 3
+    minTurnChars: number;                  // 1 .. 200, default 12
+    candidateContextTurns: number;         // 0 .. 10, default 2 (0 = no context)
+    candidateContextChars: number;         // 0 .. 4000, default 400
   };
   thresholds: {
-    costUsd: number;                       // default 2.00
-    timeMinutes: number;                   // default 60
+    costUsd: number;                       // 0 .. 1000, default 2.00
+    timeMinutes: number;                   // 0 .. 1440, 0 = off, default 60
   };
-  consentReminderText: string;
+  consentReminderText: string;             // trimmed, 1 .. 1000 characters
   overlayWindow: {
     x: number | null;
     y: number | null;
@@ -142,6 +142,14 @@ interface Settings {
     clickThrough: boolean;              // default true (FR-083)
   };
 }
+
+// Every range above is `SETTINGS_LIMITS` in src/shared/defaults.ts. Every
+// field with a range other than overlayOpacity and the costUsd and timeMinutes
+// thresholds is a whole number. The schema refuses a value outside its range,
+// so `config:set` and `CH-126`/`CH-127` reject it at the boundary. A file on
+// disk is clamped before it is validated, so an old or hand-edited file keeps
+// every other choice in it instead of going to quarantine (FR-033, TC-033).
+// A blank consent text loads as the shipped one.
 
 /** A provider and model pair. Both are registry keys, not a closed union. */
 interface ProviderChoice { providerId: string; modelId: string; }
@@ -1377,12 +1385,23 @@ All channels are declared in one file, `src/shared/ipc.ts`, and typed on both
 sides. Payloads are validated with `zod` at the router (`CMP-10`). An invalid
 payload is rejected and logged, never passed through.
 
+Which window may use which channel is declared once, in `INVOKE_ACCESS` and
+`PUSH_ACCESS` in the same file (`ADR-057`). Each preload keeps a literal copy,
+because a sandboxed preload cannot load a chunk it shares with another preload,
+and a test loads each preload and holds its copy equal to the table. The router
+checks every invoke against the table again, before the payload: the sending `webContents` must be the Dashboard or the overlay, the
+table must allow that window on that channel, and the sending frame must be the
+top-level frame of an app page (`file:` under the renderer output directory,
+or the dev server origin in development). Anything else is refused and logged.
+The audio worker has no invoke channel; its CH-303 and CH-304 messages are
+parsed against `audioWorkerChannels` and accepted only from the worker page.
+
 ### Renderer to main, request/response (`ipcRenderer.invoke`)
 
 | ID | Channel | Payload | Returns |
 |---|---|---|---|
 | CH-101 | `config:get` | none | `Settings` (never secrets) |
-| CH-102 | `config:set` | `Partial<Settings>` | `Settings` |
+| CH-102 | `config:set` | `Partial<Settings>` without `hotkeys`, `overlayWindow` or `activeProfileId`, which have their own channels | `Settings` |
 | CH-103 | `secrets:set` | `{ provider, key }` | `ValidationResult` (validates then saves, `FR-026`; a saved key then invalidates the catalogs built with the old one, `FR-117`) |
 | CH-104 | `secrets:status` | none | `{ deepgram: boolean, openai: boolean, anthropic: boolean }` |
 | CH-105 | `profile:list` | none | `Profile[]` |

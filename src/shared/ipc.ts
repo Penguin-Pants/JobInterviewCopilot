@@ -143,6 +143,18 @@ const customPrompt = z.object({
     .refine((value) => value.trim().length > 0, 'System prompt cannot be blank.'),
 });
 
+/**
+ * A number inside one of `SETTINGS_LIMITS`' ranges (FR-033, TC-033).
+ *
+ * The stored shape is bounded, so a value outside its range is refused at the
+ * IPC boundary like `CH-126`'s. A file on disk is clamped by `clampSettings`
+ * before it meets this schema, so an old or hand-edited file is repaired
+ * rather than quarantined.
+ */
+function inRange(limit: { readonly min: number; readonly max: number }): z.ZodNumber {
+  return z.number().min(limit.min).max(limit.max);
+}
+
 export const settingsSchema = z.object({
   schemaVersion: z.literal(7),
   activeProfileId: z.string(),
@@ -190,31 +202,35 @@ export const settingsSchema = z.object({
     mode: z.enum(['light', 'dark', 'system']),
     accent: z.string().regex(/^#[0-9a-fA-F]{6}$/),
     overlayTranslucency: z.enum(['acrylic', 'opacity']),
-    overlayOpacity: z.number(),
-    overlayFontSizePx: z.number(),
+    overlayOpacity: inRange(SETTINGS_LIMITS.overlayOpacity),
+    overlayFontSizePx: inRange(SETTINGS_LIMITS.overlayFontSizePx).int(),
   }),
   hotkeys: z.object({
     toggleInteraction: z.string().min(1),
     togglePause: z.string().min(1),
   }),
   trigger: z.object({
-    turnEndGapMs: z.number(),
-    minTurnWords: z.number(),
-    minTurnChars: z.number(),
-    candidateContextTurns: z.number(),
-    candidateContextChars: z.number(),
+    turnEndGapMs: inRange(SETTINGS_LIMITS.turnEndGapMs).int(),
+    minTurnWords: inRange(SETTINGS_LIMITS.minTurnWords).int(),
+    minTurnChars: inRange(SETTINGS_LIMITS.minTurnChars).int(),
+    candidateContextTurns: inRange(SETTINGS_LIMITS.candidateContextTurns).int(),
+    candidateContextChars: inRange(SETTINGS_LIMITS.candidateContextChars).int(),
   }),
   thresholds: z.object({
-    costUsd: z.number(),
-    timeMinutes: z.number(),
+    costUsd: inRange(SETTINGS_LIMITS.costUsd),
+    timeMinutes: inRange(SETTINGS_LIMITS.timeMinutes),
   }),
-  consentReminderText: z.string(),
+  consentReminderText: z
+    .string()
+    .trim()
+    .min(SETTINGS_LIMITS.consentReminderChars.min)
+    .max(SETTINGS_LIMITS.consentReminderChars.max),
   overlayWindow: z.object({
     x: z.number().nullable(),
     y: z.number().nullable(),
     // Null means "the shipped default size". See `Settings.overlayWindow`.
-    width: z.number().nullable(),
-    height: z.number().nullable(),
+    width: inRange(SETTINGS_LIMITS.overlayWidthPx).int().nullable(),
+    height: inRange(SETTINGS_LIMITS.overlayHeightPx).int().nullable(),
     displayId: z.string().nullable(),
     // The shipped default is true, the teleprompter behavior (FR-083).
     clickThrough: z.boolean(),
@@ -339,9 +355,22 @@ const healthState = z.discriminatedUnion('kind', [
 
 export const invokeChannels = {
   'config:get': { id: 'CH-101', payload: z.void(), response: settingsSchema },
+  /**
+   * Every setting except the three another channel owns (FR-086).
+   *
+   * `hotkeys` belongs to `hotkey:rebind`, which registers the accelerator
+   * before storing it; written here it was stored and never registered.
+   * `overlayWindow` belongs to the overlay's geometry and mode channels, and
+   * `activeProfileId` to `profile:activate`, which checks the profile exists.
+   * `strict`, so a renderer sending one is told so instead of having it
+   * silently dropped.
+   */
   'config:set': {
     id: 'CH-102',
-    payload: settingsSchema.partial(),
+    payload: settingsSchema
+      .omit({ hotkeys: true, overlayWindow: true, activeProfileId: true })
+      .partial()
+      .strict(),
     response: settingsSchema,
   },
   'secrets:set': {
@@ -826,6 +855,15 @@ export const pushChannels = {
  * CH-301 .. CH-304  audio worker
  * ------------------------------------------------------------------ */
 
+/**
+ * The largest PCM buffer `CH-303` accepts (ADR-027).
+ *
+ * The worker sends one second per chunk, 32,000 bytes at 16 kHz, 16-bit mono.
+ * Twice that leaves room for a flush that ends late and still refuses a buffer
+ * that is not a chunk.
+ */
+export const MAX_PCM_CHUNK_BYTES = 64_000;
+
 export const audioWorkerChannels = {
   'audio:start': {
     id: 'CH-301',
@@ -834,7 +872,9 @@ export const audioWorkerChannels = {
   'audio:stop': { id: 'CH-302', payload: z.void() },
   'audio:chunk': {
     id: 'CH-303',
-    // pcm is a transferred ArrayBuffer and is validated structurally, not by zod.
+    // pcm arrives as an ArrayBuffer (a structured-clone copy, ADR-027). It is
+    // checked by `handleWorkerMessage`, not by zod: an ArrayBuffer, non-empty,
+    // a whole number of 16-bit samples and at most MAX_PCM_CHUNK_BYTES.
     payload: z.object({
       source: transcriptSource,
       timestamp: z.number(),
@@ -862,3 +902,121 @@ export type PushPayload<C extends PushChannel> = z.infer<(typeof pushChannels)[C
 
 export const INVOKE_CHANNEL_NAMES = Object.keys(invokeChannels) as InvokeChannel[];
 export const PUSH_CHANNEL_NAMES = Object.keys(pushChannels) as PushChannel[];
+
+/* ------------------------------------------------------------------ *
+ * Which window may use which channel (FR-086, CMP-10, ADR-057)
+ * ------------------------------------------------------------------ */
+
+/**
+ * One table, enforced twice. The main-process router checks every invoke
+ * against it by the `webContents` that sent it. Each preload keeps a literal
+ * allowlist too, held equal to this table by a test (`ipc-sender.test.ts`): a
+ * sandboxed preload cannot load a module shared with another preload, so it
+ * cannot import this one. The preload check alone was never a boundary, since
+ * it runs inside the renderer it is meant to restrict.
+ *
+ * `satisfies Record<...>` makes both tables exhaustive. A channel added to the
+ * contract fails typecheck here until someone decides which window may use it.
+ */
+export type IpcWindowRole = 'dashboard' | 'overlay';
+
+const DASHBOARD = ['dashboard'] as const;
+const OVERLAY = ['overlay'] as const;
+const BOTH = ['dashboard', 'overlay'] as const;
+
+/**
+ * The Dashboard is the configuration surface, so it gets every channel that
+ * changes settings, credentials, profiles, documents or sessions.
+ *
+ * The overlay gets six, and each exists so the overlay never needs
+ * `config:set`. `overlay:setFontSize` (FR-093) and `overlay:setSize` (FR-081)
+ * can each change one or two numbers in a range the contract's schema enforces
+ * (CH-126, CH-127). `overlay:setPointerOverControls` writes nothing; it reports
+ * whether the pointer is over one of the overlay's own controls, so the window
+ * is clickable there and click-through everywhere else (CH-128, FR-006,
+ * FR-083).
+ */
+export const INVOKE_ACCESS = {
+  'config:get': DASHBOARD,
+  'config:set': DASHBOARD,
+  'secrets:set': DASHBOARD,
+  'secrets:status': DASHBOARD,
+  'llmCatalog:get': DASHBOARD,
+  'llmCatalog:refresh': DASHBOARD,
+  'dashboard:setPromptDirty': DASHBOARD,
+  'catalog:stt': DASHBOARD,
+  'profile:list': DASHBOARD,
+  'profile:create': DASHBOARD,
+  'profile:delete': DASHBOARD,
+  'profile:activate': DASHBOARD,
+  'doc:import': DASHBOARD,
+  'doc:setType': DASHBOARD,
+  'doc:delete': DASHBOARD,
+  'doc:retry': DASHBOARD,
+  'doc:pickFiles': DASHBOARD,
+  'model:ensure': DASHBOARD,
+  'session:start': DASHBOARD,
+  'session:stop': DASHBOARD,
+  'session:list': DASHBOARD,
+  'session:read': DASHBOARD,
+  'session:delete': DASHBOARD,
+  'hotkey:rebind': DASHBOARD,
+  'overlay:setInteractive': DASHBOARD,
+  'overlay:reset': DASHBOARD,
+  'overlay:ready': OVERLAY,
+  'overlay:savePosition': OVERLAY,
+  'consent:dismiss': OVERLAY,
+  'overlay:setFontSize': OVERLAY,
+  'overlay:setSize': OVERLAY,
+  'overlay:setPointerOverControls': OVERLAY,
+} as const satisfies Record<InvokeChannel, readonly IpcWindowRole[]>;
+
+/**
+ * The overlay receives no error channel. It has two states, idle and
+ * suggestions, and no error state (FR-076, TC-096).
+ *
+ * Two notices reach it, and neither is an error. `notice:captureFidelity`
+ * belongs beside the consent reminder, which is in the overlay (NFR-012).
+ * `notice:platform` describes the machine, and the overlay needs it to know
+ * whether the acrylic it asked for is the window it got (CH-216, ADR-038).
+ *
+ * `overlay:mode` reaches the Dashboard too: it shows the mode as a checkbox and
+ * the hotkey can change it while the Dashboard has focus (CH-212, FR-083).
+ */
+export const PUSH_ACCESS = {
+  'state:session': BOTH,
+  'state:providers': DASHBOARD,
+  'state:audio': DASHBOARD,
+  'state:usage': DASHBOARD,
+  'usage:warning': DASHBOARD,
+  'transcript:live': DASHBOARD,
+  'suggestion:begin': OVERLAY,
+  'suggestion:line': OVERLAY,
+  'suggestion:end': OVERLAY,
+  'overlay:consent': OVERLAY,
+  'overlay:theme': OVERLAY,
+  'overlay:mode': BOTH,
+  'rag:progress': DASHBOARD,
+  'model:download': DASHBOARD,
+  'notice:captureFidelity': BOTH,
+  'notice:platform': BOTH,
+  'notice:session': DASHBOARD,
+  'state:llmCatalog': DASHBOARD,
+} as const satisfies Record<PushChannel, readonly IpcWindowRole[]>;
+
+/** True when `role` may invoke `channel`. */
+export function mayInvoke(role: IpcWindowRole, channel: InvokeChannel): boolean {
+  return (INVOKE_ACCESS[channel] as readonly IpcWindowRole[]).includes(role);
+}
+
+/** Every invoke channel one window may use. */
+export function invokeChannelsFor(role: IpcWindowRole): InvokeChannel[] {
+  return (Object.keys(INVOKE_ACCESS) as InvokeChannel[]).filter((c) => mayInvoke(role, c));
+}
+
+/** Every push channel one window may receive. */
+export function pushChannelsFor(role: IpcWindowRole): PushChannel[] {
+  return (Object.keys(PUSH_ACCESS) as PushChannel[]).filter((c) =>
+    (PUSH_ACCESS[c] as readonly IpcWindowRole[]).includes(role),
+  );
+}

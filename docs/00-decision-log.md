@@ -2481,3 +2481,49 @@ SDK's `TranscriptionSessionUpdate` and matches it, so it is unchanged; whether
 the beta `OpenAI-Beta: realtime=v1` protocol stays available is not covered by
 the SDK types and is an open risk. `02-architecture.md` section 3.1 records the
 new behavior.
+
+### ADR-057: Trust boundaries: the main process checks who sent each message
+
+**Decided 2026-10-04** while fixing audit findings on the IPC boundary.
+
+**Context.** Every per-window IPC restriction lived in a preload. A preload runs
+inside the renderer it restricts, so the overlay, which renders model output,
+could reach `secrets:set`, `config:set` or `session:delete` if that renderer
+were compromised. The audio worker's messages were cast, not parsed, and any
+frame that called `getDisplayMedia` got the screen and system audio with no
+picker. `config:set` stored fields whose own channels do more than store them.
+The packaged binary had no Electron fuses.
+
+**Decision.**
+
+- One access table, `INVOKE_ACCESS` and `PUSH_ACCESS` in `src/shared/ipc.ts`,
+  says which window may use each channel. The router checks it by sender: the
+  Dashboard's or the overlay's `webContents`, the top-level frame, on an app
+  page. Each preload keeps a literal copy, held equal to the table by a test
+  that loads the preload and probes its bridge.
+- CH-303 and CH-304 are parsed against `audioWorkerChannels`, the PCM buffer is
+  checked (an `ArrayBuffer`, whole 16-bit samples, at most 64,000 bytes) and a
+  message from any frame but the worker page is dropped. A consumer that throws
+  is caught.
+- Display media and permission checks are granted to the audio worker only.
+- `config:set` refuses `hotkeys`, `overlayWindow` and `activeProfileId`. It
+  re-pushes a changed consent text and applies health, the trigger and the cost
+  meter before an overlay rebuild that can fail.
+- External links open only for `https:`, and a redirect is blocked like a
+  navigation.
+- Fuses: `runAsNode` and `enableNodeOptionsEnvironmentVariable` off,
+  `onlyLoadAppFromAsar` and `enableEmbeddedAsarIntegrityValidation` on.
+
+**Rejected.** Importing the table into the preloads. Two preloads importing one
+module makes Rollup emit a shared chunk, and a sandboxed preload cannot
+`require` it, so both windows would load with no bridge. electron-vite's
+`isolatedEntries` avoids the chunk but is experimental and fails the build when
+stdout is not a terminal, which is every CI log.
+
+**Rejected.** Turning off `enableNodeCliInspectArguments`. Playwright launches
+the packaged app for `smoke:packaged` by passing `--inspect=0` and waiting for
+the inspector, so the release gate could no longer run.
+
+**Consequence.** A new channel fails typecheck until the table names its window.
+`onlyLoadAppFromAsar` and the integrity fuse are proved only by `smoke:packaged`
+on the Windows runner, which also proves `asarUnpack` still loads.

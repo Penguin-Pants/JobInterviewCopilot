@@ -104,31 +104,61 @@ export function hardenedWebPreferences(
   };
 }
 
-/* v8 ignore start -- Electron webContents event wiring. The behavior it
-   installs is asserted end to end by TC-008 on the Windows runner. */
+/**
+ * Whether a link may be handed to the operating system (FR-086, TC-008).
+ *
+ * `https:` only. `shell.openExternal` runs whatever handler Windows has
+ * registered for a scheme, so `file:` would launch a program and a custom
+ * scheme would launch whatever installed it. No link this app shows needs
+ * anything but `https:`.
+ */
+export function isExternalLinkAllowed(url: string): boolean {
+  try {
+    return new URL(url).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Deny every navigation and every popup (FR-086, TC-008).
- * A renderer in this app has no reason to leave its own page; an external link
- * opens in the user's browser instead.
+ * A renderer in this app has no reason to leave its own page; an external
+ * `https:` link opens in the user's browser instead, and any other is dropped.
+ *
+ * A server redirect is a navigation too, but Electron reports it as
+ * `will-redirect`, not `will-navigate`, so both get the same rule.
  */
 export function applyNavigationLockdown(win: BrowserWindow): void {
   win.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url).catch(() => undefined);
+    if (isExternalLinkAllowed(url)) void shell.openExternal(url).catch(() => undefined);
+    else getLogger().warn('external link blocked', { scheme: schemeOf(url) });
     return { action: 'deny' };
   });
-  win.webContents.on('will-navigate', (event, url) => {
-    const current = win.webContents.getURL();
-    if (url !== current) {
+  const stayOnPage = (event: { preventDefault(): void }, url: string): void => {
+    if (url !== win.webContents.getURL()) {
       event.preventDefault();
-      getLogger().warn('navigation blocked', { url });
+      getLogger().warn('navigation blocked', { scheme: schemeOf(url) });
     }
-  });
+  };
+  win.webContents.on('will-navigate', stayOnPage);
+  win.webContents.on('will-redirect', stayOnPage);
   win.webContents.on('will-attach-webview', (event) => {
     event.preventDefault();
     getLogger().warn('webview attach blocked');
   });
 }
-/* v8 ignore stop */
+
+/**
+ * The scheme alone, for a log line. A blocked URL can be a local path outside
+ * userData, which the log must not carry (03-tasks.md Definition of Done).
+ */
+function schemeOf(url: string): string {
+  try {
+    return new URL(url).protocol;
+  } catch {
+    return 'unparseable';
+  }
+}
 
 /** How many renderer crashes a window is reloaded through before it closes. */
 export const MAX_RENDERER_RELOADS = 3;
