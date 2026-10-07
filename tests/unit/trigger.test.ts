@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { defaultSettings } from '../../src/shared/defaults.js';
 import type { TranscriptEvent } from '../../src/shared/types.js';
 import {
+  ENDPOINT_HOLD_MS,
   TriggerMachine,
   countWords,
   passesTurnGuard,
@@ -281,6 +282,19 @@ describe('TC-085 context ring', () => {
     expect(h.trigger.candidateContext).toBe('turn 48\nturn 49');
   });
 
+  it('keeps no turn at all when the ring is set to zero turns', () => {
+    // `slice(-0)` is `slice(0)`, the whole array, so a ring set to zero grew
+    // for the whole interview and handed every turn back once raised again.
+    const h = harness({ candidateContextTurns: 0 });
+    for (let i = 0; i < 5; i += 1) candidateTurn(h, `turn ${String(i)}`);
+    expect(h.trigger.candidateContext).toBe('');
+
+    h.trigger.setConfig(config({ candidateContextTurns: 2 }));
+    expect(h.trigger.candidateContext).toBe('');
+    candidateTurn(h, 'after the change');
+    expect(h.trigger.candidateContext).toBe('after the change');
+  });
+
   it('caps the pair at 400 characters, dropping the oldest content first', () => {
     const h = harness();
     const older = `OLDSTART${'o'.repeat(300)}`;
@@ -515,6 +529,107 @@ describe('turn-end regressions', () => {
     expect(h.fired).toHaveLength(0);
     vi.advanceTimersByTime(GAP);
     expect(h.fired).toHaveLength(1);
+  });
+
+  /**
+   * An endpoint that lands just after its own turn was evaluated belongs to
+   * that turn. Held, it fired the opening words of the next question on their
+   * own and split the question in two.
+   */
+  it('drops an endpoint that arrives just after the turn it ends was evaluated', () => {
+    const h = harness();
+    h.trigger.handleTranscript(event({ text: 'Tell me about a hard project' }));
+    vi.advanceTimersByTime(GAP);
+    expect(h.fired).toHaveLength(1);
+    h.trigger.noteGenerationSettled('gen-1');
+
+    h.trigger.handleEndpoint();
+    vi.advanceTimersByTime(100);
+    h.trigger.handleTranscript(event({ text: 'And then I want to hear' }));
+    expect(h.fired).toHaveLength(1);
+
+    h.trigger.handleTranscript(event({ text: 'what you learned from it' }));
+    vi.advanceTimersByTime(GAP);
+    expect(h.fired).toHaveLength(2);
+    expect(h.fired[1]?.question).toBe('And then I want to hear what you learned from it');
+  });
+
+  it('lets a held endpoint expire rather than wait for the next question', () => {
+    const h = harness();
+    h.trigger.handleEndpoint();
+    vi.advanceTimersByTime(ENDPOINT_HOLD_MS + 1);
+
+    h.trigger.handleTranscript(event({ text: 'Tell me about a hard project' }));
+    expect(h.fired).toHaveLength(0);
+    vi.advanceTimersByTime(GAP);
+    expect(h.fired).toHaveLength(1);
+  });
+
+  it('still holds the endpoint of the next utterance, once it has been spoken', () => {
+    // OpenAI server VAD, two questions in a row: each `speech_stopped` comes
+    // before its own completed transcript.
+    const h = harness();
+    h.trigger.handleEndpoint();
+    h.trigger.handleTranscript(event({ text: 'Tell me about a hard project' }));
+    expect(h.fired).toHaveLength(1);
+    h.trigger.noteGenerationSettled('gen-1');
+
+    vi.advanceTimersByTime(3000);
+    h.trigger.handleEndpoint();
+    h.trigger.handleTranscript(event({ text: 'And what did you learn from it' }));
+    expect(h.fired).toHaveLength(2);
+  });
+
+  it('holds the endpoint of a rapid follow-up that arrives before its text', () => {
+    // OpenAI server VAD, the follow-up spoken at once. Its `speech_stopped`
+    // lands well inside one gap of the first evaluation, before its own
+    // completed transcript. The first turn's endpoint was already spent, so
+    // this one belongs to the follow-up.
+    const h = harness();
+    h.trigger.handleEndpoint();
+    h.trigger.handleTranscript(event({ text: 'Tell me about a hard project' }));
+    expect(h.fired).toHaveLength(1);
+    h.trigger.noteGenerationSettled('gen-1');
+
+    vi.advanceTimersByTime(100);
+    h.trigger.handleEndpoint();
+    h.trigger.handleTranscript(event({ text: 'And what did you learn from it' }));
+    expect(h.fired).toHaveLength(2);
+    expect(h.fired[1]?.question).toBe('And what did you learn from it');
+  });
+
+  it('holds an empty endpoint once new interviewer speech was heard', () => {
+    // The local gap ended the first turn. An interim since then is new speech,
+    // so the endpoint that follows ends that speech, not the evaluated turn.
+    const h = harness();
+    h.trigger.handleTranscript(event({ text: 'Tell me about a hard project' }));
+    vi.advanceTimersByTime(GAP);
+    expect(h.fired).toHaveLength(1);
+    h.trigger.noteGenerationSettled('gen-1');
+
+    h.trigger.handleTranscript(event({ text: 'And what did', isFinal: false }));
+    h.trigger.handleEndpoint();
+    h.trigger.handleTranscript(event({ text: 'And what did you learn from it' }));
+    expect(h.fired).toHaveLength(2);
+    expect(h.fired[1]?.question).toBe('And what did you learn from it');
+  });
+
+  it('holds an empty endpoint once the provider reports new speech', () => {
+    // The local gap ended the first turn before any endpoint for it came. A
+    // rapid follow-up on OpenAI sends `speech_started`, then `speech_stopped`
+    // before any transcript of it. The speech start says the endpoint is the
+    // follow-up's, so it is held for the follow-up's final, not spent.
+    const h = harness();
+    h.trigger.handleTranscript(event({ text: 'Tell me about a hard project' }));
+    vi.advanceTimersByTime(GAP);
+    expect(h.fired).toHaveLength(1);
+    h.trigger.noteGenerationSettled('gen-1');
+
+    h.trigger.handleSpeechStart();
+    h.trigger.handleEndpoint();
+    h.trigger.handleTranscript(event({ text: 'And what did you learn from it' }));
+    expect(h.fired).toHaveLength(2);
+    expect(h.fired[1]?.question).toBe('And what did you learn from it');
   });
 
   /**

@@ -638,7 +638,11 @@ abnormal close, so the reconnect ladder runs (ADR-056).
 without bound (ADR-027), so only the adapter knows what really went; the Cost
 Meter's "audio actually sent to a provider" is read from here. An adapter that
 sends everything it is handed has nothing to correct and omits it, and the
-caller bills the chunk it handed over.
+caller bills the chunk it handed over. `CMP-15` bills the growth of
+`sentBytes` since its last bill, at each chunk and once more after `close`,
+not the growth around one `push`: a socket flushes its queue on reconnect and a
+batch model posts queued windows and its tail outside `push`, and
+around-the-push billing never saw that audio.
 
 `close` on a **batch** adapter posts its remaining buffer and answers from it,
 so a caller must stay routable until `close` resolves. Clearing the route first
@@ -680,6 +684,23 @@ Adapter notes:
 - `openai` `whisper-1`: the one non-streaming model. Buffers 4000 ms, posts an
   in-memory WAV body, emits one final event per request, never an interim, never
   an endpoint. Held to `NFR-017`. (ADR-022)
+  - Each window is posted when it fills, so up to `WHISPER_MAX_IN_FLIGHT` (3)
+    requests run at once. Results are delivered in the order the windows were
+    spoken, each after the one before it. One request at a time made the time
+    between transcripts equal to the provider latency, and past the trigger's
+    window plus gap that read as silence and split one question in two. A
+    window that fills while the cap is in flight is not sent, so it is never
+    billed. `sentBytes` counts every upload, a retry included.
+  - Each request is bounded by `WHISPER_REQUEST_TIMEOUT_MS` (10 s, the
+    `NFR-017` p95) and aborted when it expires, as a retryable `timeout`. A
+    retryable failure is retried once after 250 ms before it is raised on
+    `error`, so one 429 or 5xx does not reopen both streams and lose the window.
+    Before it raises a failure, the session aborts every other open request,
+    drops its buffer and takes no more audio. The reopen that the failure
+    starts closes the session, and that close then ends at once.
+  - `close` waits for the tail at most `WHISPER_CLOSE_TIMEOUT_MS` (10 s), then
+    aborts every open request. A provider that never
+    answers can no longer hold Stop, the compaction and the session lock.
 
 ### 3.2 LLM adapter (`CMP-07`)
 
@@ -726,6 +747,19 @@ a truncated answer on the overlay with nothing to say it was cut short, and left
 the health machine unaware. Both adapters throw a `ProviderError` when a
 non-aborted stream ends without its marker; `CMP-07` still shows the lines that
 did arrive (`FR-076`). An abort is not an early end.
+
+**A request that goes quiet is a `timeout`, not a wait.** `fetchStreamPost`
+joins the caller's signal with a watchdog: no body byte within
+`LLM_FIRST_BYTE_TIMEOUT_MS` (10 s), or no further byte within
+`LLM_IDLE_TIMEOUT_MS` (10 s) once the stream started, aborts the request and
+raises a retryable `ProviderError` of class `timeout`, which `CMP-12` retries
+and fails over like any other. Ten seconds is the `NFR-017` p95 for a whole
+turn, so a slower answer misses every latency budget, and one retry still lands
+before `STALE_DISCARD_MS` (20 s). The idle limit is as long because a reasoning
+model can pause after its first frame. A caller abort is still an `AbortError`,
+which the adapters treat as a cancellation. Before this nothing in `src/main/ai`
+produced a `timeout` except a 408 or 504 status, so a provider that accepted
+the request and sent nothing never counted as a failure.
 
 **A model id is checked against the registry before dispatch**, exactly as
 `openSttSession` checks it. `modelId` is a plain string in `Settings`, so a
@@ -831,6 +865,41 @@ backup at the same time, so the two capabilities disagree about whether there is
 anywhere to fail over to. The machine is therefore told per request, and a
 capability never falls to a backup that belongs to the other one. Clarified
 during `TASK-014`, where the shared-credential case otherwise had two answers.
+
+**Which capability is on its backup is per capability too.** `runFor` passes
+the capability as the run's scope, with `hasBackup` and the turn's signal, down
+the call chain; nothing about one run is stored on the machine where a run
+asleep in a backoff could read another's values. The machine records which
+scopes failed over. Only those go to the backup; a capability without a backup
+on the same key keeps using the primary, its ladder and `DEGRADED`. The
+credential still reports `using-backup` for the badge while any scope is on its
+backup, so the classifier gate (3.6), which reads that credential state, still
+skips while another capability on the key is on its backup, as `ADR-045`'s
+coarse rule intends. Found in an audit: with one OpenAI key as the STT
+primary (with a backup) and the LLM primary (without one), an STT failover
+routed every suggestion to a backup that did not exist.
+
+**Which capability is in `DEGRADED` is per capability as well.** The machine
+records the degraded scopes, each with its last reason and its own backoff
+growth, next to the scopes on a backup. Only a degraded scope gets the single
+`DEGRADED` attempt, and only its own success on the primary takes it out. The
+credential state is then a projection for the badge, worst first in the
+`SEVERITY` order the registry uses: `degraded` while any scope is degraded,
+else `using-backup` while any scope is on its backup, else `using-primary`.
+A ladder shows `retrying` only while nothing worse is true of the key. With one
+shared state, an STT failover rewrote a degraded LLM's state to
+`using-backup`, and the LLM's next request ran the whole primary ladder again.
+Two passing probes at a clean boundary clear both sets, as before.
+
+**A backoff sleep ends when the turn is aborted.** `runFor` takes an optional
+`AbortSignal` and races each backoff against it, rejecting with the abort reason
+at once. `CMP-15` passes the turn's signal, so a degraded turn a newer turn
+replaced stops waiting instead of holding the newer turn, chained behind it,
+until it is stale (`FR-054`, `FR-114`). No later attempt runs to send the
+cancelled `suggestion:end`, so `CMP-15` sends it itself when an earlier
+attempt's salvage is still on the overlay. Without it the salvage stayed up
+whenever the newer turn sent no card of its own (confidence gate,
+non-actionable).
 
 **`CONFIG_REQUIRED` is terminal for the credential, not for one capability.** A
 revoked key stays revoked even where another capability routes around it, so
@@ -1002,8 +1071,9 @@ attempt is made against `llm.generate`, using the *primary*'s
 `ProviderChoice` (never the backup's — `'using-backup'` skips per the rule
 above, so this call never needs its own target-selection logic), under an
 800ms client-side timeout (`ASM-020`) local to the classification call,
-distinct from and shorter than any retry-driven timeout `runFor` applies to
-a real generation. A timeout or any other failure resolves to `'actionable'`
+distinct from and shorter than the transport's first-byte and idle timeouts
+(10 s each, 3.2) that bound every request of a real generation. `runFor`
+applies no timeout of its own. A timeout or any other failure resolves to `'actionable'`
 (`ADR-045`, same fallback as above) and is never itself reported to `CMP-12`
 as a probe outcome — classification calls observe health state, they never
 drive it.
@@ -1819,7 +1889,13 @@ change what the machine does, not only how it is written.
   `AWAITING_TURN_END`, so the second question of a pair does not wait out a
   local gap the provider has already observed. An endpoint arriving *before* the
   text it ends, which is the order OpenAI's server VAD uses, is held for the
-  next final rather than discarded. Once honored, it is the identical "new
+  next final rather than discarded, for at most `ENDPOINT_HOLD_MS` (2 s). One
+  endpoint with no text is dropped, not held: the first after a turn that the
+  local gap ended before any endpoint arrived, when no interviewer text or
+  interim came since. It ends the turn just evaluated, and held it fired the
+  first words of the next question on their own. The rule follows what the
+  provider sent, not elapsed time, so a rapid follow-up whose endpoint comes
+  before its text is still held. Once honored, it is the identical "new
   turn end" trigger described above — same guard, same `firedAt` stamp, same
   abort, same confidence gate, same classifier — never a shortcut around any
   of them; the only thing a native endpoint changes is not having to wait out

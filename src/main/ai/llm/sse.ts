@@ -6,7 +6,8 @@
  * here once. An adapter is then the shape of one provider's JSON and nothing
  * else.
  */
-import { classifyStatus } from '../stt.js';
+import type { ProviderError } from '../../../shared/types.js';
+import { classifyStatus, providerError } from '../stt.js';
 
 /** One decoded SSE frame. `event` is empty when the stream omits the field. */
 export interface SseEvent {
@@ -31,49 +32,138 @@ export interface StreamResponse {
  */
 export type StreamPost = (
   url: string,
-  init: { headers: Record<string, string>; body: string; signal: AbortSignal },
+  init: {
+    /** Names the provider in a timeout the transport raises itself. */
+    providerId: string;
+    headers: Record<string, string>;
+    body: string;
+    signal: AbortSignal;
+  },
 ) => Promise<StreamResponse>;
+
+/**
+ * How long a request may wait for its first body byte, and a started stream
+ * for its next one.
+ *
+ * Without these a provider that accepted the request and then sent nothing
+ * never counted as a failure: no retry, no failover, and an empty overlay.
+ * Ten seconds is the `NFR-017` p95 for a whole turn, so an answer slower than
+ * that misses every latency budget. It still leaves one retry room to land
+ * before `STALE_DISCARD_MS` (20 s, `ASM-017`) throws the suggestion away. The
+ * idle limit is as long, because a reasoning model can pause after its first
+ * frame while it thinks.
+ */
+export const LLM_FIRST_BYTE_TIMEOUT_MS = 10_000;
+export const LLM_IDLE_TIMEOUT_MS = 10_000;
 
 /**
  * The production transport.
  *
- * `signal` is handed to `fetch`, so cancelling aborts the underlying HTTP
- * request. Stopping at the reader would leave the connection open and the
- * provider still billing for tokens nobody will read (`FR-075`).
+ * The caller's `signal` reaches `fetch`, so cancelling aborts the underlying
+ * HTTP request. Stopping at the reader would leave the connection open and the
+ * provider still billing for tokens nobody will read (`FR-075`). A watchdog
+ * signal joins it and aborts the request when the first byte, or the next one,
+ * is late; that abort surfaces as a retryable `timeout` `ProviderError`, while
+ * a caller abort still surfaces as an `AbortError`, which is a cancellation.
  */
 export const fetchStreamPost: StreamPost = async (url, init) => {
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', ...init.headers },
-    body: init.body,
-    signal: init.signal,
-  });
+  const watchdog = new AbortController();
+  let timedOut: ProviderError | null = null;
+  let handle: ReturnType<typeof setTimeout> | undefined;
+  const disarm = (): void => {
+    clearTimeout(handle);
+    handle = undefined;
+  };
+  const arm = (ms: number, what: string): void => {
+    disarm();
+    handle = setTimeout(() => {
+      timedOut = providerError(init.providerId, 'timeout', `The language model sent ${what}.`);
+      watchdog.abort(timedOut);
+    }, ms);
+  };
+  // Whatever the caller aborts, the watchdog has nothing left to guard.
+  init.signal.addEventListener('abort', disarm, { once: true });
+  /** A failure caused by the watchdog is reported as the timeout it is. */
+  const rethrow = (err: unknown): never => {
+    disarm();
+    throw timedOut ?? err;
+  };
+
+  arm(LLM_FIRST_BYTE_TIMEOUT_MS, `nothing for ${String(LLM_FIRST_BYTE_TIMEOUT_MS)} ms`);
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...init.headers },
+      body: init.body,
+      signal: AbortSignal.any([init.signal, watchdog.signal]),
+    });
+  } catch (err) {
+    return rethrow(err);
+  }
 
   return {
     ok: res.ok,
     status: res.status,
-    errorText: () => res.text(),
-    chunks: () => decodeBody(res.body),
+    errorText: async () => {
+      try {
+        return await res.text();
+      } catch (err) {
+        // The status already arrived and is what classifies the failure. A
+        // body that stalls is only missing detail, so it must not turn a 401
+        // into a retryable timeout; the adapter names the status instead.
+        if (timedOut) return '';
+        return rethrow(err);
+      } finally {
+        disarm();
+      }
+    },
+    chunks: () =>
+      decodeBody(res.body, {
+        onChunk: () => {
+          arm(LLM_IDLE_TIMEOUT_MS, `no more for ${String(LLM_IDLE_TIMEOUT_MS)} ms`);
+        },
+        onEnd: disarm,
+        rethrow,
+      }),
   };
 };
 
-async function* decodeBody(body: ReadableStream<Uint8Array> | null): AsyncIterable<string> {
-  if (!body) return;
+async function* decodeBody(
+  body: ReadableStream<Uint8Array> | null,
+  watch: { onChunk: () => void; onEnd: () => void; rethrow: (err: unknown) => never },
+): AsyncIterable<string> {
+  if (!body) {
+    watch.onEnd();
+    return;
+  }
   const decoder = new TextDecoder();
   const reader = body.getReader();
   try {
     for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
+      let read: ReadableStreamReadResult<Uint8Array>;
+      try {
+        read = await reader.read();
+      } catch (err) {
+        return watch.rethrow(err);
+      }
+      if (read.done) break;
+      watch.onChunk();
       // `stream: true` so a multi-byte character split across two network
       // packets is not decoded as two replacement characters.
-      if (value) yield decoder.decode(value, { stream: true });
+      yield decoder.decode(read.value, { stream: true });
     }
     const tail = decoder.decode();
     if (tail !== '') yield tail;
   } finally {
+    watch.onEnd();
     reader.releaseLock();
   }
+}
+
+/** A failure already classified, by the transport or by an adapter. */
+export function isProviderError(err: unknown): err is ProviderError {
+  return err instanceof Error && 'class' in err && 'retryable' in err;
 }
 
 /**
