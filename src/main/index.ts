@@ -322,10 +322,15 @@ async function bootstrap(): Promise<void> {
     onStreamState: ({ source, state, error }) => {
       // Tell the supervisor first, so `canStartSession` reflects the worker's
       // view rather than waiting for the first chunk to prove it.
-      audio.noteStreamState(source, state as StreamState, error);
-      if (state === 'error') {
-        // Never rejects. A failed restart lands in `error` (FR-045).
-        void audio.handleStreamEnded(source, error ?? 'The audio stream ended.');
+      // The restart runs even if recording the state throws: skipped, a failed
+      // stream stayed down for the rest of the session (FR-045).
+      try {
+        audio.noteStreamState(source, state as StreamState, error);
+      } finally {
+        if (state === 'error') {
+          // Never rejects. A failed restart lands in `error` (FR-045).
+          void audio.handleStreamEnded(source, error ?? 'The audio stream ended.');
+        }
       }
     },
   });

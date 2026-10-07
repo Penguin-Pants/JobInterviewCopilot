@@ -354,6 +354,19 @@ describe('CH-303 and CH-304 are parsed, not cast', () => {
     expect(() => h.send('audio:chunk', [meta, new ArrayBuffer(2)])).not.toThrow();
   });
 
+  it('a stream-state consumer that throws does not escape the listener', () => {
+    // Audit regression: only CH-303 was guarded. A throw from CH-304's
+    // consumer was an uncaught main-process exception (ADR-057).
+    const h = host();
+    h.onStreamState.mockImplementation(() => {
+      throw new Error('consumer exploded');
+    });
+    expect(() =>
+      h.send('audio:streamState', [{ source: 'interviewer', state: 'error', error: 'gone' }]),
+    ).not.toThrow();
+    expect(h.onStreamState).toHaveBeenCalledTimes(1);
+  });
+
   it('hands a well-formed stream state on and drops a malformed one', () => {
     const h = host();
     h.send('audio:streamState', [{ source: 'candidate', state: 'running' }]);

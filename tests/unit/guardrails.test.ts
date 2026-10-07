@@ -843,6 +843,16 @@ describe('ADR-028 loopback acquisition details', () => {
     expect(source).toContain('removeTrack(track)');
   });
 
+  it('a failed stream is restarted even when recording its state throws', () => {
+    // Audit regression: a throw from noteStreamState or its push skipped the
+    // restart, so a failed stream stayed down (FR-045).
+    const source = readFileSync('src/main/index.ts', 'utf8');
+    const handler = source.slice(source.indexOf('onStreamState: ({ source, state, error })'));
+    expect(handler.slice(0, 900)).toMatch(
+      /try \{\s*audio\.noteStreamState\([^)]*\);\s*\} finally \{\s*if \(state === 'error'\)/,
+    );
+  });
+
   it('capture permissions are granted only to the audio worker', () => {
     const source = readFileSync('src/main/audio-host.ts', 'utf8');
     expect(source).toMatch(/CAPTURE_PERMISSIONS\.has\(permission\) && isAudioWorker\(contents\)/);

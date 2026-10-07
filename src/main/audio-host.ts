@@ -151,7 +151,11 @@ export function handleWorkerMessage(
       getLogger().warn('audio worker message rejected', { channel });
       return;
     }
-    sink.onStreamState(parsed.data);
+    try {
+      sink.onStreamState(parsed.data);
+    } catch (err) {
+      getLogger().error('audio stream state consumer threw', { err });
+    }
     return;
   }
 
