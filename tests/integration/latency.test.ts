@@ -76,7 +76,7 @@ describe('TC-133 app-side overhead on the turn-end to first-line path', () => {
       // The delay the model's first token would cost, on the first frame only.
       beforeChunk: (index) => (index === 0 ? sleep(FIRST_FRAME_MS) : undefined),
     });
-    h.gate.noteReady();
+    h.gate.noteReady(null);
 
     await startSession(h);
     const stream = h.stt.opened.find((s) => s.source === 'interviewer');
@@ -162,7 +162,7 @@ describe('TC-169 the actionability classifier latency budget', () => {
         return isClassification() ? sleep(CLASSIFY_MS) : sleep(FIRST_FRAME_MS);
       },
     });
-    h.gate.noteReady();
+    h.gate.noteReady(null);
 
     await startSession(h);
     const stream = h.stt.opened.find((s) => s.source === 'interviewer');

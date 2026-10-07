@@ -1,5 +1,13 @@
 import { execFileSync, execSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+  mkdirSync,
+  rmSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -239,7 +247,12 @@ describe('ADR-016 consent renders before readiness is reported', () => {
   it('the renderer waits for the consent text before reporting ready', () => {
     const source = readFileSync('src/renderer/overlay/Overlay.tsx', 'utf8');
     expect(source).toMatch(/if \(consent === null[^)]*\) return;/);
-    expect(source).toContain("invoke('overlay:ready')");
+    expect(source).toContain('reportReady(readyFor.sessionId');
+  });
+
+  it('the renderer stops a readiness retry as soon as a push names another session', () => {
+    const source = readFileSync('src/renderer/overlay/Overlay.tsx', 'utf8');
+    expect(source).toContain("latestSessionId: () => lastSeen('state:session')?.sessionId ?? null");
   });
 
   it('main pushes the consent text on load rather than in reply to ready', () => {
@@ -1194,8 +1207,8 @@ describe('TASK-044 live loop wiring', () => {
    * not produced one.
    */
   it('clears the overlay gate at both ends of a session', () => {
-    expect(handlerBody('session:start')).toContain('overlayGate.reset()');
-    expect(handlerBody('session:stop')).toContain('overlayGate.reset()');
+    expect(handlerBody('session:start')).toContain('overlayGate.reset(active.id)');
+    expect(handlerBody('session:stop')).toContain('overlayGate.reset(null)');
   });
 
   /**
@@ -1358,7 +1371,11 @@ describe('TASK-050 Dashboard actions run one at a time', () => {
      */
     it(`marks ${name} busy with aria-disabled, which keeps keyboard focus`, () => {
       const button = element(read(file), 'button', marker);
-      expect(button).toContain(`aria-disabled={${gate}.busy || undefined}`);
+      // Other reasons may join the busy state, such as a session that binds
+      // the providers. The attribute stays absent at rest either way.
+      expect(button).toMatch(
+        new RegExp(`aria-disabled=\\{[^}]*\\b${gate}\\.busy\\b[^}]*\\|\\| undefined\\}`),
+      );
       expect(button).not.toMatch(/(?<!aria-)disabled=\{[^}]*busy/);
     });
   }
@@ -1378,5 +1395,193 @@ describe('TASK-050 Dashboard actions run one at a time', () => {
     const zone = element(read('CompanyProfiles.tsx'), 'div', '"drop-zone"');
     expect(zone).toContain('dragLeftZone(e.currentTarget, e.relatedTarget)');
     expect(zone).not.toContain('onDragLeave={() => setDropTarget(false)}');
+  });
+});
+
+/**
+ * NFR-010: no control that can become unavailable while it has focus uses
+ * native `disabled`. Chromium moves focus to the page body and does not give it
+ * back, which is the defect `inFlight.ts` fixed for five buttons. These scans
+ * cover every renderer component, so a new control cannot bring it back. The
+ * vendored components are upstream code and are not scanned.
+ */
+describe('NFR-010 a control that becomes unavailable keeps keyboard focus', () => {
+  const roots = ['dashboard', 'overlay'].map((dir) => join(process.cwd(), 'src', 'renderer', dir));
+
+  function components(dir: string): string[] {
+    return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) return entry.name === 'vendor' ? [] : components(path);
+      return entry.name.endsWith('.tsx') ? [path] : [];
+    });
+  }
+
+  /** Every JSX element with this tag, from its opening tag to `end`. */
+  function elements(text: string, tag: string, end: string): string[] {
+    const found: string[] = [];
+    let at = text.indexOf(`<${tag}`);
+    while (at !== -1) {
+      const close = text.indexOf(end, at);
+      found.push(text.slice(at, close === -1 ? undefined : close));
+      at = text.indexOf(`<${tag}`, at + 1);
+    }
+    return found;
+  }
+
+  /** The element without its comments, which may say "disabled" in prose. */
+  function withoutComments(source: string): string {
+    return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  }
+
+  const files = roots.flatMap(components);
+
+  it('finds the renderer components', () => {
+    expect(files.some((file) => file.endsWith('App.tsx'))).toBe(true);
+    expect(files.some((file) => file.endsWith('FontSizeControl.tsx'))).toBe(true);
+  });
+
+  /**
+   * Every button. Focus is on a button when its own action starts, so a native
+   * `disabled` bound to anything that action changes (a busy flag, a limit
+   * reached, a session started) drops focus.
+   */
+  it('marks an unavailable button with aria-disabled, never native disabled', () => {
+    const offenders = files.flatMap((file) =>
+      elements(readFileSync(file, 'utf8'), 'button', '</button>')
+        .filter((button) => /(?<![-\w:])disabled\b(?!-)/.test(withoutComments(button)))
+        .map((button) => `${file}: ${button.slice(0, 160)}`),
+    );
+    expect(offenders).toEqual([]);
+  });
+
+  /**
+   * A field or a select may keep native `disabled` for a reason focus cannot
+   * be on it for, such as a model select with no provider chosen. It may not
+   * bind it to an in-flight state, because that state changes under the focus.
+   */
+  it('never binds a field or select to an in-flight state with native disabled', () => {
+    const inFlight =
+      /(?<![-\w])disabled=\{[^}]*(busy|checking|committing|creating|starting|stopping|saving|loading|applying|retrying|removing|deleting|pending)/i;
+    const offenders = files.flatMap((file) => {
+      const text = readFileSync(file, 'utf8');
+      return [
+        ...elements(text, 'input', '/>'),
+        ...elements(text, 'select', '</select>'),
+        ...elements(text, 'textarea', '/>'),
+      ]
+        .filter((control) => inFlight.test(withoutComments(control)))
+        .map((control) => `${file}: ${control.slice(0, 160)}`);
+    });
+    expect(offenders).toEqual([]);
+  });
+
+  it('styles an aria-disabled field or select like a disabled one', () => {
+    const css = readFileSync(join(roots[0]!, 'styles.css'), 'utf8');
+    expect(css).toMatch(/select\[aria-disabled='true'\]/);
+    expect(css).toMatch(/input\[aria-disabled='true'\]/);
+  });
+});
+
+/**
+ * NFR-010 and FR-087: confirmations, names and announcements in the Dashboard.
+ * The Dashboard has no DOM in this suite, so these pin the source.
+ */
+describe('NFR-010 Dashboard confirmations and announcements', () => {
+  const dashboard = join(process.cwd(), 'src', 'renderer', 'dashboard');
+  const section = (file: string): string => readFileSync(join(dashboard, 'sections', file), 'utf8');
+
+  it('asks before a transcript is deleted, with the dialog a profile delete uses', () => {
+    const text = section('SessionHistory.tsx');
+    expect(text).toContain('role="alertdialog"');
+    expect(text).toContain('data-testid="session-delete-confirm"');
+    expect(text).toContain('aria-describedby="session-delete-confirm-text"');
+    // The row button only opens the dialog. Only the dialog deletes.
+    expect(text).toMatch(
+      /`session-delete-\$\{summary\.id\}`[^<]*?onClick=\{\(\) => askToDelete\(summary\)\}/,
+    );
+    expect(text).toMatch(/data-testid="session-delete-confirm-yes"[^<]*?remove\(/);
+  });
+
+  it('cannot cancel or replace a transcript delete that is in flight', () => {
+    const text = section('SessionHistory.tsx');
+    // Every way to open, keep or close the dialog goes through the rule
+    // `dashboard-actions.test.ts` asserts.
+    expect(text).not.toMatch(/setPendingDelete\((null|summary)\)/);
+    expect(text).toMatch(/if \(e\.key === 'Escape'\) keep\(\);/);
+    expect(text).toMatch(
+      /data-testid="session-delete-confirm-no"[^<]*?aria-disabled=\{deleting\.busy \|\| undefined\}[^<]*?onClick=\{keep\}/,
+    );
+    expect(text).toMatch(
+      /`session-delete-\$\{summary\.id\}`[^<]*?aria-disabled=\{deleting\.busy \|\| undefined\}/,
+    );
+  });
+
+  it('moves focus after a dialog closes only when the user is still there', () => {
+    for (const file of ['SessionHistory.tsx', 'CompanyProfiles.tsx']) {
+      expect(section(file), file).toMatch(/const hadFocus = focusWithin\(document\.activeElement/);
+    }
+    expect(section('SessionHistory.tsx')).not.toMatch(/^\s*focusLater\(HEADING_ID\);/m);
+  });
+
+  it('moves focus to a loaded transcript only when the user is still on its row', () => {
+    // Audit regression: a slow `session:read` pulled focus to the viewer from
+    // wherever the user had moved during the wait.
+    const text = section('SessionHistory.tsx');
+    expect(text).toMatch(
+      /const stillOnRow = focusWithin\(document\.activeElement, \[\s*document\.getElementById\(rowId\(sessionId\)\),?\s*\]\);/,
+    );
+    expect(text).toMatch(/if \(stillOnRow\) focusLater\(VIEWER_HEADING_ID\);/);
+    expect(text).not.toMatch(/^\s*focusLater\(VIEWER_HEADING_ID\);/m);
+  });
+
+  it('names each row button after its session', () => {
+    const text = section('SessionHistory.tsx');
+    expect(text).toContain('aria-label={`View transcript of the session started ${started}`}');
+    expect(text).toContain('aria-label={`Delete transcript of the session started ${started}`}');
+  });
+
+  it('makes the transcript viewer a labelled region and focuses its heading on open', () => {
+    const text = section('SessionHistory.tsx');
+    expect(text).toMatch(/data-testid="session-viewer"\s+role="region"/);
+    expect(text).toContain('focusLater(VIEWER_HEADING_ID)');
+  });
+
+  it('describes the profile delete dialog with its counts and returns focus on close', () => {
+    const text = section('CompanyProfiles.tsx');
+    expect(text).toContain('aria-describedby="delete-confirm-counts"');
+    expect(text).toContain('id="delete-confirm-counts"');
+    expect(text).toMatch(/function closeDelete[\s\S]*?focusLater\(/);
+  });
+
+  it('announces a success confirmation from a container that stays mounted', () => {
+    for (const [file, marker] of [
+      ['Hotkeys.tsx', 'hotkey-applied-'],
+      ['CostAndUsage.tsx', 'thresholds-saved'],
+      ['ConsentReminder.tsx', 'consent-saved'],
+      ['ProviderSetup.tsx', 'providers-saved'],
+    ] as const) {
+      const text = section(file);
+      const at = text.indexOf(marker);
+      expect(at, `${file} renders no ${marker}`).toBeGreaterThan(-1);
+      // The text is mounted inside the container, so the container is present
+      // before the text changes, which is what makes the change announced.
+      const open = text.lastIndexOf('<span role="status"', at);
+      expect(open, `${file}: ${marker} is not inside a status container`).toBeGreaterThan(-1);
+      expect(text.slice(open, at), `${file}: ${marker} is outside its container`).not.toContain(
+        '</span>',
+      );
+    }
+  });
+
+  it('announces the session state and the audio state in the header', () => {
+    const app = readFileSync(join(dashboard, 'App.tsx'), 'utf8');
+    expect(app).toMatch(/role="status"\s+data-testid="header-session-state"/);
+    expect(app).toMatch(/role="status"\s+data-testid="audio-state"/);
+  });
+
+  it('announces the model download in steps while it shows the live percent', () => {
+    const text = section('CompanyProfiles.tsx');
+    expect(text).toContain('announcedPercent(model.percent)');
+    expect(text).toMatch(/aria-hidden="true">\{Math\.round\(model\.percent\)\}/);
   });
 });

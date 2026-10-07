@@ -46,6 +46,21 @@ export function acceleratorFrom(event: {
   return parts.join('+');
 }
 
+/**
+ * The draft with one action put back to its stored binding (FR-030).
+ *
+ * A refused rebind replaced the whole draft, which threw away the other
+ * action's captured but unapplied combination, the same loss the sync effect
+ * below was written to prevent.
+ */
+export function withStoredBinding(
+  draft: Settings['hotkeys'],
+  stored: Settings['hotkeys'],
+  action: Action,
+): Settings['hotkeys'] {
+  return { ...draft, [action]: stored[action] };
+}
+
 export interface HotkeysProps {
   settings: Settings;
   onSettingsChanged: () => Promise<void>;
@@ -85,7 +100,7 @@ export function Hotkeys({ settings, onSettingsChanged }: HotkeysProps): JSX.Elem
     delete dirty.current[action];
     if (!result.ok) {
       setErrors((e) => ({ ...e, [action]: result.message }));
-      setDraft(settings.hotkeys);
+      setDraft((d) => withStoredBinding(d, settings.hotkeys, action));
       return;
     }
     const response = result.value;
@@ -93,7 +108,7 @@ export function Hotkeys({ settings, onSettingsChanged }: HotkeysProps): JSX.Elem
       setErrors((e) => ({ ...e, [action]: response.error }));
       // The main process kept the old binding. Showing the rejected text would
       // leave the user believing a hotkey is bound that is not (FR-030).
-      setDraft(settings.hotkeys);
+      setDraft((d) => withStoredBinding(d, settings.hotkeys, action));
       return;
     }
     setErrors((e) => ({ ...e, [action]: undefined }));
@@ -144,7 +159,10 @@ export function Hotkeys({ settings, onSettingsChanged }: HotkeysProps): JSX.Elem
             >
               Apply
             </button>
-            {applied[action] ? <span data-testid={`hotkey-applied-${action}`}>Bound</span> : null}
+            {/* Mounted before its text, so the change is announced. */}
+            <span role="status">
+              {applied[action] ? <span data-testid={`hotkey-applied-${action}`}>Bound</span> : null}
+            </span>
             {errors[action] ? (
               <span role="alert" data-testid={`hotkey-error-${action}`}>
                 {errors[action]}

@@ -8,6 +8,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from 'react';
 import { SETTINGS_LIMITS } from '../../../shared/defaults.js';
+import { createSizeRequests, type Size } from '../sizeRequests.js';
 
 /**
  * The overlay's resize grip (FR-081, CH-127, TASK-052).
@@ -28,11 +29,13 @@ import { SETTINGS_LIMITS } from '../../../shared/defaults.js';
  * deltas, because the main process clamps what it applies and an accumulator
  * would keep counting past the clamp: the pointer would end up far outside the
  * window it is supposed to be dragging, and the grip would then do nothing
- * until the user dragged all the way back.
+ * until the user dragged all the way back. The one exception is a size asked
+ * for and not landed yet, which `sizeRequests.ts` holds until nothing is
+ * pending, so quick arrow presses do not step from a stale viewport.
  */
 export interface ResizeGripProps {
-  /** Send a new window size. Rate limited in the main process (CH-127). */
-  onResize: (size: { width: number; height: number }) => void;
+  /** Send a new window size. Settles when the main process answers (CH-127). */
+  onResize: (size: Size) => Promise<unknown>;
 }
 
 const LIMITS = SETTINGS_LIMITS;
@@ -54,6 +57,18 @@ export function ResizeGrip({ onResize }: ResizeGripProps): JSX.Element {
    */
   const origin = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
 
+  // A ref, so the requester built once below always sends through the newest
+  // callback the overlay passed.
+  const send = useRef(onResize);
+  send.current = onResize;
+  const [requests] = useState(() =>
+    createSizeRequests({
+      send: (next) => send.current(next),
+      nextFrame: (callback) => requestAnimationFrame(() => callback()),
+      current: () => ({ width: window.innerWidth, height: window.innerHeight }),
+    }),
+  );
+
   /**
    * The window's current size, for the separator's ARIA value (NFR-010).
    *
@@ -67,31 +82,32 @@ export function ResizeGrip({ onResize }: ResizeGripProps): JSX.Element {
    */
   const [size, setSize] = useState({ width: window.innerWidth, height: window.innerHeight });
   useEffect(() => {
-    const handleWindowResize = (): void =>
+    const handleWindowResize = (): void => {
       setSize({ width: window.innerWidth, height: window.innerHeight });
+      requests.onWindowResize();
+    };
     window.addEventListener('resize', handleWindowResize);
     return () => window.removeEventListener('resize', handleWindowResize);
-  }, []);
+  }, [requests]);
 
-  const onPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    // Pointer capture is what keeps the drag alive once the pointer leaves the
-    // grip, which it does immediately when the window is made smaller than the
-    // pointer's travel.
-    event.currentTarget.setPointerCapture(event.pointerId);
-    origin.current = {
-      x: event.clientX,
-      y: event.clientY,
-      width: window.innerWidth,
-      height: window.innerHeight,
-    };
-    event.preventDefault();
-  }, []);
+  const onPointerDown = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      // Pointer capture is what keeps the drag alive once the pointer leaves the
+      // grip, which it does immediately when the window is made smaller than the
+      // pointer's travel.
+      event.currentTarget.setPointerCapture(event.pointerId);
+      origin.current = { x: event.clientX, y: event.clientY, ...requests.base() };
+      event.preventDefault();
+    },
+    [requests],
+  );
 
   const onPointerMove = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
       const start = origin.current;
       if (!start) return;
-      onResize({
+      // Coalesced to one request per frame, the newest, with one in flight.
+      requests.request({
         width: clamp(
           start.width + (event.clientX - start.x),
           LIMITS.overlayWidthPx.min,
@@ -104,7 +120,7 @@ export function ResizeGrip({ onResize }: ResizeGripProps): JSX.Element {
         ),
       });
     },
-    [onResize],
+    [requests],
   );
 
   const onPointerUp = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
@@ -117,8 +133,8 @@ export function ResizeGrip({ onResize }: ResizeGripProps): JSX.Element {
   /**
    * The grip used to be pointer-only, which left resizing entirely
    * unreachable from the keyboard (NFR-010). Arrow keys step both dimensions
-   * from the current window size, the same values a drag would end on, and
-   * are clamped through the same `LIMITS` a drag is.
+   * from the size last asked for, or the window size once nothing is pending,
+   * and are clamped through the same `LIMITS` a drag is.
    */
   const onKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -141,16 +157,13 @@ export function ResizeGrip({ onResize }: ResizeGripProps): JSX.Element {
           return;
       }
       event.preventDefault();
-      onResize({
-        width: clamp(window.innerWidth + dx, LIMITS.overlayWidthPx.min, LIMITS.overlayWidthPx.max),
-        height: clamp(
-          window.innerHeight + dy,
-          LIMITS.overlayHeightPx.min,
-          LIMITS.overlayHeightPx.max,
-        ),
+      const from = requests.base();
+      requests.request({
+        width: clamp(from.width + dx, LIMITS.overlayWidthPx.min, LIMITS.overlayWidthPx.max),
+        height: clamp(from.height + dy, LIMITS.overlayHeightPx.min, LIMITS.overlayHeightPx.max),
       });
     },
-    [onResize],
+    [requests],
   );
 
   return (

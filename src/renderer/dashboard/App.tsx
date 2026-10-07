@@ -31,7 +31,9 @@ import {
 } from 'react';
 import { contrastRatio, parseHex } from '../../shared/color.js';
 import { call } from './call.js';
+import { focusLater } from './focus.js';
 import { formatElapsed, formatUsd } from './format.js';
+import { useInFlight } from './inFlight.js';
 import { CompanyProfiles } from './sections/CompanyProfiles.js';
 import { ConsentReminder } from './sections/ConsentReminder.js';
 import { CostAndUsage } from './sections/CostAndUsage.js';
@@ -146,7 +148,7 @@ function TabNav({
     // The button moving isn't the one focused yet: `onSelect` re-renders with
     // the new `tabIndex={0}` after this handler returns, so focusing it here
     // would move focus to a button not yet in the tab order.
-    requestAnimationFrame(() => document.getElementById(`tab-${nextId}`)?.focus());
+    focusLater(`tab-${nextId}`);
   }
 
   return (
@@ -194,7 +196,7 @@ function streamText(state: StreamState): string {
 export function Dashboard(): JSX.Element {
   const data = useDashboardData();
   const [sessionError, setSessionError] = useState<string | null>(null);
-  // Two flags, not one. `session:start` pushes `state:session` active *before*
+  // Two gates, not one. `session:start` pushes `state:session` active *before*
   // it awaits `live.start`, on purpose: the session is live the moment the
   // manager accepts it, and bringing capture and two sockets up takes long
   // enough that a Dashboard told afterwards would render it as inactive for the
@@ -202,8 +204,13 @@ export function Dashboard(): JSX.Element {
   // over an already-running session until the start invoke returned, so a slow
   // permission prompt or a wedged socket left an interview with no way to stop
   // it (FR-088).
-  const [starting, setStarting] = useState(false);
-  const [stopping, setStopping] = useState(false);
+  //
+  // Both buttons are `aria-disabled`, never `disabled`. Start becomes
+  // unavailable the moment the session it started goes live, with focus still
+  // on it, and Chromium drops focus from a focused control that becomes
+  // `disabled` (NFR-010). The handlers refuse what the attribute announces.
+  const starting = useInFlight();
+  const stopping = useInFlight();
   const [activeTab, setActiveTab] = useState<TabId>('profiles');
   const [promptDirty, setPromptDirty] = useState(false);
   // Bumped to remount the prompt editor, which is how a confirmed discard
@@ -234,9 +241,7 @@ export function Dashboard(): JSX.Element {
 
   async function startSession(): Promise<void> {
     setSessionError(null);
-    setStarting(true);
     const result = await call('session:start');
-    setStarting(false);
     if (!result.ok) {
       setSessionError(result.message);
       return;
@@ -248,9 +253,7 @@ export function Dashboard(): JSX.Element {
 
   async function stopSession(): Promise<void> {
     setSessionError(null);
-    setStopping(true);
     const result = await call('session:stop');
-    setStopping(false);
     if (!result.ok) setSessionError(result.message);
   }
 
@@ -308,6 +311,7 @@ export function Dashboard(): JSX.Element {
         </p>
 
         <p
+          role="status"
           data-testid="header-session-state"
           data-session-active={data.session.active ? 'true' : 'false'}
         >
@@ -321,8 +325,10 @@ export function Dashboard(): JSX.Element {
         <button
           type="button"
           data-testid="start-session"
-          disabled={starting || data.session.active}
-          onClick={() => void startSession()}
+          aria-disabled={starting.busy || data.session.active || undefined}
+          onClick={() => {
+            if (!data.session.active) void starting.run(startSession);
+          }}
         >
           Start Session
         </button>
@@ -330,8 +336,10 @@ export function Dashboard(): JSX.Element {
           type="button"
           className="secondary-button"
           data-testid="stop-session"
-          disabled={stopping || !data.session.active}
-          onClick={() => void stopSession()}
+          aria-disabled={stopping.busy || !data.session.active || undefined}
+          onClick={() => {
+            if (data.session.active) void stopping.run(stopSession);
+          }}
         >
           Stop Session
         </button>
@@ -343,7 +351,7 @@ export function Dashboard(): JSX.Element {
         ) : null}
 
         {data.audio ? (
-          <p data-testid="audio-state">
+          <p role="status" data-testid="audio-state">
             Interviewer audio: {streamText(data.audio.interviewer)}. Your microphone:{' '}
             {streamText(data.audio.candidate)}.
           </p>

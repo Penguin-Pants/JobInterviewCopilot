@@ -2,10 +2,10 @@ import type {
   InvokeChannel,
   InvokePayload,
   InvokeResponse,
-  IpcError,
   PushChannel,
   PushPayload,
 } from './ipc.js';
+import type { IpcError } from './ipc-error.js';
 
 /**
  * The shape every preload exposes as `window.copilot` (FR-086, TC-003).

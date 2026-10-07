@@ -16,8 +16,8 @@ import {
   sortCatalogModels,
 } from '../../src/main/stt-catalog.js';
 import {
-  createSttCatalogLoader,
-  type SttCatalogUpdate,
+  createCatalogLoader,
+  type CatalogUpdate,
 } from '../../src/renderer/dashboard/sections/ProviderSetup.js';
 import type { CallResult } from '../../src/renderer/dashboard/call.js';
 import type { SttCatalogSnapshot } from '../../src/shared/types.js';
@@ -323,15 +323,15 @@ describe('TC-198 failure preservation and ordering', () => {
     /** Requests the test settles by hand, in whatever order it chooses. */
     function harness() {
       const answers: ((result: CallResult<'catalog:stt'>) => void)[] = [];
-      const updates: SttCatalogUpdate[] = [];
-      const load = createSttCatalogLoader(
+      const updates: CatalogUpdate<SttCatalogSnapshot>[] = [];
+      const { load, push } = createCatalogLoader<SttCatalogSnapshot>(
         () =>
           new Promise((resolve) => {
             answers.push(resolve);
           }),
         (update) => updates.push(update),
       );
-      return { load, answers, updates };
+      return { load, push, answers, updates };
     }
 
     it('drops a superseded answer that settles after the newer one', async () => {
@@ -343,8 +343,8 @@ describe('TC-198 failure preservation and ordering', () => {
       answers[0]?.({ ok: true, value: snapshot('whisper-1') });
       await first;
       expect(updates).toEqual([
-        { kind: 'loading' },
-        { kind: 'loading' },
+        { kind: 'loading', force: false },
+        { kind: 'loading', force: true },
         { kind: 'loaded', catalog: snapshot('gpt-4o-transcribe') },
       ]);
     });
@@ -369,11 +369,34 @@ describe('TC-198 failure preservation and ordering', () => {
       answers[1]?.({ ok: false, message: 'offline' });
       await refresh;
       expect(updates).toEqual([
-        { kind: 'loading' },
+        { kind: 'loading', force: false },
         { kind: 'loaded', catalog: snapshot('whisper-1') },
-        { kind: 'loading' },
+        { kind: 'loading', force: true },
         { kind: 'failed', message: 'offline' },
       ]);
+    });
+
+    /**
+     * The language model catalog shares this loader and also has a push
+     * (`CH-218`). A push is newer than any request still in flight, so an
+     * older answer that settles after it must not replace it.
+     */
+    it('lets a push win over an older answer still in flight', async () => {
+      const { load, push, answers, updates } = harness();
+      const first = load();
+      push(snapshot('gpt-4o-transcribe'));
+      answers[0]?.({ ok: true, value: snapshot('whisper-1') });
+      await first;
+      expect(updates.at(-1)).toEqual({ kind: 'loaded', catalog: snapshot('gpt-4o-transcribe') });
+    });
+
+    it('still applies a request made after a push', async () => {
+      const { load, push, answers, updates } = harness();
+      push(snapshot('whisper-1'));
+      const refresh = load(true);
+      answers[0]?.({ ok: true, value: snapshot('gpt-4o-transcribe') });
+      await refresh;
+      expect(updates.at(-1)).toEqual({ kind: 'loaded', catalog: snapshot('gpt-4o-transcribe') });
     });
   });
 });

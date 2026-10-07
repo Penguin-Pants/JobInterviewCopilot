@@ -269,6 +269,24 @@ button[aria-disabled='true'] {
   opacity: 0.55;
 }
 
+/* The same for a field or select that is unavailable while it may have focus,
+   such as the translucency select during a window rebuild. */
+input[aria-disabled='true'],
+select[aria-disabled='true'] {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+/* Read by a screen reader, not shown. */
+.visually-hidden {
+  clip-path: inset(50%);
+  height: 1px;
+  overflow: hidden;
+  position: absolute;
+  white-space: nowrap;
+  width: 1px;
+}
+
 :focus-visible {
   outline: 3px solid var(--accent);
   outline-offset: 2px;
@@ -317,7 +335,8 @@ ul.rows > li {
   border-color: var(--accent);
 }
 
-[data-testid='delete-confirm'] {
+[data-testid='delete-confirm'],
+[data-testid='session-delete-confirm'] {
   border: 2px solid var(--alert);
   border-radius: var(--radius-container);
   padding: 0.75rem;
