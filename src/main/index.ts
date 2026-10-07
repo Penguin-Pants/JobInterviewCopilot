@@ -344,8 +344,12 @@ async function bootstrap(): Promise<void> {
   });
 
   // The STT adapters must be registered before any key is validated or any
-  // session is opened. Registration is pure; it opens no socket.
-  registerAllSttProviders();
+  // session is opened. Registration is pure; it opens no socket. The logger is
+  // passed in because the adapters may not import a module that writes to disk
+  // (NFR-002); a dropped frame or a throwing listener is reported here.
+  registerAllSttProviders({
+    log: (level, message, ...detail) => getLogger().log(level, message, ...detail),
+  });
 
   // The LLM adapters, the same way (TASK-032). `secrets.peek` rather than a
   // copied key, so a credential replaced mid-session takes effect on the next

@@ -1071,7 +1071,7 @@ describe('TASK-044 live loop wiring', () => {
     const text = source();
     const supervisor = text.slice(
       text.indexOf('audio = new AudioSupervisor('),
-      text.indexOf('registerAllSttProviders()'),
+      text.indexOf('registerAllSttProviders('),
     );
     expect(supervisor).toContain('live.handleChunk(chunk)');
     expect(supervisor).not.toMatch(/onChunk: \(\) => \{\}/);
