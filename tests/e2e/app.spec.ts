@@ -9,7 +9,7 @@ import {
   type Page,
 } from '@playwright/test';
 import { SETTINGS_LIMITS } from '../../src/shared/defaults.js';
-import { openDashboardTab } from './launch.js';
+import { dashboardPage, openDashboardTab } from './launch.js';
 
 /**
  * Milestone 0 end-to-end coverage: TC-005, TC-007, TC-008, TC-009, TC-148.
@@ -33,7 +33,7 @@ test.beforeEach(async () => {
       `--user-data-dir=${mkdtempSync(join(tmpdir(), 'icp-e2e-'))}`,
     ],
   });
-  dashboard = await app.firstWindow();
+  dashboard = await dashboardPage(app);
   await dashboard.waitForSelector('[data-testid="dashboard"]');
 });
 

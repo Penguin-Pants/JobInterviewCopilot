@@ -78,7 +78,7 @@ try {
   app.process().stdout?.on('data', (d) => output.push(String(d)));
   app.process().stderr?.on('data', (d) => output.push(String(d)));
 
-  dashboard = await app.firstWindow();
+  dashboard = await dashboardWindow(app);
   dashboard.on('console', (m) => pageEvents.push(`console.${m.type()}: ${m.text()}`));
   dashboard.on('pageerror', (e) => pageEvents.push(`pageerror: ${e.message}`));
   await dashboard.waitForSelector('[data-testid="dashboard"]', { timeout: 30_000 });
@@ -195,4 +195,24 @@ function redactPaths(text) {
 
 function escapeRegExp(text) {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * The Dashboard's window, found by its loaded URL.
+ *
+ * Not `app.firstWindow()`: the overlay's window can register first, even
+ * though bootstrap creates the Dashboard first. The smoke test then waited for
+ * the Dashboard inside the overlay and failed after 30 s on an app that had
+ * started correctly, which the window list in its failure report showed.
+ */
+async function dashboardWindow(electronApp) {
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    const page = electronApp
+      .windows()
+      .find((w) => !w.isClosed() && w.url().includes('/dashboard/'));
+    if (page) return page;
+    if (Date.now() > deadline) throw new Error('No Dashboard window appeared within 30 s.');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
 }
