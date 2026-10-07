@@ -33,6 +33,7 @@ let userDataDir: string;
 test.beforeEach(async () => {
   ({ app, dashboard, userDataDir } = await launchApp());
   overlay = await overlayPage(app);
+  appliedSessionId = null;
 });
 
 test.afterEach(async () => {
@@ -193,11 +194,28 @@ function faded(evidence: RevealEvidence): boolean {
  * twice, not two sessions, so a case that means to exercise `FR-006`'s "every
  * live session" has to name them apart.
  */
+/**
+ * The session the overlay last applied, as the overlay tracks it: a push with
+ * no session forgets it, so the same id pushed again is a new boundary.
+ */
+let appliedSessionId: string | null = null;
+
+/**
+ * Push the session state, and wait for the overlay to apply a new session.
+ *
+ * The overlay resets its cards for a new session in an effect, which runs
+ * after the render. A suggestion pushed before that effect ran was wiped by
+ * it, so a test that generated right after this call failed now and then. In
+ * the app the gate holds suggestions until `overlay:ready`, which the overlay
+ * sends only after the reset, so only a test that pushes directly can race it.
+ */
 async function setSession(
   active: boolean,
   sessionId = 'session-e2e-1',
   paused = false,
 ): Promise<void> {
+  const root = overlay.locator('[data-testid="overlay"]');
+  const before = await root.getAttribute('data-session-epoch');
   await pushToOverlay(app, 'state:session', {
     active,
     sessionId: active ? sessionId : null,
@@ -205,6 +223,10 @@ async function setSession(
     startedAt: active ? new Date().toISOString() : null,
     paused,
   });
+  if (active && sessionId !== appliedSessionId) {
+    await expect(root).not.toHaveAttribute('data-session-epoch', before ?? '');
+  }
+  appliedSessionId = active ? sessionId : null;
 }
 
 /* ------------------------------------------------------------------ *

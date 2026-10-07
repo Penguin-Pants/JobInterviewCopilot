@@ -442,6 +442,7 @@ function Overlay(): JSX.Element {
   return (
     <div
       data-testid="overlay"
+      data-session-epoch={readyEpoch}
       data-interactive={interactive ? 'true' : 'false'}
       data-overlay-state={idle ? 'idle' : 'active'}
       data-theme={resolved.mode}
