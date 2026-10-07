@@ -104,6 +104,8 @@ export interface ConnectSpec {
 export interface Emitter {
   transcript(text: string, isFinal: boolean, confidence?: number): void;
   endpoint(): void;
+  /** The provider heard new speech start, before any text of it. */
+  speech(): void;
   /**
    * A provider error frame that ends this session. Before `open` resolves it
    * rejects the open; after, it reaches the `error` listeners. Either way the
@@ -179,6 +181,7 @@ export type SocketFactory = (spec: ConnectSpec) => SocketLike;
 type Handlers = {
   transcript: ((t: TranscriptEvent) => void)[];
   endpoint: (() => void)[];
+  speech: (() => void)[];
   error: ((e: ProviderError) => void)[];
 };
 
@@ -244,7 +247,7 @@ export class SocketSttSession implements SttSession {
    */
   private sent = 0;
 
-  private readonly handlers: Handlers = { transcript: [], endpoint: [], error: [] };
+  private readonly handlers: Handlers = { transcript: [], endpoint: [], speech: [], error: [] };
 
   constructor(
     opts: {
@@ -481,6 +484,9 @@ export class SocketSttSession implements SttSession {
     endpoint: () => {
       this.dispatch(this.handlers.endpoint);
     },
+    speech: () => {
+      this.dispatch(this.handlers.speech);
+    },
     error: (err) => {
       this.fail(err);
     },
@@ -615,10 +621,12 @@ export class SocketSttSession implements SttSession {
 
   on(e: 'transcript', h: (t: TranscriptEvent) => void): void;
   on(e: 'endpoint', h: () => void): void;
+  on(e: 'speech', h: () => void): void;
   on(e: 'error', h: (err: ProviderError) => void): void;
-  on(e: 'transcript' | 'endpoint' | 'error', h: (...args: never[]) => void): void {
+  on(e: 'transcript' | 'endpoint' | 'speech' | 'error', h: (...args: never[]) => void): void {
     if (e === 'transcript') this.handlers.transcript.push(h as (t: TranscriptEvent) => void);
     else if (e === 'endpoint') this.handlers.endpoint.push(h as () => void);
+    else if (e === 'speech') this.handlers.speech.push(h as () => void);
     else this.handlers.error.push(h as (err: ProviderError) => void);
   }
 }

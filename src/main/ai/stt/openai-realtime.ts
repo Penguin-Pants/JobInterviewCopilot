@@ -4,7 +4,7 @@
  * `docs/02-architecture.md` section 3.1: a transcription session on the
  * realtime WebSocket, configured with the chosen model and server VAD. Deltas
  * map to `isFinal: false`, completed items to `isFinal: true`, the VAD stop
- * event to `endpoint` (TC-152).
+ * event to `endpoint` (TC-152) and the VAD start event to `speech`.
  *
  * Server VAD takes `silence_duration_ms`, so the user's chosen gap is passed
  * through here exactly as Deepgram's `endpointing` is (FR-050, TC-159).
@@ -117,6 +117,11 @@ function readOpenAiFrame(raw: string, emit: Emitter): void {
       if (transcript) emit.transcript(transcript, true);
       return;
     }
+    case 'input_audio_buffer.speech_started':
+      // The only sign of new speech before its `speech_stopped`: the
+      // transcript of it comes after the stop (FR-050).
+      emit.speech();
+      return;
     case 'input_audio_buffer.speech_stopped':
       emit.endpoint();
       return;
