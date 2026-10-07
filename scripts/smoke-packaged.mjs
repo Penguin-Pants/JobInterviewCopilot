@@ -62,11 +62,17 @@ const { _electron: electron } = await import('@playwright/test');
 
 const userDataDir = mkdtempSync(join(tmpdir(), 'icp-packaged-'));
 let app;
+/** What the packaged app wrote to stdout and stderr, in order. */
+const output = [];
 
 try {
   // The same `--user-data-dir` the E2E suite uses. Without it the smoke run
   // would write into, and overwrite, the real profile of whoever ran it.
   app = await electron.launch({ executablePath: exe, args: [`--user-data-dir=${userDataDir}`] });
+  // Kept for the failure report. A main process that throws before its logger
+  // starts leaves nothing in main.log, and stderr is then the only evidence.
+  app.process().stdout?.on('data', (d) => output.push(String(d)));
+  app.process().stderr?.on('data', (d) => output.push(String(d)));
 
   const dashboard = await app.firstWindow();
   await dashboard.waitForSelector('[data-testid="dashboard"]', { timeout: 30_000 });
@@ -126,6 +132,24 @@ try {
       'and the app only breaks when it is run. See electron-builder.yml.',
   );
   process.exitCode = 1;
+  report(
+    'open windows',
+    app
+      ? app
+          .windows()
+          .map((w) => w.url())
+          .join('\n')
+      : '(not launched)',
+  );
+  report('app stdout and stderr', output.join(''));
+  const failedLog = join(userDataDir, 'logs', 'main.log');
+  report('main.log', existsSync(failedLog) ? readFileSync(failedLog, 'utf8') : '(not written)');
 } finally {
   await app?.close().catch(() => {});
+}
+
+/** The last part of one piece of evidence, so a CI log shows why the app stopped. */
+function report(label, text) {
+  const tail = text.trim() === '' ? '(empty)' : text.slice(-6000);
+  console.error(`\n--- ${label} (last 6000 characters) ---\n${tail}`);
 }
