@@ -7,10 +7,10 @@ import {
   type InvokeChannel,
   type InvokePayload,
   type InvokeResponse,
-  type IpcError,
   type PushChannel,
   type PushPayload,
 } from '../../shared/ipc.js';
+import type { IpcError } from '../../shared/ipc-error.js';
 import { getLogger } from '../logger.js';
 import { isTopLevelAppFrame } from './sender.js';
 

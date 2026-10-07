@@ -1,5 +1,6 @@
 /**
- * The one way the Dashboard calls the main process (CMP-10, CMP-13).
+ * The one way the Dashboard calls the main process (CMP-10, CMP-13). The
+ * overlay calls through it too, by way of `overlay/invoke.ts` (CMP-14).
  *
  * `invoke` resolves with an `IpcError` rather than rejecting, so a caller that
  * ignores the error branch renders a failure as a success. That is exactly how
@@ -7,12 +8,8 @@
  * call in this renderer goes through here and gets a discriminated result back
  * that TypeScript will not let it read without checking.
  */
-import {
-  isIpcError,
-  type InvokeChannel,
-  type InvokePayload,
-  type InvokeResponse,
-} from '../../shared/ipc.js';
+import type { InvokeChannel, InvokePayload, InvokeResponse } from '../../shared/ipc.js';
+import { isIpcError } from '../../shared/ipc-error.js';
 
 export type CallResult<C extends InvokeChannel> =
   { ok: true; value: InvokeResponse<C> } | { ok: false; message: string };

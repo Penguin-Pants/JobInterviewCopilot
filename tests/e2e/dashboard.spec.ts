@@ -360,7 +360,15 @@ test('TC-123 sessions group by profile, open for viewing and delete', async () =
   await dashboard.click('[data-testid="session-viewer-close"]');
   await expect(dashboard.locator('[data-testid="session-viewer"]')).toHaveCount(0);
 
+  // Deleting asks first. Keep it changes nothing; Delete it deletes.
   await dashboard.click(`[data-testid="session-delete-${sessionId}"]`);
+  await expect(dashboard.locator('[data-testid="session-delete-confirm"]')).toBeVisible();
+  await dashboard.click('[data-testid="session-delete-confirm-no"]');
+  await expect(dashboard.locator('[data-testid="session-delete-confirm"]')).toHaveCount(0);
+  await expect(dashboard.locator(`[data-testid="session-${sessionId}"]`)).toBeVisible();
+
+  await dashboard.click(`[data-testid="session-delete-${sessionId}"]`);
+  await dashboard.click('[data-testid="session-delete-confirm-yes"]');
   await expect(dashboard.locator(`[data-testid="session-${sessionId}"]`)).toHaveCount(0);
   await expect(dashboard.locator(`[data-testid="history-empty-${profileId}"]`)).toBeVisible();
 });

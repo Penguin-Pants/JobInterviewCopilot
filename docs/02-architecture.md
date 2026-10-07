@@ -1422,7 +1422,7 @@ parsed against `audioWorkerChannels` and accepted only from the worker page.
 | CH-119 | `overlay:savePosition` | `{ x, y, displayId }` | `{ ok: true }` |
 | CH-120 | `consent:dismiss` | none | `{ ok: true }` |
 | CH-121 | `overlay:reset` | none | `{ ok: true, x, y, displayId }` |
-| CH-122 | `overlay:ready` | none | `{ ok: true }` |
+| CH-122 | `overlay:ready` | `{ sessionId }` | `{ ok: true } \| { refused: 'another-session' }` |
 | CH-123 | `doc:retry` | `{ docId, profileId }` | `DocumentRecord` |
 | CH-124 | `model:ensure` | none | `ModelDownloadState` |
 | CH-125 | `doc:pickFiles` | `{ profileId }` | `DocumentRecord[]` |
@@ -1465,6 +1465,21 @@ in Milestone 0 and are recorded here for the first time. The rest are new:
   a file on disk, and `webUtils` is reachable from a preload only. It is
   optional on `CopilotBridge` and absent from the overlay preload, which accepts
   no drops.
+
+**Changes made in the renderer UX audit follow-up (ADR-016, DoD 9).**
+
+- `CH-122` `overlay:ready` names the session its consent card was rendered
+  for: the `sessionId` of the last `CH-201` push, or `null` when no session
+  runs. `OverlayGate.reset` records the session that starts or `null` when one
+  stops. While a session runs, the gate refuses a report for any other session
+  with `{ refused: 'another-session' }`, and after a stop it refuses a late
+  report for the session that stopped. With no session held at all it accepts
+  the report, because nothing can be opened early; the overlay end-to-end suite
+  drives sessions from the renderer side this way. Without the rule, a late report or retry from the
+  previous interview could arrive after the reset and before the renewed
+  reminder had painted, and open the next interview's gate early. The renderer
+  also stops a retry as soon as a newer `CH-201` push names another session.
+  The refusal is an answer, not a thrown error, because the race is expected.
 
 ### Main to renderer, push (`webContents.send`)
 
@@ -2239,6 +2254,8 @@ src/
       App.tsx          the shell, the header and the section order
       state.ts         one hook per push channel, no second copy of main's state
       call.ts          the one invoke wrapper, so an IpcError cannot be ignored
+      inFlight.ts      one action at a time, busy shown as aria-disabled
+      focus.ts         focus after a render, for dialogs and the tab list
       format.ts        timer, money and size formats
       styles.css       theme tokens, light and dark
       sections/        ProviderSetup, CompanyProfiles, SessionHistory,
@@ -2247,6 +2264,8 @@ src/
       Overlay.tsx
       cards.ts         TASK-043, reduceCards and the card state (2.6a)
       holdBuffer.ts    TASK-064, FR-115, sits in front of cards.ts's reducer
+      invoke.ts        call.ts with failures logged, and the overlay:ready retry
+      sizeRequests.ts  FR-081, one resize request per frame, one in flight
       theme.ts         TASK-043, the contrast-floor computation (FR-093)
       styles.css
       components/      ConsentReminder, IdleCard, SuggestionCardView,
@@ -2261,6 +2280,7 @@ src/
     registry/llm.ts    ADR-022 LLM provider + model registry
     registry/selection.ts  TASK-042, the Dashboard's selection rules, pure
     ipc.ts             channel ids + zod schemas
+    ipc-error.ts       IpcError and isIpcError, without the schemas
     types.ts           the data model in section 2
 tests/
   unit/

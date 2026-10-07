@@ -5,12 +5,27 @@
  * Exactly one profile is active. The active profile is bound at session start
  * and cannot change while a session runs, so the switch control is disabled for
  * the whole of one (ADR-013).
+ *
+ * "Disabled" here is `aria-disabled`, never native `disabled` (`inFlight.ts`,
+ * NFR-010). A session can start from a hotkey while focus is on a row's
+ * button, and Switch to this profile becomes unavailable through its own
+ * press. Chromium drops focus from a focused control that becomes `disabled`,
+ * so each handler refuses what the attribute announces instead.
  */
-import { useCallback, useEffect, useState, type DragEvent, type FormEvent, type JSX } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type DragEvent,
+  type FormEvent,
+  type JSX,
+} from 'react';
 import { KB_CEILING } from '../../../shared/defaults.js';
 import { DEFAULT_PROMPT_ID, DEFAULT_PROMPT_NAME, promptName } from '../../../shared/prompts.js';
 import type { DocType, DocumentRecord, Profile, Settings } from '../../../shared/types.js';
 import { call } from '../call.js';
+import { focusLater, focusWithin } from '../focus.js';
 import { formatBytes } from '../format.js';
 import { useInFlight } from '../inFlight.js';
 import type { DocProgress, ModelState, SessionState } from '../state.js';
@@ -32,6 +47,68 @@ interface PendingDelete {
   documents: number;
   /** null when `session:list` failed. Never rendered as zero (FR-028). */
   sessions: number | null;
+}
+
+/**
+ * The download percent a screen reader is told (NFR-010).
+ *
+ * The model pushes progress many times a second, and a `role="status"` region
+ * whose text changes on each push is read out on each push. Quarters are
+ * enough to follow; the exact number stays on screen.
+ */
+export function announcedPercent(percent: number): number {
+  return Math.floor(percent / 25) * 25;
+}
+
+export interface PromptSelection {
+  /** The stored selections, from each settings reload. */
+  sync: (stored: Record<string, string>) => void;
+  /** Writes one profile's choice after every earlier write has answered. */
+  select: (profileId: string, promptId: string) => Promise<boolean>;
+}
+
+/**
+ * Each profile's suggestion prompt, written one change at a time (FR-027).
+ *
+ * `config:set` replaces the whole `profilePromptIds` map, and each change built
+ * it from the `settings` prop. Two quick changes both read the same prop, so
+ * the second write dropped the first change. Built from an optimistic map
+ * instead, a second write saved a first change that was then refused.
+ *
+ * So writes go one at a time, and each is the confirmed map plus its own
+ * change. The confirmed map moves only when a write succeeds. A reload that
+ * answers while a write is queued or in flight can predate it, so it is
+ * ignored until nothing is pending.
+ */
+export function createPromptSelection(
+  write: (ids: Record<string, string>) => Promise<boolean>,
+): PromptSelection {
+  let confirmed: Record<string, string> = {};
+  let queue: Promise<unknown> = Promise.resolve();
+  let pending = 0;
+  return {
+    sync(next) {
+      if (pending === 0) confirmed = next;
+    },
+    async select(profileId, promptId) {
+      pending += 1;
+      const run = queue.then(async () => {
+        const ids = { ...confirmed };
+        if (promptId === DEFAULT_PROMPT_ID) delete ids[profileId];
+        else ids[profileId] = promptId;
+        const ok = await write(ids);
+        if (ok) confirmed = ids;
+        return ok;
+      });
+      // The next change waits for this one, whether it succeeds or throws.
+      queue = run.catch(() => undefined);
+      try {
+        return await run;
+      } finally {
+        pending -= 1;
+      }
+    },
+  };
 }
 
 export interface CompanyProfilesProps {
@@ -60,6 +137,7 @@ export function CompanyProfiles({
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
   const [dropTarget, setDropTarget] = useState(false);
   const [importNote, setImportNote] = useState<string | null>(null);
+  const dialog = useRef<HTMLDivElement | null>(null);
 
   const active = profiles.find((p) => p.id === activeProfileId) ?? null;
 
@@ -68,17 +146,29 @@ export function CompanyProfiles({
     await onSettingsChanged();
   }, [onProfilesChanged, onSettingsChanged]);
 
+  /**
+   * Closes the delete dialog and puts focus somewhere that still exists
+   * (NFR-010). The dialog's buttons go with it, so without this focus fell to
+   * the page body. Moved only when focus was in the dialog: a dialog closed by
+   * a session starting must not pull focus from wherever the user is.
+   */
+  function closeDelete(focusId: string): void {
+    const hadFocus = focusWithin(document.activeElement, [dialog.current]);
+    setPendingDelete(null);
+    if (hadFocus) focusLater(focusId);
+  }
+
   // A profile deleted elsewhere must not leave a confirmation dialog standing
   // over a profile that no longer exists, and a session starting must not leave
   // one standing over an action that is no longer allowed.
   useEffect(() => {
     if (pendingDelete && !profiles.some((p) => p.id === pendingDelete.profile.id)) {
-      setPendingDelete(null);
+      closeDelete(HEADING_ID);
     }
   }, [profiles, pendingDelete]);
 
   useEffect(() => {
-    if (session.active) setPendingDelete(null);
+    if (session.active && pendingDelete) closeDelete(deleteButtonId(pendingDelete.profile.id));
   }, [session.active]);
 
   /**
@@ -89,8 +179,11 @@ export function CompanyProfiles({
    * profile. `FR-027` is about which profile is active rather than about
    * duplicate names, so nothing downstream refuses the second one: the user
    * gets two profiles, each with its own knowledge base, from one action.
+   *
+   * The gate is on the form's submit, so it also refuses a second Enter in the
+   * name field, which the native `disabled` on the button used to stop.
    */
-  const [creating, setCreating] = useState(false);
+  const creating = useInFlight();
 
   async function create(): Promise<void> {
     setError(null);
@@ -99,21 +192,17 @@ export function CompanyProfiles({
       setError('Give the profile a name first.');
       return;
     }
-    setCreating(true);
-    try {
-      const result = await call('profile:create', { name });
-      if (!result.ok) {
-        setError(result.message);
-        return;
-      }
-      setNewName('');
-      await refresh();
-    } finally {
-      setCreating(false);
+    const result = await call('profile:create', { name });
+    if (!result.ok) {
+      setError(result.message);
+      return;
     }
+    setNewName('');
+    await refresh();
   }
 
   async function activate(id: string): Promise<void> {
+    if (session.active || id === activeProfileId) return;
     setError(null);
     const result = await call('profile:activate', { id });
     if (!result.ok) {
@@ -123,15 +212,22 @@ export function CompanyProfiles({
     await refresh();
   }
 
+  // Built once: it holds the choices made since the last reload.
+  const [promptSelection] = useState(() =>
+    createPromptSelection(async (profilePromptIds) => {
+      const result = await call('config:set', { profilePromptIds });
+      if (!result.ok) setError(result.message);
+      return result.ok;
+    }),
+  );
+  const storedPromptIds = JSON.stringify(settings.profilePromptIds);
+  useEffect(() => {
+    promptSelection.sync(JSON.parse(storedPromptIds) as Record<string, string>);
+  }, [storedPromptIds, promptSelection]);
+
   async function selectPrompt(profileId: string, promptId: string): Promise<void> {
-    if (!settings) return;
     setError(null);
-    const profilePromptIds = { ...settings.profilePromptIds };
-    if (promptId === DEFAULT_PROMPT_ID) delete profilePromptIds[profileId];
-    else profilePromptIds[profileId] = promptId;
-    const result = await call('config:set', { profilePromptIds });
-    if (!result.ok) return setError(result.message);
-    await onSettingsChanged();
+    if (await promptSelection.select(profileId, promptId)) await onSettingsChanged();
   }
 
   /**
@@ -142,6 +238,7 @@ export function CompanyProfiles({
    * the number that is wrong exactly when it matters.
    */
   async function askToDelete(profile: Profile): Promise<void> {
+    if (session.active) return;
     setError(null);
     const sessions = await call('session:list', { profileId: profile.id });
     setPendingDelete({
@@ -155,13 +252,16 @@ export function CompanyProfiles({
   }
 
   async function confirmDelete(): Promise<void> {
-    if (!pendingDelete) return;
-    const result = await call('profile:delete', { id: pendingDelete.profile.id });
-    setPendingDelete(null);
+    if (!pendingDelete || session.active) return;
+    const id = pendingDelete.profile.id;
+    const result = await call('profile:delete', { id });
     if (!result.ok) {
+      closeDelete(deleteButtonId(id));
       setError(result.message);
       return;
     }
+    // The row is gone, so focus goes to the section heading above the list.
+    closeDelete(HEADING_ID);
     await refresh();
   }
 
@@ -219,8 +319,10 @@ export function CompanyProfiles({
   }
 
   return (
-    <section data-testid="section-company-profiles" aria-labelledby="company-profiles-heading">
-      <h2 id="company-profiles-heading">Company Profiles</h2>
+    <section data-testid="section-company-profiles" aria-labelledby={HEADING_ID}>
+      <h2 id={HEADING_ID} tabIndex={-1}>
+        Company Profiles
+      </h2>
 
       <p data-testid="active-profile-statement">
         {active
@@ -238,7 +340,7 @@ export function CompanyProfiles({
       <form
         onSubmit={(event: FormEvent<HTMLFormElement>) => {
           event.preventDefault();
-          void create();
+          void creating.run(create);
         }}
       >
         <label htmlFor="new-profile-name">New profile name</label>
@@ -248,7 +350,11 @@ export function CompanyProfiles({
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
         />
-        <button type="submit" data-testid="create-profile" disabled={creating}>
+        <button
+          type="submit"
+          data-testid="create-profile"
+          aria-disabled={creating.busy || undefined}
+        >
           Create profile
         </button>
       </form>
@@ -286,15 +392,16 @@ export function CompanyProfiles({
             <button
               type="button"
               data-testid={`profile-activate-${profile.id}`}
-              disabled={session.active || profile.id === activeProfileId}
+              aria-disabled={session.active || profile.id === activeProfileId || undefined}
               onClick={() => void activate(profile.id)}
             >
               Switch to this profile
             </button>
             <button
               type="button"
+              id={deleteButtonId(profile.id)}
               data-testid={`profile-delete-${profile.id}`}
-              disabled={session.active}
+              aria-disabled={session.active || undefined}
               onClick={() => void askToDelete(profile)}
             >
               Delete profile
@@ -305,15 +412,17 @@ export function CompanyProfiles({
 
       {pendingDelete ? (
         <div
+          ref={dialog}
           role="alertdialog"
           aria-labelledby="delete-confirm-heading"
+          aria-describedby="delete-confirm-counts"
           data-testid="delete-confirm"
           onKeyDown={(e) => {
-            if (e.key === 'Escape') setPendingDelete(null);
+            if (e.key === 'Escape') closeDelete(deleteButtonId(pendingDelete.profile.id));
           }}
         >
           <h3 id="delete-confirm-heading">Delete {pendingDelete.profile.name}?</h3>
-          <p data-testid="delete-confirm-counts">
+          <p id="delete-confirm-counts" data-testid="delete-confirm-counts">
             This deletes {pendingDelete.documents} document
             {pendingDelete.documents === 1 ? '' : 's'} and{' '}
             {pendingDelete.sessions === null
@@ -328,7 +437,7 @@ export function CompanyProfiles({
             // section says deleting is disabled until it stops. This dialog is
             // not modal, so a session can start while it is open, and without
             // the same guard the dialog contradicted that sentence.
-            disabled={session.active}
+            aria-disabled={session.active || undefined}
             onClick={() => void confirmDelete()}
           >
             Delete it
@@ -339,7 +448,7 @@ export function CompanyProfiles({
             // Focused on open, so the keyboard lands on the safe choice and the
             // dialog's `alertdialog` role is not a claim nothing acts on.
             autoFocus
-            onClick={() => setPendingDelete(null)}
+            onClick={() => closeDelete(deleteButtonId(pendingDelete.profile.id))}
           >
             Keep it
           </button>
@@ -371,7 +480,7 @@ export function CompanyProfiles({
         <button
           type="button"
           data-testid="pick-files"
-          disabled={!active}
+          aria-disabled={!active || undefined}
           onClick={() => void pickFiles()}
         >
           Add documents
@@ -402,7 +511,7 @@ export function CompanyProfiles({
 
 /** The embedding model gate and its retry (ADR-011, ADR-026, TC-161). */
 function ModelGate({ model }: { model: ModelState | null }): JSX.Element | null {
-  const [busy, setBusy] = useState(false);
+  const ensuring = useInFlight();
   const [error, setError] = useState<string | null>(null);
   if (!model) return null;
   if (model.kind === 'ready') {
@@ -421,7 +530,14 @@ function ModelGate({ model }: { model: ModelState | null }): JSX.Element | null 
         </p>
       ) : null}
       {model.kind === 'downloading' ? (
-        <p>Downloading the local embedding model: {Math.round(model.percent)} percent.</p>
+        // The live percent is on screen, and a quarter step is what is read
+        // out: a change inside `aria-hidden` is not in the accessibility tree,
+        // so it does not make this status region speak.
+        <p>
+          Downloading the local embedding model:{' '}
+          <span aria-hidden="true">{Math.round(model.percent)}</span>
+          <span className="visually-hidden">{announcedPercent(model.percent)}</span> percent.
+        </p>
       ) : null}
       {model.kind === 'unavailable' ? <p>{model.reason}</p> : null}
       {error ? (
@@ -429,29 +545,38 @@ function ModelGate({ model }: { model: ModelState | null }): JSX.Element | null 
           {error}
         </p>
       ) : null}
-      {model.kind === 'downloading' ? null : (
-        <button
-          type="button"
-          data-testid="model-retry"
-          disabled={busy}
-          onClick={() => {
-            setBusy(true);
+      {/*
+        Kept on screen while the download runs, unavailable. It used to be
+        removed then, and the press that started the download left focus on a
+        button that no longer existed.
+      */}
+      <button
+        type="button"
+        data-testid="model-retry"
+        aria-disabled={ensuring.busy || model.kind === 'downloading' || undefined}
+        onClick={() => {
+          if (model.kind === 'downloading') return;
+          void ensuring.run(async () => {
             setError(null);
             // The outcome arrives on `CH-214` when the call gets that far. An
             // `IpcError` never reaches that channel, so ignoring this result
             // re-enabled the button and said nothing at all.
-            void call('model:ensure')
-              .then((result) => {
-                if (!result.ok) setError(result.message);
-              })
-              .finally(() => setBusy(false));
-          }}
-        >
-          Download the model now
-        </button>
-      )}
+            const result = await call('model:ensure');
+            if (!result.ok) setError(result.message);
+          });
+        }}
+      >
+        Download the model now
+      </button>
     </div>
   );
+}
+
+const HEADING_ID = 'company-profiles-heading';
+
+/** A row's Delete profile button, where focus returns from its dialog. */
+function deleteButtonId(profileId: string): string {
+  return `profile-delete-button-${profileId}`;
 }
 
 /**

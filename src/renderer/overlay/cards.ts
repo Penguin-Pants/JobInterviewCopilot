@@ -124,11 +124,11 @@ export function shouldShowIdle(cards: readonly SuggestionCard[], paused: boolean
  * What the overlay's readiness report hangs on (FR-008, ADR-016).
  *
  * Null until the consent text has arrived, because the card cannot be on
- * screen before it. After that, the session epoch alone: readiness is owed
- * again at each session boundary, when the card comes back, and never when
- * only the text changes. An edit reported readiness again before, and main
- * then made the window take clicks for a card the user had dismissed.
+ * screen before it. After that, the session boundary alone: readiness is owed
+ * again at each boundary, when the card comes back, and never when only the
+ * text changes. An edit reported readiness again before, and main then made
+ * the window take clicks for a card the user had dismissed.
  */
-export function readinessKey(consent: string | null, epoch: number): number | null {
-  return consent === null ? null : epoch;
+export function readinessKey<T>(consent: string | null, boundary: T): T | null {
+  return consent === null ? null : boundary;
 }

@@ -58,6 +58,13 @@ interface Card {
 export class OverlayGate {
   private ready = false;
   private card: Card | null = null;
+  /**
+   * The session that readiness is owed for, set at each session boundary.
+   * `null` before the first session and after one stops.
+   */
+  private session: string | null = null;
+  /** The session that stopped last, whose late reports are still refused. */
+  private stopped: string | null = null;
 
   constructor(private readonly deliver: (message: GatedMessage) => void) {}
 
@@ -76,11 +83,30 @@ export class OverlayGate {
     return this.card?.generationId ?? null;
   }
 
-  /** `CH-122` arrived: the consent card has painted. Flush, then pass through. */
-  noteReady(): void {
-    if (this.ready) return;
+  /**
+   * `CH-122` arrived: the consent card has painted. Flush, then pass through.
+   *
+   * Only for the session the gate is held for. A report the renderer sent for
+   * the previous session, or a retry of one, can arrive after `reset` and
+   * before the renewed reminder has painted. Taken as an answer, it opened the
+   * next interview's gate on a reminder that was not on screen yet, which is
+   * the race `ADR-016` exists so that nothing has to win. It is refused, and
+   * the gate stays closed until the report for this session arrives. A late
+   * report for the session that has just stopped is refused too.
+   *
+   * With no session held at all, nothing can be opened early, so a report is
+   * accepted as it was before sessions were named. The overlay end-to-end
+   * suite drives sessions from the renderer side only, and a refusal there
+   * left the reminder unclickable (FR-006, FR-083).
+   */
+  noteReady(session: string | null): boolean {
+    const held = this.session !== null;
+    if (held && session !== this.session) return false;
+    if (!held && session !== null && session === this.stopped) return false;
+    if (this.ready) return true;
     this.ready = true;
     this.flush();
+    return true;
   }
 
   /**
@@ -118,10 +144,17 @@ export class OverlayGate {
    * that nothing has to win. The renderer reports ready again once the renewed
    * reminder has painted, and until then suggestions buffer rather than drop,
    * as they do at every other closed-gate moment.
+   *
+   * `session` is the session that starts here, or `null` when one stops. Only
+   * a readiness report for it opens the gate again (see `noteReady`).
    */
-  reset(): void {
+  reset(session: string | null): void {
     this.card = null;
     this.ready = false;
+    // A second stop in a row keeps the session that stopped last.
+    if (session !== null) this.stopped = null;
+    else if (this.session !== null) this.stopped = this.session;
+    this.session = session;
   }
 
   send(message: GatedMessage): void {

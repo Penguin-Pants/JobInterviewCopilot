@@ -86,7 +86,7 @@ export function OverlayAppearance({
    *
    * What this serializes is exactly the control that rebuilds the window, and
    * that is the whole of the claim: the translucency select is the only one
-   * `committing` disables, so two rebuilds cannot overlap. The other controls
+   * `committing` refuses, so two rebuilds cannot overlap. The other controls
    * stay live during a commit on purpose, because they write settings without
    * rebuilding anything and locking the whole section behind a window rebuild
    * would freeze five controls on the strength of one. A rebuild racing a plain
@@ -181,8 +181,15 @@ export function OverlayAppearance({
         id="overlay-translucency"
         data-testid="overlay-translucency"
         value={theme.overlayTranslucency}
-        disabled={committing}
-        onChange={(e) => writeTheme({ overlayTranslucency: e.target.value as OverlayTranslucency })}
+        // `aria-disabled`, not `disabled`: an arrow key changes a focused
+        // select, and Chromium drops focus from a focused control that
+        // becomes `disabled` (NFR-010). A change during a commit is refused
+        // here, and React puts the controlled value back.
+        aria-disabled={committing || undefined}
+        onChange={(e) => {
+          if (committing) return;
+          writeTheme({ overlayTranslucency: e.target.value as OverlayTranslucency });
+        }}
       >
         {TRANSLUCENCY.map((mode) => (
           <option

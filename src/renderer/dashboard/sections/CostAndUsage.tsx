@@ -17,8 +17,32 @@ import { SETTINGS_LIMITS } from '../../../shared/defaults.js';
 import type { Settings } from '../../../shared/types.js';
 import { call } from '../call.js';
 import { useInFlight } from '../inFlight.js';
-import { parseThreshold } from '../thresholds.js';
 import type { SessionState, UsageState } from '../state.js';
+
+/**
+ * The two thresholds as typed, or null when either is not a valid one (FR-109).
+ *
+ * `Number('')` is 0, so an emptied cost field passed `cost >= 0` and was saved
+ * as a $0 threshold, which warns at the first cent of every session. An empty
+ * field is a missing value, not zero.
+ *
+ * The ranges are the ones the settings schema enforces (`SETTINGS_LIMITS`), so
+ * the user gets a sentence naming them rather than the router's generic
+ * refusal. A typed zero time is in range: the cost meter reads it as "no time
+ * warning" (FR-031).
+ */
+export function parseThresholds(
+  costUsd: string,
+  timeMinutes: string,
+): { costUsd: number; timeMinutes: number } | null {
+  if (costUsd.trim() === '' || timeMinutes.trim() === '') return null;
+  const cost = Number(costUsd);
+  const minutes = Number(timeMinutes);
+  const { costUsd: costRange, timeMinutes: timeRange } = SETTINGS_LIMITS;
+  if (!(cost >= costRange.min && cost <= costRange.max)) return null;
+  if (!(minutes >= timeRange.min && minutes <= timeRange.max)) return null;
+  return { costUsd: cost, timeMinutes: minutes };
+}
 
 export interface CostAndUsageProps {
   settings: Settings;
@@ -47,21 +71,16 @@ export function CostAndUsage({
   async function saveThresholds(): Promise<void> {
     setError(null);
     setSaved(false);
-    // The ranges the settings schema enforces, checked here so the user gets a
-    // sentence naming them rather than the router's generic refusal (FR-031).
-    const { costUsd: costRange, timeMinutes: timeRange } = SETTINGS_LIMITS;
-    const cost = parseThreshold(costUsd, costRange);
-    const minutes = parseThreshold(timeMinutes, timeRange);
-    if (cost === null || minutes === null) {
+    const thresholds = parseThresholds(costUsd, timeMinutes);
+    if (!thresholds) {
+      const { costUsd: costRange, timeMinutes: timeRange } = SETTINGS_LIMITS;
       setError(
         `Give a cost from ${costRange.min} to ${costRange.max} dollars and a time from ` +
           `${timeRange.min} to ${timeRange.max} minutes.`,
       );
       return;
     }
-    const result = await call('config:set', {
-      thresholds: { costUsd: cost, timeMinutes: minutes },
-    });
+    const result = await call('config:set', { thresholds });
     if (!result.ok) {
       setError(result.message);
       return;
@@ -134,7 +153,8 @@ export function CostAndUsage({
       >
         Save thresholds
       </button>
-      {saved ? <span data-testid="thresholds-saved">Saved</span> : null}
+      {/* Mounted before its text, so the change is announced. */}
+      <span role="status">{saved ? <span data-testid="thresholds-saved">Saved</span> : null}</span>
       {error ? (
         <span role="alert" data-testid="thresholds-error">
           {error}

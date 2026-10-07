@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CURRENT_SCHEMA_VERSION } from '../../src/main/config.js';
 import { IpcRouter } from '../../src/main/ipc/router.js';
 import { initLogger } from '../../src/main/logger.js';
-import { isIpcError } from '../../src/shared/ipc.js';
+import { isIpcError } from '../../src/shared/ipc-error.js';
 import { defaultSettings } from '../../src/shared/defaults.js';
 
 /**
