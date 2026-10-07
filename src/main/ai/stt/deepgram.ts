@@ -13,8 +13,19 @@ import type {
 } from '../../../shared/types.js';
 import { classifyStatus } from '../stt.js';
 import type { SttProvider, SttSession, SttSessionOptions } from '../stt.js';
-import type { ConnectSpec, SocketAdapterSpec, SocketFactory } from './socket-session.js';
-import { SocketSttSession } from './socket-session.js';
+import type {
+  ConnectSpec,
+  Emitter,
+  SocketAdapterSpec,
+  SocketFactory,
+  SocketSessionDeps,
+} from './socket-session.js';
+import {
+  FrameShapeError,
+  openSocketSession,
+  optionalString,
+  parseFrame,
+} from './socket-session.js';
 
 export const DEEPGRAM_SOCKET_URL = 'wss://api.deepgram.com/v1/listen';
 const DEEPGRAM_VALIDATE_URL = 'https://api.deepgram.com/v1/projects';
@@ -44,11 +55,47 @@ export function deepgramConnectSpec(
   };
 }
 
-interface DeepgramFrame {
-  type?: string;
-  speech_final?: boolean;
-  is_final?: boolean;
-  channel?: { alternatives?: { transcript?: string; confidence?: number }[] };
+/**
+ * Reads one Deepgram frame. Only `Results` frames carry a transcript; the
+ * others (`Metadata`, `SpeechStarted`, `UtteranceEnd`) are ignored.
+ *
+ * Deepgram reports a refused key or a bad parameter by refusing the upgrade or
+ * closing the socket, which `SocketSttSession` classifies from the HTTP status
+ * or the close code. No in-band error frame is relied on here: none is
+ * documented in this repository or exercised by a fixture (ADR-056).
+ */
+function readDeepgramFrame(raw: string, emit: Emitter): void {
+  const frame = parseFrame(raw);
+  const type = optionalString(frame, 'type');
+  if (type !== undefined && type !== 'Results') return;
+
+  const alternative = firstAlternative(frame.channel);
+  const text = alternative ? (optionalString(alternative, 'transcript') ?? '') : '';
+  const confidence = alternative?.confidence;
+  if (confidence !== undefined && typeof confidence !== 'number') {
+    throw new FrameShapeError('"confidence" is not a number');
+  }
+  // Deepgram sends empty interim results constantly. Emitting them would
+  // blank the overlay between words.
+  if (text !== '') emit.transcript(text, frame.is_final === true, confidence);
+  // speech_final is the native turn end, fired at the `endpointing` gap.
+  if (frame.speech_final === true) emit.endpoint();
+}
+
+function firstAlternative(channel: unknown): Record<string, unknown> | null {
+  if (channel === undefined) return null;
+  if (typeof channel !== 'object' || channel === null) {
+    throw new FrameShapeError('"channel" is not an object');
+  }
+  const alternatives = (channel as { alternatives?: unknown }).alternatives;
+  if (alternatives === undefined) return null;
+  if (!Array.isArray(alternatives)) throw new FrameShapeError('"alternatives" is not an array');
+  const first: unknown = alternatives[0];
+  if (first === undefined) return null;
+  if (typeof first !== 'object' || first === null) {
+    throw new FrameShapeError('an alternative is not an object');
+  }
+  return first as Record<string, unknown>;
 }
 
 export function deepgramAdapterSpec(
@@ -59,27 +106,18 @@ export function deepgramAdapterSpec(
   return {
     providerId: 'deepgram',
     connect: () => deepgramConnectSpec(choice, key, options),
-    handleMessage: (raw, emit) => {
-      const frame = JSON.parse(raw) as DeepgramFrame;
-      if (frame.type && frame.type !== 'Results') return;
-      const text = frame.channel?.alternatives?.[0]?.transcript ?? '';
-      // Deepgram sends empty interim results constantly. Emitting them would
-      // blank the overlay between words.
-      if (text !== '')
-        emit.transcript(
-          text,
-          frame.is_final === true,
-          frame.channel?.alternatives?.[0]?.confidence,
-        );
-      // speech_final is the native turn end, fired at the `endpointing` gap.
-      if (frame.speech_final === true) emit.endpoint();
-    },
+    handleMessage: readDeepgramFrame,
     encode: (chunk: AudioChunk) => new Uint8Array(chunk.pcm),
+    // Deepgram answers CloseStream with its last results and then closes the
+    // socket, which ends the session's close drain.
     closeFrame: () => JSON.stringify({ type: 'CloseStream' }),
   };
 }
 
-export function createDeepgramProvider(factory: SocketFactory): SttProvider {
+export function createDeepgramProvider(
+  factory: SocketFactory,
+  deps: SocketSessionDeps = {},
+): SttProvider {
   return {
     id: 'deepgram',
     open(
@@ -88,14 +126,13 @@ export function createDeepgramProvider(factory: SocketFactory): SttProvider {
       key: string,
       options: SttSessionOptions,
     ): Promise<SttSession> {
-      const session = new SocketSttSession({
+      return openSocketSession({
+        ...deps,
         source,
         choice,
         spec: deepgramAdapterSpec(choice, key, options),
         factory,
       });
-      session.connect();
-      return Promise.resolve(session);
     },
     async validateKey(key: string): Promise<ValidationResult> {
       try {

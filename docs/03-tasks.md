@@ -400,7 +400,9 @@ Two process lessons, both fixed rather than noted:
   finds no branch on a provider id string outside the adapter files and the
   registry itself.
 - Three streaming adapters ship and all three accept the same 16 kHz, 16-bit,
-  mono PCM with no per-provider resampling:
+  mono PCM from the worker. (ADR-056 corrected two adapters: OpenAI realtime
+  upsamples to the 24 kHz its API requires, and ElevenLabs speaks the SDK's
+  `message_type` JSON protocol with `vad_silence_threshold_secs`.)
   - Deepgram: `encoding=linear16&sample_rate=16000&channels=1&interim_results=true`
     and `endpointing` set from `settings.trigger.turnEndGapMs`, never hard-coded,
     so a native signal cannot preempt the user's chosen gap (FR-050).
@@ -1351,7 +1353,7 @@ collaborator's signature implied rather than what the collaborator does.
 
 | Defect | Consequence | Fix |
 |---|---|---|
-| **A resolved `open` is not a connected socket.** Every streaming adapter asks its socket to connect and returns; a refusal arrives later on the `error` event | `runFor` had already recorded the open a success, so an unavailable or revoked primary never retried and never failed over. The session transcribed nothing for the rest of the interview and the Dashboard badge stayed green | The `error` event is raised **into** `CMP-12` and the pair is re-opened on whatever the machine then serves. This also closes the follow-up this task was going to carry about a socket dying mid-session |
+| **A resolved `open` is not a connected socket.** Every streaming adapter asks its socket to connect and returns; a refusal arrives later on the `error` event | `runFor` had already recorded the open a success, so an unavailable or revoked primary never retried and never failed over. The session transcribed nothing for the rest of the interview and the Dashboard badge stayed green | The `error` event is raised **into** `CMP-12` and the pair is re-opened on whatever the machine then serves. This also closes the follow-up this task was going to carry about a socket dying mid-session. ADR-056 later made `open` itself wait for the provider to accept the socket, because a retry that re-opened still "succeeded" and the backup was never reached |
 | **`[]` from `RagEngine.query` is not "nothing matched".** TASK-024 returned it for a missing model and for a failed embedding too, so a failure could not throw into a session | It reached the loop as "no relevant notes", and the loop generated from them: the ungrounded suggestion ADR-035 exists to prevent, one round after ADR-035 said so. The decision was not enforced anywhere | `query` throws `RetrievalUnavailableError` when notes that exist cannot be reached, and still answers `[]` when there is genuinely nothing to search (ADR-036) |
 | **Stop during the bring-up tore the start down from underneath it.** `session:start` pushes `CH-201` before awaiting the loop, so Stop is reachable while capture or a socket is still coming up | The teardown ran, and the start's continuation then opened the pair again and started the trigger, leaving sockets live against a transcript that had already been compacted | `stop` waits for the bring-up it interrupts. The start is held as a promise so there is something to wait for rather than a gap to slip through |
 | **`close` on a batch adapter is where its last answer comes from.** Whisper posts its remaining buffer inside `close`, and the loop cleared its stream map first | The final spoken segment of **every** session recorded with a batch model was dropped, twice over: the loop had stopped routing, and `close` set `closed` before the request returned, so `transcribe` discarded the response it had just paid for | Streams stay routable until `close` resolves, and `close` waits for its own requests. A `closing` flag keeps chunks out of a socket that is going away, which is what the early clear was really for |
