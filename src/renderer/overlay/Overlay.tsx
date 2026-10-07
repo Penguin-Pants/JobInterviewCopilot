@@ -106,10 +106,12 @@ function Overlay(): JSX.Element {
    *
    * A new object at each boundary, so the report runs again even for the same
    * id, and the report names the id so the main process can refuse it once
-   * that session is no longer current.
+   * that session is no longer current. `epoch` counts the boundaries, so a test
+   * can tell when the reset at one has run (`data-session-epoch`).
    */
-  const [readyFor, setReadyFor] = useState<{ sessionId: string | null }>(() => ({
+  const [readyFor, setReadyFor] = useState<{ sessionId: string | null; epoch: number }>(() => ({
     sessionId: lastSeen('state:session')?.sessionId ?? null,
+    epoch: 0,
   }));
 
   /**
@@ -259,7 +261,7 @@ function Overlay(): JSX.Element {
       // this same boundary, so until this is answered the next interview's
       // suggestions buffer rather than arriving over a reminder that has not
       // been re-shown yet.
-      setReadyFor({ sessionId });
+      setReadyFor((previous) => ({ sessionId, epoch: previous.epoch + 1 }));
     }
     lastSessionId.current = sessionId;
   }, [sessionId, holdBuffer]);
@@ -492,6 +494,7 @@ function Overlay(): JSX.Element {
   return (
     <div
       data-testid="overlay"
+      data-session-epoch={readyFor.epoch}
       data-interactive={interactive ? 'true' : 'false'}
       data-overlay-state={idle ? 'idle' : 'active'}
       data-theme={resolved.mode}
