@@ -6,7 +6,7 @@
  * (FR-037, TC-151); nothing outside this directory changes.
  */
 import { registerSttProvider } from '../stt.js';
-import type { SocketFactory, SocketSessionDeps } from './socket-session.js';
+import type { SocketFactory, SocketSessionDeps, SttLog } from './socket-session.js';
 import { createDeepgramProvider } from './deepgram.js';
 import { createElevenLabsProvider } from './elevenlabs.js';
 import { createOpenAiRealtimeProvider } from './openai-realtime.js';
@@ -32,11 +32,11 @@ export function registerStreamingSttProviders(
  * socket and `whisper-1` are different transports behind one provider id, and
  * the facade picks between them from the model's `streaming` flag.
  */
-export function registerBatchSttProviders(post?: PostWav): void {
-  registerSttProvider(createWhisperProvider(post), 'batch');
+export function registerBatchSttProviders(post?: PostWav, log?: SttLog): void {
+  registerSttProvider(createWhisperProvider(post, log), 'batch');
 }
 
 export function registerAllSttProviders(deps: SocketSessionDeps = {}): void {
   registerStreamingSttProviders(createWebSocket, deps);
-  registerBatchSttProviders();
+  registerBatchSttProviders(undefined, deps.log);
 }

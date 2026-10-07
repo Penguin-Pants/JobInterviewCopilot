@@ -24,6 +24,7 @@ import type { RetrievedChunk } from '../rag.js';
 import { LineBuffer } from './llm/lineBuffer.js';
 import { composeSystemPrompt } from '../../shared/prompts.js';
 import { GENERATION_PARAMS, SYSTEM_PROMPT, buildUserMessage } from './prompt.js';
+import { isProviderError } from './llm/sse.js';
 import { providerError } from './stt.js';
 
 /** What one generation cost, reported once per stream (FR-106, ASM-011). */
@@ -264,7 +265,7 @@ function resolveStatus(o: {
 }
 
 function asProviderError(err: unknown, providerId: string): ProviderError {
-  if (err instanceof Error && 'class' in err && 'retryable' in err) return err as ProviderError;
+  if (isProviderError(err)) return err;
   return providerError(
     providerId,
     'network',

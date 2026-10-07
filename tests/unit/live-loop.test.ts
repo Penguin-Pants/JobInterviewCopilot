@@ -21,6 +21,7 @@ import type {
   TranscriptEvent,
   TranscriptSource,
 } from '../../src/shared/types.js';
+import { ProviderHealthRegistry } from '../../src/main/ai/health.js';
 import type { SttSession } from '../../src/main/ai/stt.js';
 import { TriggerMachine, type TurnFired } from '../../src/main/ai/trigger.js';
 import {
@@ -52,6 +53,7 @@ class StubSttSession implements SttSession {
   readonly transcript: ((t: TranscriptEvent) => void)[] = [];
   readonly endpoints: (() => void)[] = [];
   readonly errors: ((e: ProviderError) => void)[] = [];
+  readonly speeches: (() => void)[] = [];
 
   constructor(
     readonly source: TranscriptSource,
@@ -74,10 +76,12 @@ class StubSttSession implements SttSession {
 
   on(e: 'transcript', h: (t: TranscriptEvent) => void): void;
   on(e: 'endpoint', h: () => void): void;
+  on(e: 'speech', h: () => void): void;
   on(e: 'error', h: (err: ProviderError) => void): void;
-  on(e: 'transcript' | 'endpoint' | 'error', h: (...args: never[]) => void): void {
+  on(e: 'transcript' | 'endpoint' | 'speech' | 'error', h: (...args: never[]) => void): void {
     if (e === 'transcript') this.transcript.push(h as (t: TranscriptEvent) => void);
     if (e === 'endpoint') this.endpoints.push(h as () => void);
+    if (e === 'speech') this.speeches.push(h as () => void);
     if (e === 'error') this.errors.push(h as (err: ProviderError) => void);
   }
 }
@@ -119,6 +123,7 @@ interface StubOptions {
   llmHealth?: HealthState;
   appendTurn?: (source: TranscriptSource, text: string) => Promise<number>;
   appendSuggestion?: (entry: { status: string }) => Promise<number>;
+  noteAudio?: LiveSessionLoopOptions['cost']['noteAudio'];
   /** Makes the one call that sits outside the loop's own try blocks throw. */
   settleThrows?: boolean;
 }
@@ -134,6 +139,7 @@ function makeLoop(stub: StubOptions = {}) {
   const messages: GatedMessage[] = [];
   const appended: { status: string }[] = [];
   const endpoints: number[] = [];
+  const speeches: number[] = [];
   const settings: Settings = { ...defaultSettings(), ...stub.settings };
 
   const loop = new LiveSessionLoop({
@@ -146,6 +152,7 @@ function makeLoop(stub: StubOptions = {}) {
       stop: () => {},
       handleTranscript: () => {},
       handleEndpoint: () => endpoints.push(1),
+      handleSpeechStart: () => speeches.push(1),
       noteGenerationSettled: (id: string) => {
         settled.push(id);
         if (stub.settleThrows) throw new Error('the machine threw');
@@ -161,7 +168,7 @@ function makeLoop(stub: StubOptions = {}) {
         }),
     },
     cost: {
-      noteAudio: () => {},
+      noteAudio: stub.noteAudio ?? (() => {}),
       noteGeneration: (generationId, choice, usage) => noted.push({ generationId, choice, usage }),
     },
     health: {
@@ -203,6 +210,7 @@ function makeLoop(stub: StubOptions = {}) {
     settled,
     noted,
     endpoints,
+    speeches,
     settings,
     pushes,
     messages,
@@ -375,6 +383,18 @@ describe('a transcription target that cannot be used', () => {
 });
 
 describe('the wiring of one open stream', () => {
+  it('passes a speech start from the interviewer to the machine', async () => {
+    const { loop, opened, speeches } = makeLoop();
+    await loop.start(PROFILE_ID);
+
+    opened.find((s) => s.source === 'interviewer')?.speeches.forEach((h) => h());
+    expect(speeches).toHaveLength(1);
+
+    // FR-055: the candidate stream never reaches the machine's turn logic.
+    expect(opened.find((s) => s.source === 'candidate')?.speeches).toHaveLength(0);
+    await loop.stop();
+  });
+
   it('passes a native endpoint from the interviewer to the machine', async () => {
     const { loop, opened, endpoints } = makeLoop();
     await loop.start(PROFILE_ID);
@@ -481,7 +501,7 @@ describe('the wiring of one open stream', () => {
 
   it('bills nothing for a chunk with no stream to send it to', async () => {
     const noteAudio = vi.fn();
-    const { loop } = makeLoop();
+    const { loop } = makeLoop({ noteAudio });
     loop.handleChunk({
       source: 'interviewer',
       pcm: new ArrayBuffer(32000),
@@ -489,6 +509,52 @@ describe('the wiring of one open stream', () => {
       sequence: 1,
     });
     expect(noteAudio).not.toHaveBeenCalled();
+  });
+
+  /**
+   * An adapter can put audio on the wire outside `push`: a batch model posts a
+   * queued window when the one before it answers, and its tail inside `close`.
+   * Measuring only around `push` billed none of that audio (FR-103).
+   */
+  it('bills audio an adapter sends after the push, and in close', async () => {
+    class CountingSession extends StubSttSession {
+      sentBytes = 0;
+    }
+    const sessions: CountingSession[] = [];
+    let billed = 0;
+    const { loop } = makeLoop({
+      noteAudio: (_source, _choice, seconds) => {
+        billed += seconds;
+      },
+      openStt: (choice, source) => {
+        const session = new CountingSession(source, choice);
+        sessions.push(session);
+        return Promise.resolve(session);
+      },
+    });
+    await loop.start(PROFILE_ID);
+    const interviewer = sessions.find((s) => s.source === 'interviewer')!;
+    const chunk = (sequence: number): AudioChunk => ({
+      source: 'interviewer',
+      pcm: new ArrayBuffer(32000),
+      timestamp: 0,
+      sequence,
+    });
+
+    // Buffered, nothing sent yet.
+    loop.handleChunk(chunk(1));
+    expect(billed).toBe(0);
+
+    // A window goes out between pushes, then the tail goes out in close.
+    interviewer.sentBytes += 32000 * 2;
+    loop.handleChunk(chunk(2));
+    interviewer.onClose = () => {
+      interviewer.sentBytes += 32000;
+    };
+    await loop.stop();
+
+    // 16 kHz, 16-bit: 32000 bytes is one second.
+    expect(billed).toBe(3);
   });
 });
 
@@ -1768,5 +1834,105 @@ describe('TC-179 firedAt includes the confidence gate and classifier cost', () =
       'suggestion:end',
     ]);
     expect(appended.map((e) => e.status)).toEqual(['complete']);
+  });
+});
+
+/**
+ * A degraded turn sleeps in a backoff between attempts. A newer turn aborts it,
+ * and the newer turn is chained behind it, so the sleep must end with the abort
+ * rather than holding the newer turn back until it is stale (FR-054, FR-114).
+ */
+describe('an aborted turn stops waiting out its backoff', () => {
+  it('lets the next turn start as soon as the old one is aborted', async () => {
+    const registry = new ProviderHealthRegistry(
+      () => undefined,
+      () => () => Promise.resolve(false),
+      // A backoff that would never end on its own.
+      { sleep: () => new Promise<void>(() => undefined), random: () => 0.5 },
+    );
+    registry.bind({ capability: 'llm', primary: 'anthropic', backup: null });
+
+    const asked: string[] = [];
+    const busy = new Error('busy') as ProviderError;
+    busy.class = 'server';
+    busy.providerId = 'anthropic';
+    busy.retryable = true;
+    const { loop, appended, errors } = makeLoop({
+      runFor: (capability, fn, options) => registry.runFor(capability, fn, options),
+      generate: (_provider, request) => {
+        asked.push(request.generationId);
+        return Promise.resolve(
+          // A salvaged bullet, then the provider failed: retryable, so it backs off.
+          outcome({ generationId: request.generationId, bullets: ['salvaged'], error: busy }),
+        );
+      },
+    });
+    await loop.start(PROFILE_ID);
+
+    const first = new AbortController();
+    loop.onFire(turn({ generationId: 'g1', signal: first.signal }));
+    await vi.waitFor(() => {
+      expect(asked).toEqual(['g1']);
+    });
+
+    first.abort();
+    loop.onFire(turn({ generationId: 'g2' }));
+    await vi.waitFor(() => {
+      expect(asked).toEqual(['g1', 'g2']);
+    });
+    // The replaced turn is recorded as cancelled, and a replacement is not a
+    // provider failure for the log.
+    expect(appended.map((e) => e.status)).toEqual(['cancelled']);
+    expect(errors.map((e) => e.message)).not.toContain('the language model failed');
+  });
+});
+
+/**
+ * A salvaged card is on the overlay while the turn waits out its backoff. A
+ * newer turn aborts it there, so no later attempt runs to send the cancelled
+ * end that FR-054 uses to remove it. If the newer turn is then gated out or
+ * classified non-actionable, no new card replaces it either (ADR-047).
+ */
+describe('an aborted backoff clears the salvage it leaves on the overlay', () => {
+  it('sends a cancelled end for the card still up', async () => {
+    const registry = new ProviderHealthRegistry(
+      () => undefined,
+      () => () => Promise.resolve(false),
+      { sleep: () => new Promise<void>(() => undefined), random: () => 0.5 },
+    );
+    registry.bind({ capability: 'llm', primary: 'anthropic', backup: null });
+
+    const busy = new Error('busy') as ProviderError;
+    busy.class = 'server';
+    busy.providerId = 'anthropic';
+    busy.retryable = true;
+    const { loop, messages, settled } = makeLoop({
+      runFor: (capability, fn, options) => registry.runFor(capability, fn, options),
+      generate: (_provider, request, _signal, events) => {
+        const cardId = `card-${request.generationId}`;
+        events.onBegin({ generationId: request.generationId, cardId, question: request.question });
+        events.onLine({ generationId: request.generationId, cardId, line: 'salvaged', index: 0 });
+        events.onEnd({ generationId: request.generationId, status: 'complete' });
+        return Promise.resolve(
+          outcome({ generationId: request.generationId, bullets: ['salvaged'], error: busy }),
+        );
+      },
+    });
+    await loop.start(PROFILE_ID);
+
+    const first = new AbortController();
+    loop.onFire(turn({ generationId: 'g1', signal: first.signal }));
+    await vi.waitFor(() => {
+      expect(messages.map((m) => m.channel)).toContain('suggestion:end');
+    });
+
+    first.abort();
+    await vi.waitFor(() => {
+      expect(settled).toContain('g1');
+    });
+    expect(messages.at(-1)).toEqual({
+      channel: 'suggestion:end',
+      payload: { generationId: 'g1', status: 'cancelled' },
+    });
   });
 });

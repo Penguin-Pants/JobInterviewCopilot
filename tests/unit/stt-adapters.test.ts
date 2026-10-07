@@ -263,6 +263,20 @@ describe('TC-152 OpenAI realtime adapter', () => {
     expect(endpoints).toHaveBeenCalledTimes(1);
   });
 
+  it('maps the VAD start event to speech', async () => {
+    // A rapid follow-up sends no text before its own `speech_stopped`. The
+    // start event is what tells the machine that endpoint is new (FR-050).
+    const { session, sockets } = await openOn(
+      createOpenAiRealtimeProvider,
+      { providerId: 'openai', modelId: 'gpt-4o-transcribe' },
+      'interviewer',
+    );
+    const speech = vi.fn();
+    session.on('speech', speech);
+    sockets[0]!.receive({ type: 'input_audio_buffer.speech_started' });
+    expect(speech).toHaveBeenCalledTimes(1);
+  });
+
   it('sends audio as base64 in a JSON frame, not as bytes', async () => {
     const { session, sockets } = await openOn(
       createOpenAiRealtimeProvider,
