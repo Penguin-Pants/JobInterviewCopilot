@@ -17,6 +17,7 @@ import { SETTINGS_LIMITS } from '../../../shared/defaults.js';
 import type { Settings } from '../../../shared/types.js';
 import { call } from '../call.js';
 import { useInFlight } from '../inFlight.js';
+import { parseThreshold } from '../thresholds.js';
 import type { SessionState, UsageState } from '../state.js';
 
 export interface CostAndUsageProps {
@@ -46,15 +47,12 @@ export function CostAndUsage({
   async function saveThresholds(): Promise<void> {
     setError(null);
     setSaved(false);
-    const cost = Number(costUsd);
-    const minutes = Number(timeMinutes);
     // The ranges the settings schema enforces, checked here so the user gets a
     // sentence naming them rather than the router's generic refusal (FR-031).
     const { costUsd: costRange, timeMinutes: timeRange } = SETTINGS_LIMITS;
-    if (
-      !(cost >= costRange.min && cost <= costRange.max) ||
-      !(minutes >= timeRange.min && minutes <= timeRange.max)
-    ) {
+    const cost = parseThreshold(costUsd, costRange);
+    const minutes = parseThreshold(timeMinutes, timeRange);
+    if (cost === null || minutes === null) {
       setError(
         `Give a cost from ${costRange.min} to ${costRange.max} dollars and a time from ` +
           `${timeRange.min} to ${timeRange.max} minutes.`,
