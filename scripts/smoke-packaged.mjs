@@ -160,11 +160,17 @@ function report(label, text) {
  * The packaged app lives under `release/`, so its window URLs, its stack
  * traces and its own messages name the install path. The repository rule is
  * that nothing logs a path outside `userData` (AGENTS.md), and CI output is
- * a log. Matched as a Windows path, a forward-slash path and a `file:` URL,
+ * a log. Matched as a Windows path, a forward-slash path, a `file:` URL and
+ * the JSON-escaped path that `main.log` writes inside a serialized stack,
  * ignoring case, because the drive letter can come back in either case.
  */
 function redactPaths(text) {
-  const forms = [root, root.replaceAll('\\', '/'), encodeURI(root.replaceAll('\\', '/'))];
+  const forms = [
+    JSON.stringify(root).slice(1, -1),
+    root,
+    root.replaceAll('\\', '/'),
+    encodeURI(root.replaceAll('\\', '/')),
+  ];
   let out = text;
   for (const form of new Set(forms)) {
     out = out.replace(new RegExp(escapeRegExp(form), 'gi'), '<checkout>');

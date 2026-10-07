@@ -1414,6 +1414,8 @@ describe('the packaged smoke test prints no checkout path', () => {
     expect(script).toMatch(/\$\{redactPaths\(tail\)\}/);
     expect(script).toMatch(/\$\{redactPaths\(err instanceof Error/);
     expect(script).toContain('${redactPaths(unpackedDir)}');
+    // main.log serializes stacks as JSON, which doubles each backslash.
+    expect(script).toContain('JSON.stringify(root).slice(1, -1)');
   });
 
   it('names the executable by its file name only', () => {
