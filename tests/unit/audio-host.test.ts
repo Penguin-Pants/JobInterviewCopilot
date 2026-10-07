@@ -33,8 +33,10 @@ const fakeElectron = vi.hoisted(() => {
       for (const listener of this.listeners.get(event) ?? []) listener(...args);
     }
   }
+  let nextRoutingId = 1;
   class FakeWebContents extends Emitter {
     readonly sent: Array<{ channel: string; payload: unknown }> = [];
+    readonly mainFrame = { processId: 7, routingId: nextRoutingId++, parent: null, url: '' };
     send(channel: string, payload?: unknown): void {
       this.sent.push({ channel, payload });
     }
@@ -239,6 +241,22 @@ describe('permission handler', () => {
     expect(decide).toHaveBeenCalledWith(false);
   });
 
+  it('grants display-capture to the audio worker and to nothing else', () => {
+    // Electron 45 reports getDisplayMedia() as display-capture, not media. The
+    // worker's loopback capture must survive that upgrade (ADR-028).
+    const fake = fakeSession();
+    const worker = { id: 'worker' };
+    installPermissionHandler((c) => (c as unknown) === worker, fake.session);
+
+    const forWorker = vi.fn();
+    fake.permission()(worker, 'display-capture', forWorker);
+    expect(forWorker).toHaveBeenCalledWith(true);
+
+    const forDashboard = vi.fn();
+    fake.permission()({ id: 'dashboard' }, 'display-capture', forDashboard);
+    expect(forDashboard).toHaveBeenCalledWith(false);
+  });
+
   it('denies every permission other than media, even to the worker', () => {
     const fake = fakeSession();
     const worker = { id: 'worker' };
@@ -267,6 +285,17 @@ describe('permission check handler', () => {
     expect(check({ id: 'overlay' }, 'media')).toBe(false);
     expect(check(null, 'media')).toBe(false);
     expect(check(worker, 'geolocation')).toBe(false);
+  });
+
+  it('answers yes to display-capture for the worker only', () => {
+    const fake = fakeSession();
+    const worker = { id: 'worker' };
+    installPermissionHandler((c) => (c as unknown) === worker, fake.session);
+    const check = fake.check();
+
+    expect(check(worker, 'display-capture')).toBe(true);
+    expect(check({ id: 'overlay' }, 'display-capture')).toBe(false);
+    expect(check(null, 'display-capture')).toBe(false);
   });
 });
 
@@ -397,6 +426,57 @@ describe('TC-004 and TC-007 the live audio worker window', () => {
     expect(calls.indexOf('setContentProtection(true)')).toBeGreaterThanOrEqual(0);
     expect(calls.indexOf('setContentProtection(true)')).toBeLessThan(calls.indexOf('load'));
     expect(calls).not.toContain('setContentProtection(false)');
+  });
+});
+
+/**
+ * `ownsFrame` decides who may capture the screen silently (ADR-028), so it is
+ * tested on its own, not only through an injected predicate.
+ */
+describe('only the worker window owns the display-media frame', () => {
+  beforeEach(() => {
+    fakeElectron.created.length = 0;
+  });
+
+  async function started(): Promise<{
+    host: InstanceType<typeof ElectronAudioWorkerHost>;
+    win: FakeWindow;
+  }> {
+    const { host } = newHost();
+    const start = host.start(['interviewer']);
+    lastWindow().finishLoad();
+    await start;
+    return { host, win: lastWindow() };
+  }
+
+  it("accepts the worker's own top-level frame", async () => {
+    const { host, win } = await started();
+    const frame = { ...win.webContents.mainFrame };
+    expect(host.ownsFrame(frame as unknown as Electron.WebFrameMain)).toBe(true);
+  });
+
+  it('refuses a frame with another routing id or process id', async () => {
+    const { host, win } = await started();
+    const main = win.webContents.mainFrame;
+    const otherRoute = { ...main, routingId: main.routingId + 100 };
+    const otherProcess = { ...main, processId: main.processId + 1 };
+    expect(host.ownsFrame(otherRoute as unknown as Electron.WebFrameMain)).toBe(false);
+    expect(host.ownsFrame(otherProcess as unknown as Electron.WebFrameMain)).toBe(false);
+  });
+
+  it('refuses a null frame', async () => {
+    const { host } = await started();
+    expect(host.ownsFrame(null)).toBe(false);
+  });
+
+  it('refuses every frame once the window is destroyed, and before it exists', async () => {
+    const { host: fresh } = newHost();
+    expect(fresh.ownsFrame({ processId: 7, routingId: 1 } as Electron.WebFrameMain)).toBe(false);
+
+    const { host, win } = await started();
+    const frame = { ...win.webContents.mainFrame };
+    win.destroy();
+    expect(host.ownsFrame(frame as unknown as Electron.WebFrameMain)).toBe(false);
   });
 });
 

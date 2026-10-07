@@ -140,6 +140,8 @@ Follow-up work found during implementation:
 - **TASK-011** must add the `media` permission to the permission request
   handler, which Milestone 0 sets to deny everything. **Done.** The handler now
   lives in `src/main/audio-host.ts` and grants `media` only to the Audio Worker.
+  It grants `display-capture` on the same terms, because Electron 45 reports
+  `getDisplayMedia()` as that permission rather than `media`.
 - `Logger.rotateIfNeeded` calls `statSync` on every line. Harmless at Milestone 0
   volumes, worth revisiting if logging becomes hot during a live session.
 - The content security policy lists `file:` because the packaged app loads

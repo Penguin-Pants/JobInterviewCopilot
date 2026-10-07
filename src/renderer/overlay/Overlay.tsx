@@ -12,7 +12,7 @@ import {
 import { createRoot } from 'react-dom/client';
 import { defaultSettings } from '../../shared/defaults.js';
 import type { Settings } from '../../shared/types.js';
-import { reduceCards, shouldShowIdle } from './cards.js';
+import { readinessKey, reduceCards, shouldShowIdle } from './cards.js';
 import { HoldBuffer } from './holdBuffer.js';
 import { lastSeen } from './earlyPushes.js';
 import { resolveOverlayTheme } from './theme.js';
@@ -262,14 +262,16 @@ function Overlay(): JSX.Element {
    * reminder before the first suggestion of **every** session and the gate is
    * closed again at the same boundary. Reporting it once, with a latching ref,
    * answered for the first interview and then stood unchallenged over a
-   * reminder the user had dismissed.
+   * reminder the user had dismissed. It does not run again when only the text
+   * changes (`readinessKey`).
    *
    * The double `requestAnimationFrame` is the paint, and the cleanup flag is
    * what keeps a superseded epoch, or StrictMode's simulated remount, from
    * reporting on behalf of a card that is no longer the one on screen.
    */
+  const readyKey = readinessKey(consent, readyEpoch);
   useEffect(() => {
-    if (consent === null) return;
+    if (readyKey === null) return;
     let cancelled = false;
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
@@ -279,7 +281,7 @@ function Overlay(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [consent, readyEpoch]);
+  }, [readyKey]);
 
   const dismiss = useCallback(() => {
     setDismissed(true);

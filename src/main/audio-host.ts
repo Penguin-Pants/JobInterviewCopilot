@@ -81,7 +81,10 @@ export function installLoopbackHandler(
  *
  * Milestone 0 denied every permission. Loopback and the microphone both need
  * `media`, so it is granted here, scoped to the worker's own contents: no other
- * window in this app has any reason to capture anything.
+ * window in this app has any reason to capture anything. `display-capture` is
+ * granted on the same terms: Electron 45 reports `getDisplayMedia()` as that
+ * permission rather than `media`, and loopback would otherwise stop at the
+ * permission before it reached the display-media handler (ADR-028).
  *
  * Checks get the same rule as requests. Chromium asks the check handler when a
  * page queries a permission without prompting, and Electron's default answers
@@ -92,7 +95,7 @@ export function installPermissionHandler(
   target: Session = session.defaultSession,
 ): void {
   target.setPermissionRequestHandler((contents, permission, callback) => {
-    const allowed = permission === 'media' && isAudioWorker(contents);
+    const allowed = CAPTURE_PERMISSIONS.has(permission) && isAudioWorker(contents);
     if (!allowed) {
       getLogger().warn('permission denied', { permission });
     }
@@ -100,9 +103,12 @@ export function installPermissionHandler(
   });
   target.setPermissionCheckHandler(
     (contents, permission) =>
-      permission === 'media' && contents !== null && isAudioWorker(contents),
+      CAPTURE_PERMISSIONS.has(permission) && contents !== null && isAudioWorker(contents),
   );
 }
+
+/** The permissions the audio worker's capture needs, and the only ones it gets. */
+const CAPTURE_PERMISSIONS: ReadonlySet<string> = new Set(['media', 'display-capture']);
 
 /** The worker side of `AudioHostOptions`, which is all a message can reach. */
 type WorkerSink = Pick<AudioHostOptions, 'onChunk' | 'onStreamState'>;

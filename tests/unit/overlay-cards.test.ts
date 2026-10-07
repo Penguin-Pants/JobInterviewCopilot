@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   MAX_LINES_PER_CARD,
+  readinessKey,
   reduceCards,
   shouldShowIdle,
   type CardEvent,
@@ -146,5 +147,24 @@ describe('TC-110 when the idle card is shown', () => {
     // Nothing arrives for any length of time: the reducer is never called, so
     // the state is the one it started in and there is no third thing to be.
     expect(shouldShowIdle([], false)).toBe(true);
+  });
+});
+
+/**
+ * When the overlay reports readiness (FR-008, ADR-016). Audit regression: an
+ * edit to the reminder text during a session reported readiness again, and
+ * main then made the window take clicks for a card the user had dismissed.
+ */
+describe('readiness is owed once per consent card, not once per text', () => {
+  it('owes nothing before the consent text has arrived', () => {
+    expect(readinessKey(null, 0)).toBeNull();
+  });
+
+  it('does not change when only the reminder text changes', () => {
+    expect(readinessKey('Recording disclosed', 1)).toBe(readinessKey('Edited reminder', 1));
+  });
+
+  it('changes at a session boundary, when the card comes back', () => {
+    expect(readinessKey('Recording disclosed', 2)).not.toBe(readinessKey('Recording disclosed', 1));
   });
 });

@@ -240,7 +240,11 @@ describe('FR-086 preload invoke allowlists', () => {
 describe('ADR-016 consent renders before readiness is reported', () => {
   it('the renderer waits for the consent text before reporting ready', () => {
     const source = readFileSync('src/renderer/overlay/Overlay.tsx', 'utf8');
-    expect(source).toMatch(/if \(consent === null[^)]*\) return;/);
+    // Keyed on whether the text has arrived and on the session epoch, never on
+    // the text itself: an edit must not report a dismissed card ready again.
+    expect(source).toContain('readinessKey(consent, readyEpoch)');
+    expect(source).toMatch(/if \(readyKey === null\) return;/);
+    expect(source).toMatch(/\}, \[readyKey\]\);/);
     expect(source).toContain("invoke('overlay:ready')");
   });
 
@@ -839,9 +843,10 @@ describe('ADR-028 loopback acquisition details', () => {
     expect(source).toContain('removeTrack(track)');
   });
 
-  it('media permission is granted only to the audio worker', () => {
+  it('capture permissions are granted only to the audio worker', () => {
     const source = readFileSync('src/main/audio-host.ts', 'utf8');
-    expect(source).toMatch(/permission === 'media' && isAudioWorker\(contents\)/);
+    expect(source).toMatch(/CAPTURE_PERMISSIONS\.has\(permission\) && isAudioWorker\(contents\)/);
+    expect(source).toContain("new Set(['media', 'display-capture'])");
   });
 
   it('electron-audio-loopback is not imported anywhere', () => {
