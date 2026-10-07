@@ -20,7 +20,7 @@
  */
 import { existsSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { basename, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /** What `startKnowledgeBase` logs when `rag.start()` throws, chokidar included. */
@@ -54,7 +54,7 @@ const exe = readdirSync(unpackedDir)
   .map((name) => join(unpackedDir, name))[0];
 
 if (!exe) {
-  console.error(`No .exe in ${unpackedDir}. Nothing to launch.`);
+  console.error(`No .exe in ${redactPaths(unpackedDir)}. Nothing to launch.`);
   process.exit(1);
 }
 
@@ -121,12 +121,12 @@ try {
   }
 
   console.log(
-    `Packaged app smoke test passed: ${exe} launched, rendered the Dashboard, ` +
+    `Packaged app smoke test passed: ${basename(exe)} launched, rendered the Dashboard, ` +
       'and started its knowledge base without error.',
   );
 } catch (err) {
   console.error('The packaged app did not come up:');
-  console.error(`  ${err instanceof Error ? err.message : String(err)}`);
+  console.error(`  ${redactPaths(err instanceof Error ? err.message : String(err))}`);
   console.error(
     '\nThis is the failure mode asarUnpack exists to prevent: the installer builds,\n' +
       'and the app only breaks when it is run. See electron-builder.yml.',
@@ -151,5 +151,27 @@ try {
 /** The last part of one piece of evidence, so a CI log shows why the app stopped. */
 function report(label, text) {
   const tail = text.trim() === '' ? '(empty)' : text.slice(-6000);
-  console.error(`\n--- ${label} (last 6000 characters) ---\n${tail}`);
+  console.error(`\n--- ${label} (last 6000 characters) ---\n${redactPaths(tail)}`);
+}
+
+/**
+ * The text with every path into this checkout replaced by `<checkout>`.
+ *
+ * The packaged app lives under `release/`, so its window URLs, its stack
+ * traces and its own messages name the install path. The repository rule is
+ * that nothing logs a path outside `userData` (AGENTS.md), and CI output is
+ * a log. Matched as a Windows path, a forward-slash path and a `file:` URL,
+ * ignoring case, because the drive letter can come back in either case.
+ */
+function redactPaths(text) {
+  const forms = [root, root.replaceAll('\\', '/'), encodeURI(root.replaceAll('\\', '/'))];
+  let out = text;
+  for (const form of new Set(forms)) {
+    out = out.replace(new RegExp(escapeRegExp(form), 'gi'), '<checkout>');
+  }
+  return out;
+}
+
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

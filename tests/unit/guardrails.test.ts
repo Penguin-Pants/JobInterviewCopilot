@@ -1403,6 +1403,26 @@ describe('TASK-050 Dashboard actions run one at a time', () => {
 });
 
 /**
+ * Audit regression: the packaged smoke test printed window URLs and the .exe
+ * path, which name the install path. Nothing may log a path outside
+ * `userData` (AGENTS.md), and CI output is a log.
+ */
+describe('the packaged smoke test prints no checkout path', () => {
+  const script = readFileSync('scripts/smoke-packaged.mjs', 'utf8');
+
+  it('redacts every report and every failure message', () => {
+    expect(script).toMatch(/\$\{redactPaths\(tail\)\}/);
+    expect(script).toMatch(/\$\{redactPaths\(err instanceof Error/);
+    expect(script).toContain('${redactPaths(unpackedDir)}');
+  });
+
+  it('names the executable by its file name only', () => {
+    expect(script).not.toMatch(/\$\{exe\}/);
+    expect(script).toContain('${basename(exe)}');
+  });
+});
+
+/**
  * Audit regression (ADR-057): the packaged binary had no Electron fuses, so
  * `ELECTRON_RUN_AS_NODE` or `NODE_OPTIONS` could run arbitrary code with the
  * app's identity, and the app could be loaded from outside its archive.
