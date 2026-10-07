@@ -1523,6 +1523,17 @@ describe('NFR-010 Dashboard confirmations and announcements', () => {
     expect(section('SessionHistory.tsx')).not.toMatch(/^\s*focusLater\(HEADING_ID\);/m);
   });
 
+  it('moves focus to a loaded transcript only when the user is still on its row', () => {
+    // Audit regression: a slow `session:read` pulled focus to the viewer from
+    // wherever the user had moved during the wait.
+    const text = section('SessionHistory.tsx');
+    expect(text).toMatch(
+      /const stillOnRow = focusWithin\(document\.activeElement, \[\s*document\.getElementById\(rowId\(sessionId\)\),?\s*\]\);/,
+    );
+    expect(text).toMatch(/if \(stillOnRow\) focusLater\(VIEWER_HEADING_ID\);/);
+    expect(text).not.toMatch(/^\s*focusLater\(VIEWER_HEADING_ID\);/m);
+  });
+
   it('names each row button after its session', () => {
     const text = section('SessionHistory.tsx');
     expect(text).toContain('aria-label={`View transcript of the session started ${started}`}');

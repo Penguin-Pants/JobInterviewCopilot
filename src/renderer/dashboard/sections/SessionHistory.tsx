@@ -201,10 +201,15 @@ export function SessionHistory({ profiles, sessionRevision }: SessionHistoryProp
       setError(result.message);
       return;
     }
+    const stillOnRow = focusWithin(document.activeElement, [
+      document.getElementById(rowId(sessionId)),
+    ]);
     setOpened(result.value);
     // The transcript renders below every group, often off screen. Its heading
     // takes focus so a keyboard or screen reader user lands on it (NFR-010).
-    focusLater(VIEWER_HEADING_ID);
+    // Only if the user is still on the row they opened it from: a slow read
+    // must not pull focus from wherever they moved during the wait.
+    if (stillOnRow) focusLater(VIEWER_HEADING_ID);
   }
 
   function close(): void {
