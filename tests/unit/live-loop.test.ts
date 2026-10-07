@@ -53,6 +53,7 @@ class StubSttSession implements SttSession {
   readonly transcript: ((t: TranscriptEvent) => void)[] = [];
   readonly endpoints: (() => void)[] = [];
   readonly errors: ((e: ProviderError) => void)[] = [];
+  readonly speeches: (() => void)[] = [];
 
   constructor(
     readonly source: TranscriptSource,
@@ -75,10 +76,12 @@ class StubSttSession implements SttSession {
 
   on(e: 'transcript', h: (t: TranscriptEvent) => void): void;
   on(e: 'endpoint', h: () => void): void;
+  on(e: 'speech', h: () => void): void;
   on(e: 'error', h: (err: ProviderError) => void): void;
-  on(e: 'transcript' | 'endpoint' | 'error', h: (...args: never[]) => void): void {
+  on(e: 'transcript' | 'endpoint' | 'speech' | 'error', h: (...args: never[]) => void): void {
     if (e === 'transcript') this.transcript.push(h as (t: TranscriptEvent) => void);
     if (e === 'endpoint') this.endpoints.push(h as () => void);
+    if (e === 'speech') this.speeches.push(h as () => void);
     if (e === 'error') this.errors.push(h as (err: ProviderError) => void);
   }
 }
@@ -136,6 +139,7 @@ function makeLoop(stub: StubOptions = {}) {
   const messages: GatedMessage[] = [];
   const appended: { status: string }[] = [];
   const endpoints: number[] = [];
+  const speeches: number[] = [];
   const settings: Settings = { ...defaultSettings(), ...stub.settings };
 
   const loop = new LiveSessionLoop({
@@ -148,6 +152,7 @@ function makeLoop(stub: StubOptions = {}) {
       stop: () => {},
       handleTranscript: () => {},
       handleEndpoint: () => endpoints.push(1),
+      handleSpeechStart: () => speeches.push(1),
       noteGenerationSettled: (id: string) => {
         settled.push(id);
         if (stub.settleThrows) throw new Error('the machine threw');
@@ -205,6 +210,7 @@ function makeLoop(stub: StubOptions = {}) {
     settled,
     noted,
     endpoints,
+    speeches,
     settings,
     pushes,
     messages,
@@ -377,6 +383,18 @@ describe('a transcription target that cannot be used', () => {
 });
 
 describe('the wiring of one open stream', () => {
+  it('passes a speech start from the interviewer to the machine', async () => {
+    const { loop, opened, speeches } = makeLoop();
+    await loop.start(PROFILE_ID);
+
+    opened.find((s) => s.source === 'interviewer')?.speeches.forEach((h) => h());
+    expect(speeches).toHaveLength(1);
+
+    // FR-055: the candidate stream never reaches the machine's turn logic.
+    expect(opened.find((s) => s.source === 'candidate')?.speeches).toHaveLength(0);
+    await loop.stop();
+  });
+
   it('passes a native endpoint from the interviewer to the machine', async () => {
     const { loop, opened, endpoints } = makeLoop();
     await loop.start(PROFILE_ID);

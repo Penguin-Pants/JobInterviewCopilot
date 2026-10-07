@@ -110,7 +110,12 @@ export interface LiveSessionLoopOptions {
   audio: Pick<AudioSupervisor, 'start' | 'stop'>;
   trigger: Pick<
     TriggerMachine,
-    'start' | 'stop' | 'handleTranscript' | 'handleEndpoint' | 'noteGenerationSettled'
+    | 'start'
+    | 'stop'
+    | 'handleTranscript'
+    | 'handleEndpoint'
+    | 'handleSpeechStart'
+    | 'noteGenerationSettled'
   >;
   sessions: Pick<SessionManager, 'appendTurn' | 'appendSuggestion'>;
   cost: Pick<CostMeter, 'noteAudio' | 'noteGeneration'>;
@@ -537,6 +542,9 @@ export class LiveSessionLoop {
     if (source === 'interviewer') {
       session.on('endpoint', () => {
         this.options.trigger.handleEndpoint();
+      });
+      session.on('speech', () => {
+        this.options.trigger.handleSpeechStart();
       });
     }
 

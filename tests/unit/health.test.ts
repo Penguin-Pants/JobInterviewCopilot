@@ -655,6 +655,32 @@ describe('a backoff sleep ends when the run is aborted', () => {
     expect(fn).toHaveBeenCalledTimes(1);
   });
 
+  it('restores the settled state when an aborted ladder exits', async () => {
+    // Audit regression: the classifier runs only on USING_PRIMARY, so a key
+    // left in RETRYING after an abort made a later ambiguous turn fail open,
+    // and the Dashboard showed a retry that no longer existed.
+    const sleep = vi.fn(neverWakes);
+    const states: string[] = [];
+    const h = new CredentialHealth({
+      credentialId: 'openai',
+      hasBackup: false,
+      probe: () => Promise.resolve(true),
+      onChange: (s) => states.push(s.kind),
+      deps: { ...testDeps().deps, sleep },
+    });
+    const controller = new AbortController();
+    const run = h.run(() => Promise.reject(err('server')), { signal: controller.signal });
+    await vi.waitFor(() => {
+      expect(sleep).toHaveBeenCalledTimes(1);
+    });
+    expect(h.current.kind).toBe('retrying');
+    controller.abort(new Error('a newer turn replaced this one'));
+    await expect(run).rejects.toThrow('a newer turn replaced this one');
+
+    expect(h.current.kind).toBe('using-primary');
+    expect(states.at(-1)).toBe('using-primary');
+  });
+
   it('passes the signal through runFor', async () => {
     const r = new ProviderHealthRegistry(
       () => undefined,

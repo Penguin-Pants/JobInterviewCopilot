@@ -314,11 +314,12 @@ export class WhisperSttSession implements SttSession {
 
   on(e: 'transcript', h: (t: TranscriptEvent) => void): void;
   on(e: 'endpoint', h: () => void): void;
+  on(e: 'speech', h: () => void): void;
   on(e: 'error', h: (err: ProviderError) => void): void;
-  on(e: 'transcript' | 'endpoint' | 'error', h: (...args: never[]) => void): void {
+  on(e: 'transcript' | 'endpoint' | 'speech' | 'error', h: (...args: never[]) => void): void {
     if (e === 'transcript') this.handlers.transcript.push(h as (t: TranscriptEvent) => void);
     else if (e === 'error') this.handlers.error.push(h as (err: ProviderError) => void);
-    // 'endpoint' is accepted and never called. A non-streaming model has no turn
+    // 'endpoint' and 'speech' are accepted and never called. A non-streaming model has no turn
     // signal, so CMP-05 runs the local timer; the registry entry says so with
     // supportsEndpointing: false and nothing here needs to know.
   }

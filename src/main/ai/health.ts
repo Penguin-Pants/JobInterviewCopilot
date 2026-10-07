@@ -251,7 +251,14 @@ export class CredentialHealth {
         if (this.settled().kind === 'using-primary') {
           this.setState({ kind: 'retrying', attempt: attempt + 1 });
         }
-        await this.backoff(RETRY_BACKOFF_MS[attempt] ?? DEGRADED_MAX_BACKOFF_MS, run.signal);
+        try {
+          await this.backoff(RETRY_BACKOFF_MS[attempt] ?? DEGRADED_MAX_BACKOFF_MS, run.signal);
+        } catch (abort) {
+          // An aborted ladder must not leave RETRYING behind: the classifier
+          // runs only on USING_PRIMARY, and no retry is running any more.
+          if (this.state.kind === 'retrying') this.setState(this.settled());
+          throw abort;
+        }
       }
     }
 

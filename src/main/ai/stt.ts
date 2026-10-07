@@ -49,6 +49,11 @@ export interface SttSession {
   on(e: 'transcript', h: (t: TranscriptEvent) => void): void;
   /** Provider-native turn end. */
   on(e: 'endpoint', h: () => void): void;
+  /**
+   * The provider heard new speech start. Only a provider that sends no text
+   * before its endpoint needs it (OpenAI server VAD).
+   */
+  on(e: 'speech', h: () => void): void;
   on(e: 'error', h: (err: ProviderError) => void): void;
 }
 

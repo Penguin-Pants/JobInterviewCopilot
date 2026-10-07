@@ -614,6 +614,24 @@ describe('turn-end regressions', () => {
     expect(h.fired[1]?.question).toBe('And what did you learn from it');
   });
 
+  it('holds an empty endpoint once the provider reports new speech', () => {
+    // The local gap ended the first turn before any endpoint for it came. A
+    // rapid follow-up on OpenAI sends `speech_started`, then `speech_stopped`
+    // before any transcript of it. The speech start says the endpoint is the
+    // follow-up's, so it is held for the follow-up's final, not spent.
+    const h = harness();
+    h.trigger.handleTranscript(event({ text: 'Tell me about a hard project' }));
+    vi.advanceTimersByTime(GAP);
+    expect(h.fired).toHaveLength(1);
+    h.trigger.noteGenerationSettled('gen-1');
+
+    h.trigger.handleSpeechStart();
+    h.trigger.handleEndpoint();
+    h.trigger.handleTranscript(event({ text: 'And what did you learn from it' }));
+    expect(h.fired).toHaveLength(2);
+    expect(h.fired[1]?.question).toBe('And what did you learn from it');
+  });
+
   /**
    * `whisper-1` emits one `isFinal` per 4000 ms batch and never an interim or
    * an endpoint. An 800 ms gap measured from each batch fires while the

@@ -204,7 +204,8 @@ export class TriggerMachine {
   private endpointSeen = false;
   /**
    * The last turn was evaluated by the local gap before its native endpoint
-   * arrived, and no interviewer speech has been heard since. An empty endpoint
+   * arrived, and no interviewer speech has been heard since: no text, and no
+   * provider speech start (`handleSpeechStart`). An empty endpoint
    * in this state ends the turn already evaluated, not a new one (FR-050).
    *
    * Correlated with what the provider sent, not with elapsed time. A time rule
@@ -440,6 +441,17 @@ export class TriggerMachine {
     this.endpointSeen = true;
     this.clearGap();
     this.evaluateTurn();
+  }
+
+  /**
+   * The provider heard new interviewer speech start. An endpoint from now on
+   * ends that speech, so the evaluated turn's late endpoint is no longer
+   * expected. OpenAI sends no text before a follow-up's `speech_stopped`, so
+   * this is the only sign of new speech it gives in time (FR-050).
+   */
+  handleSpeechStart(): void {
+    if (this.state === 'IDLE' || this.state === 'PAUSED') return;
+    this.endpointOwed = false;
   }
 
   /** `Ctrl+Shift+P` (FR-053, ASM-002). */
