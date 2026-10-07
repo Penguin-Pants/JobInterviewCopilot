@@ -18,6 +18,7 @@ import { findSttModel } from '../../../shared/registry/stt.js';
 import { classifyStatus, providerError } from '../stt.js';
 import type { SttProvider, SttSession, SttSessionOptions } from '../stt.js';
 import { validateOpenAiKey } from './openai-realtime.js';
+import type { SttLog } from './socket-session.js';
 import { encodeWav } from './wav.js';
 
 /**
@@ -118,15 +119,19 @@ export class WhisperSttSession implements SttSession {
     post: PostWav;
     /** The window this model buffers, from its registry entry (ADR-022). */
     bufferChunks?: number;
+    /** Where a throwing listener is reported. Passed in, never imported (NFR-002). */
+    log?: SttLog;
   }) {
     this.source = opts.source;
     this.choice = opts.choice;
     this.key = opts.key;
     this.post = opts.post;
     this.bufferChunks = opts.bufferChunks ?? WHISPER_BUFFER_CHUNKS;
+    this.log = opts.log ?? (() => undefined);
   }
 
   private readonly key: string;
+  private readonly log: SttLog;
   private readonly post: PostWav;
   private readonly bufferChunks: number;
 
@@ -204,7 +209,15 @@ export class WhisperSttSession implements SttSession {
       timestamp: Date.now(),
       providerId: this.choice.providerId,
     };
-    for (const h of this.handlers.transcript) h(event);
+    // A listener that throws must not break the delivery chain: every later
+    // window, and the tail `close` waits for, would be dropped with it.
+    for (const h of this.handlers.transcript) {
+      try {
+        h(event);
+      } catch (err) {
+        this.log('error', `a ${this.source} transcription listener threw`, err);
+      }
+    }
   }
 
   /** One request, bounded by `WHISPER_REQUEST_TIMEOUT_MS`. Never throws. */
@@ -337,7 +350,10 @@ export function postWavToOpenAi(url: string = WHISPER_TRANSCRIBE_URL): PostWav {
   };
 }
 
-export function createWhisperProvider(post: PostWav = postWavToOpenAi()): SttProvider {
+export function createWhisperProvider(
+  post: PostWav = postWavToOpenAi(),
+  log?: SttLog,
+): SttProvider {
   return {
     id: 'openai',
     open(
@@ -360,6 +376,7 @@ export function createWhisperProvider(post: PostWav = postWavToOpenAi()): SttPro
           key,
           post,
           bufferChunks: bufferChunksFor(model?.batchIntervalMs ?? WHISPER_BUFFER_MS),
+          ...(log ? { log } : {}),
         }),
       );
     },

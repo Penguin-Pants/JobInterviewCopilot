@@ -404,6 +404,26 @@ describe('Whisper requests are bounded, ordered, concurrent and retried once', (
     expect(s.sentBytes).toBe(WHISPER_MAX_IN_FLIGHT * WHISPER_BUFFER_CHUNKS * 32000);
   });
 
+  it('keeps delivering after a transcript listener throws', async () => {
+    const post = vi.fn<PostWav>(async (form) => ({
+      ok: true,
+      status: 200,
+      text: `window ${String(await windowOf(form))}`,
+    }));
+    const s = new WhisperSttSession({ source: 'interviewer', choice: CHOICE, key: 'k', post });
+    const heard: string[] = [];
+    s.on('transcript', (e) => {
+      heard.push(e.text);
+      if (e.text === 'window 1') throw new Error('a listener failed');
+    });
+    pushWindow(s, 1);
+    pushWindow(s, 2);
+    await vi.waitFor(() => {
+      expect(heard).toEqual(['window 1', 'window 2']);
+    });
+    await expect(s.close()).resolves.toBeUndefined();
+  });
+
   it('retries a transient failure once and keeps the window', async () => {
     const post = vi
       .fn<PostWav>()
