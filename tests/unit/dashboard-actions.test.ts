@@ -170,46 +170,91 @@ describe('two quick prompt selections both reach the settings (FR-027)', () => {
         }),
     );
     selection.sync(stored);
-    return { selection, sent, answers };
+    /** Answers write `i` once it has been sent. Writes go one at a time. */
+    async function answer(i: number, ok: boolean): Promise<void> {
+      await vi.waitFor(() => {
+        expect(answers[i]).toBeDefined();
+      });
+      answers[i]?.(ok);
+    }
+    return { selection, sent, answer };
   }
 
-  it('merges the second change with the first while the first is in flight', async () => {
-    const { selection, sent, answers } = harness({});
+  it('sends one write at a time', async () => {
+    const { selection, sent, answer } = harness({});
     const one = selection.select('profile-a', 'prompt-1');
     const two = selection.select('profile-b', 'prompt-2');
-    answers[0]?.(true);
-    answers[1]?.(true);
+    await Promise.resolve();
+    expect(sent).toHaveLength(1);
+    await answer(0, true);
+    await answer(1, true);
+    await Promise.all([one, two]);
+    expect(sent).toHaveLength(2);
+  });
+
+  it('merges the second change with the first', async () => {
+    const { selection, sent, answer } = harness({});
+    const one = selection.select('profile-a', 'prompt-1');
+    const two = selection.select('profile-b', 'prompt-2');
+    await answer(0, true);
+    await answer(1, true);
     await Promise.all([one, two]);
     expect(sent[1]).toEqual({ 'profile-a': 'prompt-1', 'profile-b': 'prompt-2' });
   });
 
   it('ignores a stored value that arrives while a write is pending', async () => {
-    const { selection, sent, answers } = harness({});
+    const { selection, sent, answer } = harness({});
     const one = selection.select('profile-a', 'prompt-1');
     // The reload after an earlier write answers before this one has landed.
     selection.sync({});
     const two = selection.select('profile-b', 'prompt-2');
-    answers[0]?.(true);
-    answers[1]?.(true);
+    await answer(0, true);
+    await answer(1, true);
     await Promise.all([one, two]);
     expect(sent[1]).toEqual({ 'profile-a': 'prompt-1', 'profile-b': 'prompt-2' });
   });
 
   it('drops a refused change, so the next write does not send it again', async () => {
-    const { selection, sent, answers } = harness({ 'profile-a': 'prompt-1' });
+    const { selection, sent, answer } = harness({ 'profile-a': 'prompt-1' });
     const one = selection.select('profile-b', 'prompt-2');
-    answers[0]?.(false);
+    await answer(0, false);
     await one;
     const two = selection.select('profile-c', 'prompt-3');
-    answers[1]?.(true);
+    await answer(1, true);
     await two;
     expect(sent[1]).toEqual({ 'profile-a': 'prompt-1', 'profile-c': 'prompt-3' });
   });
 
+  it('does not save a refused change through a write that overlapped it', async () => {
+    // Audit regression: the second write carried the first change before the
+    // first was answered, so a refused first change was saved by the second.
+    const { selection, sent, answer } = harness({});
+    const one = selection.select('profile-a', 'prompt-1');
+    const two = selection.select('profile-b', 'prompt-2');
+    await answer(0, false);
+    await answer(1, true);
+    await Promise.all([one, two]);
+    expect(sent[1]).toEqual({ 'profile-b': 'prompt-2' });
+  });
+
+  it('keeps a saved change when a later overlapping write is refused', async () => {
+    // Audit regression: a refusal put back the last reload, which predated
+    // the first saved change, so a third change overwrote it.
+    const { selection, sent, answer } = harness({});
+    const one = selection.select('profile-a', 'prompt-1');
+    const two = selection.select('profile-b', 'prompt-2');
+    const three = selection.select('profile-c', 'prompt-3');
+    await answer(0, true);
+    await answer(1, false);
+    await answer(2, true);
+    await Promise.all([one, two, three]);
+    expect(sent[2]).toEqual({ 'profile-a': 'prompt-1', 'profile-c': 'prompt-3' });
+  });
+
   it('removes the entry when the default prompt is chosen', async () => {
-    const { selection, sent, answers } = harness({ 'profile-a': 'prompt-1' });
+    const { selection, sent, answer } = harness({ 'profile-a': 'prompt-1' });
     const one = selection.select('profile-a', DEFAULT_PROMPT_ID);
-    answers[0]?.(true);
+    await answer(0, true);
     await one;
     expect(sent[0]).toEqual({});
   });

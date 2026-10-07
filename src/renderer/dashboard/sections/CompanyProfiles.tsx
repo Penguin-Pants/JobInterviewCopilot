@@ -63,44 +63,49 @@ export function announcedPercent(percent: number): number {
 export interface PromptSelection {
   /** The stored selections, from each settings reload. */
   sync: (stored: Record<string, string>) => void;
-  /** Writes one profile's choice merged with every choice made before it. */
+  /** Writes one profile's choice after every earlier write has answered. */
   select: (profileId: string, promptId: string) => Promise<boolean>;
 }
 
 /**
- * Each profile's suggestion prompt, merged against the newest choices (FR-027).
+ * Each profile's suggestion prompt, written one change at a time (FR-027).
  *
  * `config:set` replaces the whole `profilePromptIds` map, and each change built
  * it from the `settings` prop. Two quick changes both read the same prop, so
- * the second write dropped the first change. Here each change merges with the
- * choices made before it, and a reload that answers while a write is pending
- * does not replace them: it can predate that write. A refused write is
- * dropped, so the next one does not send it again.
+ * the second write dropped the first change. Built from an optimistic map
+ * instead, a second write saved a first change that was then refused.
+ *
+ * So writes go one at a time, and each is the confirmed map plus its own
+ * change. The confirmed map moves only when a write succeeds. A reload that
+ * answers while a write is queued or in flight can predate it, so it is
+ * ignored until nothing is pending.
  */
 export function createPromptSelection(
   write: (ids: Record<string, string>) => Promise<boolean>,
 ): PromptSelection {
-  let stored: Record<string, string> = {};
-  let latest: Record<string, string> = {};
+  let confirmed: Record<string, string> = {};
+  let queue: Promise<unknown> = Promise.resolve();
   let pending = 0;
   return {
     sync(next) {
-      stored = next;
-      if (pending === 0) latest = next;
+      if (pending === 0) confirmed = next;
     },
     async select(profileId, promptId) {
-      const ids = { ...latest };
-      if (promptId === DEFAULT_PROMPT_ID) delete ids[profileId];
-      else ids[profileId] = promptId;
-      latest = ids;
       pending += 1;
-      let ok = false;
-      try {
-        ok = await write(ids);
+      const run = queue.then(async () => {
+        const ids = { ...confirmed };
+        if (promptId === DEFAULT_PROMPT_ID) delete ids[profileId];
+        else ids[profileId] = promptId;
+        const ok = await write(ids);
+        if (ok) confirmed = ids;
         return ok;
+      });
+      // The next change waits for this one, whether it succeeds or throws.
+      queue = run.catch(() => undefined);
+      try {
+        return await run;
       } finally {
         pending -= 1;
-        if (!ok && pending === 0) latest = stored;
       }
     },
   };
