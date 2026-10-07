@@ -52,7 +52,7 @@ describe('TC-164 the live session loop, end to end', () => {
   it('runs a question from audio in to bullets, transcript and spend out', async () => {
     vi.useFakeTimers();
     const h = harness(userData, { retrieve: () => Promise.resolve([retrieved()]) });
-    h.gate.noteReady();
+    h.gate.noteReady(null);
 
     await startSession(h);
 
@@ -131,7 +131,7 @@ describe('TC-164 the live session loop, end to end', () => {
 
     // FR-008: nothing reached the window while the consent card was unpainted.
     expect(h.sent).toEqual([]);
-    h.gate.noteReady();
+    h.gate.noteReady(null);
     expect(h.sent.map((m) => m.channel)).toEqual([
       'suggestion:begin',
       'suggestion:line',
@@ -196,7 +196,7 @@ describe('FR-106 a turn during GENERATING', () => {
         return held;
       },
     });
-    h.gate.noteReady();
+    h.gate.noteReady(null);
     await startSession(h);
 
     speak(h, 'Tell me about a time you shipped something hard');
@@ -246,7 +246,7 @@ describe('TC-080 one turn end fires exactly one generation', () => {
   it('fires once for one final followed by the gap', async () => {
     vi.useFakeTimers();
     const h = harness(userData);
-    h.gate.noteReady();
+    h.gate.noteReady(null);
     await startSession(h);
 
     speak(h, 'Walk me through your most recent project');
@@ -270,7 +270,7 @@ describe('session prompt binding', () => {
         profilePromptIds: { [PROFILE.id]: 'acme' },
       },
     });
-    h.gate.noteReady();
+    h.gate.noteReady(null);
     await startSession(h);
     h.settings.customPrompts[0]!.systemPrompt = 'A later edit must wait.';
 
@@ -298,7 +298,7 @@ describe('TC-086 a new turn end during GENERATING', () => {
       llmChunks: anthropicScript(['first cue\n', 'second cue\n']),
       beforeChunk: (index) => (index === 2 ? held : undefined),
     });
-    h.gate.noteReady();
+    h.gate.noteReady(null);
     await startSession(h);
 
     speak(h, 'Tell me about a time you shipped something hard');
@@ -329,7 +329,7 @@ describe('TC-087 and TC-088 pause and resume, through the loop', () => {
       llmChunks: anthropicScript(['first cue\n', 'second cue\n']),
       beforeChunk: (index) => (index === 2 ? held : undefined),
     });
-    h.gate.noteReady();
+    h.gate.noteReady(null);
     await startSession(h);
 
     speak(h, 'Tell me about a time you shipped something hard');
@@ -405,7 +405,7 @@ describe('ADR-032 a failure stops rather than inventing a suggestion', () => {
     const h = harness(userData, {
       retrieve: () => Promise.reject(new Error('vectors.bin is unreadable')),
     });
-    h.gate.noteReady();
+    h.gate.noteReady(null);
     await startSession(h);
 
     speak(h, 'Tell me about a time you shipped something hard');

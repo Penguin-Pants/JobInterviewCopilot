@@ -80,7 +80,7 @@ describe('TC-173 a stale generation still reaches the transcript and the meter',
   it('records status stale and its usage when checkpoint 1 discards it', async () => {
     const { retrieve, release } = gatedRetrieve();
     const h = harness(userData, { retrieve });
-    h.gate.noteReady();
+    h.gate.noteReady(null);
     await startSession(h);
 
     speak(h, 'Tell me about a time you shipped something hard');
@@ -120,7 +120,7 @@ describe('TC-173 a stale generation still reaches the transcript and the meter',
       // card is on screen by then, so this is the slow-first-token case.
       beforeChunk: (index) => (index === 1 ? firstDelta : undefined),
     });
-    h.gate.noteReady();
+    h.gate.noteReady(null);
     await startSession(h);
 
     speak(h, 'Tell me about a time you shipped something hard');
@@ -154,7 +154,7 @@ describe('TC-190 a persisted session carrying a stale entry survives session:rea
   it('parses the compacted file and keeps the status unchanged', async () => {
     const { retrieve, release } = gatedRetrieve();
     const h = harness(userData, { retrieve });
-    h.gate.noteReady();
+    h.gate.noteReady(null);
     await startSession(h);
 
     speak(h, 'Tell me about a time you shipped something hard');
@@ -201,7 +201,7 @@ describe('TC-188 session stop awaits the in-flight classification accounting', (
       // holds its response open on the very first frame.
       beforeChunk: (index) => (index === 0 ? held : undefined),
     });
-    h.gate.noteReady();
+    h.gate.noteReady(null);
     await startSession(h);
 
     speak(h, UNRESOLVED);
@@ -253,7 +253,7 @@ describe('TC-188 session stop awaits the in-flight classification accounting', (
       wireClassifier: true,
       retrieve: () => Promise.resolve([retrieved()]),
     });
-    h.gate.noteReady();
+    h.gate.noteReady(null);
     await startSession(h);
 
     speak(h, UNRESOLVED);

@@ -1622,12 +1622,20 @@ function registerIpcHandlers(): void {
    * held rather than dropped, so the first question of a session is not the one
    * the user never sees. The buffer holds one generation; see
    * `src/main/overlay-gate.ts`.
+   *
+   * The report names its session, and the gate refuses one for any session but
+   * the current one. A late report from the previous interview would otherwise
+   * open the next interview's gate, and claim the window's clicks, before the
+   * renewed reminder had painted.
    */
-  router.handle('overlay:ready', () => {
+  router.handle('overlay:ready', ({ sessionId }) => {
+    if (!overlayGate.noteReady(sessionId)) {
+      getLogger().info('overlay readiness refused, it is for another session');
+      return { refused: 'another-session' as const };
+    }
     getLogger().info('overlay reported ready, consent card rendered', {
       buffered: overlayGate.pending,
     });
-    overlayGate.noteReady();
     // Readiness means the consent card has painted, which is exactly the moment
     // the overlay has to start accepting clicks: a click-through window makes
     // the card's dismiss button unclickable (FR-006, FR-083). It is reported
@@ -1665,7 +1673,7 @@ function registerIpcHandlers(): void {
       // translucency change is replayed in full (ADR-016); across a session
       // boundary that same card would be replayed to the next interview
       // before it had produced anything of its own (ADR-036).
-      overlayGate.reset();
+      overlayGate.reset(active.id);
 
       // The overlay is created hidden and shown for the session, as section
       // 5.1 sequences it. `showInactive` so the interviewer's window keeps
@@ -1739,7 +1747,7 @@ function registerIpcHandlers(): void {
     // Hidden again: an always-on-top window with no session behind it has
     // nothing to say and sits over whatever the user does next. The gate is
     // cleared with it, so the card cannot outlive the interview it belongs to.
-    overlayGate.reset();
+    overlayGate.reset(null);
     // And the reminder's claim on click-through goes with it. A hidden window
     // that still refuses to pass clicks through would be invisible and in the
     // way, which is the worst of both (FR-083).

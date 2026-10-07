@@ -163,7 +163,7 @@ describe('TC-131 a long session holds its memory and its CPU', () => {
       llmChunks: anthropicScript(['first cue\n', 'second cue\n', 'third cue\n']),
       retrieve: () => Promise.resolve([retrieved()]),
     });
-    h.gate.noteReady();
+    h.gate.noteReady(null);
     await startSession(h);
 
     const stream = h.stt.opened.find((s) => s.source === 'interviewer');

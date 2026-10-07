@@ -203,14 +203,14 @@ describe('the overlay readiness gate', () => {
     expect(g.sent).toHaveLength(0);
     expect(g.gate.pending).toBe(2);
 
-    g.gate.noteReady();
+    g.gate.noteReady(null);
     expect(g.sent.map((m) => m.channel)).toEqual(['suggestion:begin', 'suggestion:line']);
     expect(g.gate.pending).toBe(0);
   });
 
   it('passes straight through once ready', () => {
     const g = gate();
-    g.gate.noteReady();
+    g.gate.noteReady(null);
     g.gate.send(begin('gen-1'));
     expect(g.sent).toHaveLength(1);
   });
@@ -222,7 +222,7 @@ describe('the overlay readiness gate', () => {
     g.gate.send(begin('gen-2'));
     g.gate.send(line('gen-2', 'fresh'));
 
-    g.gate.noteReady();
+    g.gate.noteReady(null);
     expect(g.sent).toHaveLength(2);
     expect(g.sent.every((m) => m.payload.generationId === 'gen-2')).toBe(true);
   });
@@ -242,7 +242,7 @@ describe('the overlay readiness gate', () => {
     g.gate.send(line('gen-2', 'fresh'));
     g.gate.send(end('gen-2'));
 
-    g.gate.noteReady();
+    g.gate.noteReady(null);
     // The replacement's begin has to survive, or its lines arrive with no card
     // to render them on.
     expect(g.sent.map((m) => [m.channel, m.payload.generationId])).toEqual([
@@ -254,14 +254,14 @@ describe('the overlay readiness gate', () => {
 
   it('ignores a line whose begin never arrived', () => {
     const g = gate();
-    g.gate.noteReady();
+    g.gate.noteReady(null);
     g.gate.send(line('gen-9', 'orphan'));
     expect(g.sent).toHaveLength(0);
   });
 
   it('replays the whole card to a rebuilt overlay (ADR-015)', () => {
     const g = gate();
-    g.gate.noteReady();
+    g.gate.noteReady(null);
     g.gate.send(begin('gen-1'));
     g.gate.send(line('gen-1', 'first'));
     expect(g.sent).toHaveLength(2);
@@ -272,7 +272,7 @@ describe('the overlay readiness gate', () => {
     g.gate.send(line('gen-1', 'second', 1));
     expect(g.sent).toHaveLength(2);
 
-    g.gate.noteReady();
+    g.gate.noteReady(null);
     expect(g.sent.slice(2).map((m) => m.channel)).toEqual([
       'suggestion:begin',
       'suggestion:line',
@@ -287,7 +287,7 @@ describe('the overlay readiness gate', () => {
    */
   it('replays only the replacement card after a retry replaced the salvage', () => {
     const g = gate();
-    g.gate.noteReady();
+    g.gate.noteReady(null);
     g.gate.send(begin('gen-1'));
     g.gate.send(line('gen-1', 'salvage'));
     const replacement: GatedMessage = {
@@ -302,7 +302,7 @@ describe('the overlay readiness gate', () => {
     g.gate.send(retryLine);
 
     g.gate.noteClosed();
-    g.gate.noteReady();
+    g.gate.noteReady(null);
     expect(g.sent.slice(4)).toEqual([replacement, retryLine]);
   });
 
@@ -313,22 +313,22 @@ describe('the overlay readiness gate', () => {
     expect(g.gate.pending).toBe(2);
     expect(g.gate.currentGenerationId).toBe('gen-1');
 
-    g.gate.noteReady();
+    g.gate.noteReady(null);
     expect(g.gate.pending).toBe(0);
   });
 
   it('a second overlay:ready is a no-op rather than a second flush', () => {
     const g = gate();
     g.gate.send(begin('gen-1'));
-    g.gate.noteReady();
-    g.gate.noteReady();
+    g.gate.noteReady(null);
+    g.gate.noteReady(null);
     expect(g.sent).toHaveLength(1);
     expect(g.gate.isReady).toBe(true);
   });
 
   it('a rebuilt overlay closes the gate again', () => {
     const g = gate();
-    g.gate.noteReady();
+    g.gate.noteReady(null);
     g.gate.noteClosed();
     expect(g.gate.isReady).toBe(false);
 
@@ -355,11 +355,11 @@ describe('the overlay readiness gate', () => {
    */
   it('a session boundary closes the gate, so the next interview buffers again', () => {
     const g = gate();
-    g.gate.noteReady();
+    g.gate.noteReady(null);
     g.gate.send(begin('gen-1'));
     expect(g.sent).toHaveLength(1);
 
-    g.gate.reset();
+    g.gate.reset('session-2');
     expect(g.gate.isReady).toBe(false);
 
     // The next interview's first suggestion is held, not delivered over a
@@ -371,28 +371,76 @@ describe('the overlay readiness gate', () => {
     expect(g.gate.pending).toBe(2);
 
     // And released in full once the renewed reminder has painted.
-    g.gate.noteReady();
+    g.gate.noteReady('session-2');
     expect(g.sent.map((m) => m.channel)).toEqual(['suggestion:begin', 'suggestion:line']);
   });
 
   it('a session boundary forgets the card, so it cannot outlive its interview', () => {
     const g = gate();
-    g.gate.noteReady();
+    g.gate.noteReady(null);
     g.gate.send(begin('gen-1'));
     g.gate.send(line('gen-1', 'a cue from the last interview'));
     expect(g.sent).toHaveLength(2);
     expect(g.gate.currentGenerationId).toBe('gen-1');
 
-    g.gate.reset();
+    g.gate.reset('session-2');
     expect(g.gate.currentGenerationId).toBeNull();
     expect(g.gate.pending).toBe(0);
 
     // The overlay is rebuilt for the next session and reports ready again.
     g.gate.noteClosed();
     g.sent.length = 0;
-    g.gate.noteReady();
+    g.gate.noteReady('session-2');
 
     expect(g.sent).toEqual([]);
+  });
+
+  /**
+   * FR-006, FR-008, ADR-016. Readiness belongs to one session. A report the
+   * renderer sent for the previous session, or a retry of one, can reach the
+   * main process after `reset` and before the renewed reminder has painted.
+   * Taken as an answer, it opened the next interview's gate early.
+   */
+  it('refuses a readiness report for a session that is no longer current', () => {
+    const g = gate();
+    g.gate.reset('session-1');
+    expect(g.gate.noteReady('session-1')).toBe(true);
+
+    g.gate.reset('session-2');
+    g.gate.send(begin('gen-2'));
+    expect(g.gate.noteReady('session-1')).toBe(false);
+    expect(g.gate.isReady).toBe(false);
+    expect(g.sent).toEqual([]);
+
+    expect(g.gate.noteReady('session-2')).toBe(true);
+    expect(g.sent.map((m) => m.channel)).toEqual(['suggestion:begin']);
+  });
+
+  it('accepts a report when the main process holds no session to protect', () => {
+    // Nothing was started through the main process, so no interview can be
+    // opened early. The overlay end-to-end suite drives sessions this way, and
+    // a refusal here left the reminder unclickable (FR-006, FR-083).
+    const g = gate();
+    expect(g.gate.noteReady('session-from-the-renderer')).toBe(true);
+    expect(g.gate.isReady).toBe(true);
+  });
+
+  it('refuses a late report for the session that has just stopped', () => {
+    const g = gate();
+    g.gate.reset('session-1');
+    g.gate.reset(null);
+    g.gate.reset(null);
+    expect(g.gate.noteReady('session-1')).toBe(false);
+    expect(g.gate.isReady).toBe(false);
+  });
+
+  it('keeps the session across a rebuilt window, so the new renderer can report for it', () => {
+    const g = gate();
+    g.gate.reset('session-1');
+    g.gate.noteReady('session-1');
+    g.gate.noteClosed();
+    expect(g.gate.noteReady(null)).toBe(false);
+    expect(g.gate.noteReady('session-1')).toBe(true);
   });
 
   it('gates exactly the three suggestion channels', () => {

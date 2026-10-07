@@ -188,7 +188,7 @@ describe('TC-130 a real fault reaches the handlers and the process continues', (
 describe('TC-130 an injected rejection during a session leaves it active', () => {
   it('logs the fault and the session still transcribes and suggests', async () => {
     const h = harness(userData);
-    h.gate.noteReady();
+    h.gate.noteReady(null);
     await startSession(h);
 
     const logged: { kind: FaultKind; value: unknown }[] = [];

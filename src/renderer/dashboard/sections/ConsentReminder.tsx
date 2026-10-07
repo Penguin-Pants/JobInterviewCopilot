@@ -75,7 +75,8 @@ export function ConsentReminder({
       >
         Reset to the shipped default
       </button>
-      {saved ? <span data-testid="consent-saved">Saved</span> : null}
+      {/* Mounted before its text, so the change is announced. */}
+      <span role="status">{saved ? <span data-testid="consent-saved">Saved</span> : null}</span>
       {error ? (
         <span role="alert" data-testid="consent-error">
           {error}

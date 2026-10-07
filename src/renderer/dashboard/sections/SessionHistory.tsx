@@ -9,12 +9,60 @@
 import { useCallback, useEffect, useRef, useState, type JSX } from 'react';
 import type { Profile, Session, SessionSummary } from '../../../shared/types.js';
 import { call } from '../call.js';
+import { focusLater, focusWithin } from '../focus.js';
 import { formatTimestamp, formatUsd } from '../format.js';
+import { useInFlight } from '../inFlight.js';
+
+const HEADING_ID = 'session-history-heading';
+const VIEWER_HEADING_ID = 'session-viewer-heading';
+
+function viewButtonId(sessionId: string): string {
+  return `session-view-button-${sessionId}`;
+}
+
+function deleteButtonId(sessionId: string): string {
+  return `session-delete-button-${sessionId}`;
+}
+
+function rowId(sessionId: string): string {
+  return `session-row-${sessionId}`;
+}
 
 export const TRANSCRIPT_PRIVACY_TEXT =
   'Session transcripts are saved on this computer as unencrypted local text files and are kept ' +
   'until you delete them. There is no retention window and no encryption at rest. No audio is ' +
   'ever saved.';
+
+/** What happens to the transcript delete confirmation (FR-110). */
+export type TranscriptDeleteEvent =
+  | { kind: 'ask'; summary: SessionSummary }
+  | { kind: 'keep' }
+  | { kind: 'settled'; sessionId: string };
+
+/**
+ * The confirmation on screen after `event`, given whether a delete is in
+ * flight (FR-110, NFR-010).
+ *
+ * While `session:delete` is pending, Keep it and Escape do not close the
+ * dialog and no row can open another one. Closed, the dialog looked like a
+ * cancel while the delete went on. Replaced, the first delete's answer then
+ * closed the newer confirmation the user was reading. A settled delete closes
+ * only its own confirmation, so that cannot happen by another route either.
+ */
+export function pendingDeleteAfter(
+  current: SessionSummary | null,
+  busy: boolean,
+  event: TranscriptDeleteEvent,
+): SessionSummary | null {
+  switch (event.kind) {
+    case 'ask':
+      return busy ? current : event.summary;
+    case 'keep':
+      return busy ? current : null;
+    case 'settled':
+      return current?.id === event.sessionId ? null : current;
+  }
+}
 
 export interface SessionHistoryProps {
   profiles: Profile[];
@@ -89,14 +137,60 @@ export function SessionHistory({ profiles, sessionRevision }: SessionHistoryProp
     void reload();
   }, [reload, sessionRevision]);
 
+  /**
+   * The transcript a Delete transcript press is asking about (FR-110).
+   *
+   * Deleting a transcript cannot be undone, and it was one click on a button
+   * that sits beside View transcript in every row. It now asks first, with the
+   * same non-modal `alertdialog` a profile delete uses.
+   */
+  const [pendingDelete, setPendingDelete] = useState<SessionSummary | null>(null);
+  const deleting = useInFlight();
+  const dialog = useRef<HTMLDivElement | null>(null);
+
+  function askToDelete(summary: SessionSummary): void {
+    setPendingDelete((current) =>
+      pendingDeleteAfter(current, deleting.busy, { kind: 'ask', summary }),
+    );
+  }
+
+  function keep(): void {
+    if (!pendingDelete) return;
+    const next = pendingDeleteAfter(pendingDelete, deleting.busy, { kind: 'keep' });
+    if (next === pendingDelete) return;
+    focusLater(deleteButtonId(pendingDelete.id));
+    setPendingDelete(next);
+  }
+
+  /**
+   * Closes the confirmation of a settled delete and puts focus somewhere that
+   * still exists (NFR-010). Moved only when focus is still in the dialog or on
+   * the deleted row, the same rule the profile dialog uses: a user who moved
+   * on during the round trip keeps their place.
+   */
+  function settle(sessionId: string, focusId: string): void {
+    const hadFocus = focusWithin(document.activeElement, [
+      dialog.current,
+      document.getElementById(rowId(sessionId)),
+    ]);
+    // `true`, because the delete still holds its gate until `remove` returns.
+    setPendingDelete((current) =>
+      pendingDeleteAfter(current, true, { kind: 'settled', sessionId }),
+    );
+    if (hadFocus) focusLater(focusId);
+  }
+
   async function remove(sessionId: string): Promise<void> {
     setError(null);
     const result = await call('session:delete', { sessionId });
     if (!result.ok) {
       setError(result.message);
+      settle(sessionId, deleteButtonId(sessionId));
       return;
     }
     if (opened?.id === sessionId) setOpened(null);
+    // The row is gone, so focus goes to the section heading.
+    settle(sessionId, HEADING_ID);
     await reload();
   }
 
@@ -107,12 +201,27 @@ export function SessionHistory({ profiles, sessionRevision }: SessionHistoryProp
       setError(result.message);
       return;
     }
+    const stillOnRow = focusWithin(document.activeElement, [
+      document.getElementById(rowId(sessionId)),
+    ]);
     setOpened(result.value);
+    // The transcript renders below every group, often off screen. Its heading
+    // takes focus so a keyboard or screen reader user lands on it (NFR-010).
+    // Only if the user is still on the row they opened it from: a slow read
+    // must not pull focus from wherever they moved during the wait.
+    if (stillOnRow) focusLater(VIEWER_HEADING_ID);
+  }
+
+  function close(): void {
+    if (opened) focusLater(viewButtonId(opened.id));
+    setOpened(null);
   }
 
   return (
-    <section data-testid="section-session-history" aria-labelledby="session-history-heading">
-      <h2 id="session-history-heading">Session History</h2>
+    <section data-testid="section-session-history" aria-labelledby={HEADING_ID}>
+      <h2 id={HEADING_ID} tabIndex={-1}>
+        Session History
+      </h2>
 
       <p data-testid="transcript-privacy-note">{TRANSCRIPT_PRIVACY_TEXT}</p>
 
@@ -146,46 +255,102 @@ export function SessionHistory({ profiles, sessionRevision }: SessionHistoryProp
             ) : null}
             {sessions.length > 0 ? (
               <ul className="rows">
-                {sessions.map((summary) => (
-                  <li key={summary.id} data-testid={`session-${summary.id}`}>
-                    <span data-testid={`session-started-${summary.id}`}>
-                      {formatTimestamp(summary.startedAt)}
-                    </span>
-                    <span>{summary.entryCount} entries</span>
-                    <span>{formatUsd(summary.estimatedUsd)}</span>
-                    {summary.endReason === 'crash-recovered' ? (
-                      <span data-testid={`session-recovered-${summary.id}`}>
-                        Recovered after a crash
-                      </span>
-                    ) : null}
-                    <button
-                      type="button"
-                      data-testid={`session-view-${summary.id}`}
-                      onClick={() => void open(summary.id)}
+                {sessions.map((summary) => {
+                  // Every row has the same two buttons, so each name carries
+                  // its session. A list of identical "Delete transcript"
+                  // buttons gave a screen reader no way to tell them apart.
+                  const started = formatTimestamp(summary.startedAt);
+                  return (
+                    <li
+                      key={summary.id}
+                      id={rowId(summary.id)}
+                      data-testid={`session-${summary.id}`}
                     >
-                      View transcript
-                    </button>
-                    <button
-                      type="button"
-                      data-testid={`session-delete-${summary.id}`}
-                      onClick={() => void remove(summary.id)}
-                    >
-                      Delete transcript
-                    </button>
-                  </li>
-                ))}
+                      <span data-testid={`session-started-${summary.id}`}>{started}</span>
+                      <span>{summary.entryCount} entries</span>
+                      <span>{formatUsd(summary.estimatedUsd)}</span>
+                      {summary.endReason === 'crash-recovered' ? (
+                        <span data-testid={`session-recovered-${summary.id}`}>
+                          Recovered after a crash
+                        </span>
+                      ) : null}
+                      <button
+                        type="button"
+                        id={viewButtonId(summary.id)}
+                        data-testid={`session-view-${summary.id}`}
+                        aria-label={`View transcript of the session started ${started}`}
+                        onClick={() => void open(summary.id)}
+                      >
+                        View transcript
+                      </button>
+                      <button
+                        type="button"
+                        id={deleteButtonId(summary.id)}
+                        data-testid={`session-delete-${summary.id}`}
+                        aria-label={`Delete transcript of the session started ${started}`}
+                        // While a delete is in flight no other confirmation
+                        // opens over it (FR-110).
+                        aria-disabled={deleting.busy || undefined}
+                        onClick={() => askToDelete(summary)}
+                      >
+                        Delete transcript
+                      </button>
+                    </li>
+                  );
+                })}
               </ul>
             ) : null}
           </div>
         );
       })}
 
+      {pendingDelete ? (
+        <div
+          ref={dialog}
+          role="alertdialog"
+          aria-labelledby="session-delete-confirm-heading"
+          aria-describedby="session-delete-confirm-text"
+          data-testid="session-delete-confirm"
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') keep();
+          }}
+        >
+          <h3 id="session-delete-confirm-heading">
+            Delete the transcript of the session started {formatTimestamp(pendingDelete.startedAt)}?
+          </h3>
+          <p id="session-delete-confirm-text">
+            This deletes its {pendingDelete.entryCount} entries from this computer. It cannot be
+            undone.
+          </p>
+          <button
+            type="button"
+            data-testid="session-delete-confirm-yes"
+            aria-disabled={deleting.busy || undefined}
+            onClick={() => void deleting.run(() => remove(pendingDelete.id))}
+          >
+            Delete it
+          </button>
+          <button
+            type="button"
+            data-testid="session-delete-confirm-no"
+            // Focused on open, so the keyboard lands on the safe choice. It
+            // cannot cancel a delete that has already started, so it says so
+            // rather than closing as if it had (FR-110).
+            autoFocus
+            aria-disabled={deleting.busy || undefined}
+            onClick={keep}
+          >
+            Keep it
+          </button>
+        </div>
+      ) : null}
+
       {opened ? (
-        <div data-testid="session-viewer" aria-labelledby="session-viewer-heading">
-          <h3 id="session-viewer-heading">
+        <div data-testid="session-viewer" role="region" aria-labelledby={VIEWER_HEADING_ID}>
+          <h3 id={VIEWER_HEADING_ID} tabIndex={-1}>
             {opened.profileNameSnapshot}, {formatTimestamp(opened.startedAt)}
           </h3>
-          <button type="button" data-testid="session-viewer-close" onClick={() => setOpened(null)}>
+          <button type="button" data-testid="session-viewer-close" onClick={close}>
             Close transcript
           </button>
           <ol data-testid="session-entries">
