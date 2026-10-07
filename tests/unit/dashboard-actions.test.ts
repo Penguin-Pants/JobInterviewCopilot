@@ -17,6 +17,7 @@ import {
 import { parseThresholds } from '../../src/renderer/dashboard/sections/CostAndUsage.js';
 import { withStoredBinding } from '../../src/renderer/dashboard/sections/Hotkeys.js';
 import { pendingDeleteAfter } from '../../src/renderer/dashboard/sections/SessionHistory.js';
+import { SETTINGS_LIMITS } from '../../src/shared/defaults.js';
 import { DEFAULT_PROMPT_ID } from '../../src/shared/prompts.js';
 import type { SessionSummary } from '../../src/shared/types.js';
 
@@ -139,9 +140,15 @@ describe('a cost threshold is a number the user typed (FR-109)', () => {
     expect(parseThresholds('0', '60')).toEqual({ costUsd: 0, timeMinutes: 60 });
   });
 
-  it('refuses a negative cost, a zero time and text that is not a number', () => {
+  it('accepts a typed zero time, which turns the time warning off', () => {
+    expect(parseThresholds('5', '0')).toEqual({ costUsd: 5, timeMinutes: 0 });
+  });
+
+  it('refuses a value outside the settings range and text that is not a number', () => {
     expect(parseThresholds('-1', '60')).toBeNull();
-    expect(parseThresholds('5', '0')).toBeNull();
+    expect(parseThresholds('5', '-1')).toBeNull();
+    expect(parseThresholds(String(SETTINGS_LIMITS.costUsd.max + 1), '60')).toBeNull();
+    expect(parseThresholds('5', String(SETTINGS_LIMITS.timeMinutes.max + 1))).toBeNull();
     expect(parseThresholds('five', '60')).toBeNull();
   });
 });

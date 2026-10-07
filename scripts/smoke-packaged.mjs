@@ -20,7 +20,7 @@
  */
 import { existsSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { basename, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /** What `startKnowledgeBase` logs when `rag.start()` throws, chokidar included. */
@@ -54,7 +54,7 @@ const exe = readdirSync(unpackedDir)
   .map((name) => join(unpackedDir, name))[0];
 
 if (!exe) {
-  console.error(`No .exe in ${unpackedDir}. Nothing to launch.`);
+  console.error(`No .exe in ${redactPaths(unpackedDir)}. Nothing to launch.`);
   process.exit(1);
 }
 
@@ -62,13 +62,19 @@ const { _electron: electron } = await import('@playwright/test');
 
 const userDataDir = mkdtempSync(join(tmpdir(), 'icp-packaged-'));
 let app;
+/** What the packaged app wrote to stdout and stderr, in order. */
+const output = [];
 
 try {
   // The same `--user-data-dir` the E2E suite uses. Without it the smoke run
   // would write into, and overwrite, the real profile of whoever ran it.
   app = await electron.launch({ executablePath: exe, args: [`--user-data-dir=${userDataDir}`] });
+  // Kept for the failure report. A main process that throws before its logger
+  // starts leaves nothing in main.log, and stderr is then the only evidence.
+  app.process().stdout?.on('data', (d) => output.push(String(d)));
+  app.process().stderr?.on('data', (d) => output.push(String(d)));
 
-  const dashboard = await app.firstWindow();
+  const dashboard = await dashboardWindow(app);
   await dashboard.waitForSelector('[data-testid="dashboard"]', { timeout: 30_000 });
   await dashboard.waitForSelector('[data-testid="dashboard-header"]', { timeout: 30_000 });
 
@@ -115,17 +121,83 @@ try {
   }
 
   console.log(
-    `Packaged app smoke test passed: ${exe} launched, rendered the Dashboard, ` +
+    `Packaged app smoke test passed: ${basename(exe)} launched, rendered the Dashboard, ` +
       'and started its knowledge base without error.',
   );
 } catch (err) {
   console.error('The packaged app did not come up:');
-  console.error(`  ${err instanceof Error ? err.message : String(err)}`);
+  console.error(`  ${redactPaths(err instanceof Error ? err.message : String(err))}`);
   console.error(
     '\nThis is the failure mode asarUnpack exists to prevent: the installer builds,\n' +
       'and the app only breaks when it is run. See electron-builder.yml.',
   );
   process.exitCode = 1;
+  report(
+    'open windows',
+    app
+      ? app
+          .windows()
+          .map((w) => w.url())
+          .join('\n')
+      : '(not launched)',
+  );
+  report('app stdout and stderr', output.join(''));
+  const failedLog = join(userDataDir, 'logs', 'main.log');
+  report('main.log', existsSync(failedLog) ? readFileSync(failedLog, 'utf8') : '(not written)');
 } finally {
   await app?.close().catch(() => {});
+}
+
+/** The last part of one piece of evidence, so a CI log shows why the app stopped. */
+function report(label, text) {
+  const tail = text.trim() === '' ? '(empty)' : text.slice(-6000);
+  console.error(`\n--- ${label} (last 6000 characters) ---\n${redactPaths(tail)}`);
+}
+
+/**
+ * The text with every path into this checkout replaced by `<checkout>`.
+ *
+ * The packaged app lives under `release/`, so its window URLs, its stack
+ * traces and its own messages name the install path. The repository rule is
+ * that nothing logs a path outside `userData` (AGENTS.md), and CI output is
+ * a log. Matched as a Windows path, a forward-slash path, a `file:` URL and
+ * the JSON-escaped path that `main.log` writes inside a serialized stack,
+ * ignoring case, because the drive letter can come back in either case.
+ */
+function redactPaths(text) {
+  const forms = [
+    JSON.stringify(root).slice(1, -1),
+    root,
+    root.replaceAll('\\', '/'),
+    encodeURI(root.replaceAll('\\', '/')),
+  ];
+  let out = text;
+  for (const form of new Set(forms)) {
+    out = out.replace(new RegExp(escapeRegExp(form), 'gi'), '<checkout>');
+  }
+  return out;
+}
+
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * The Dashboard's window, found by its loaded URL.
+ *
+ * Not `app.firstWindow()`: the overlay's window can register first, even
+ * though bootstrap creates the Dashboard first. The smoke test then waited for
+ * the Dashboard inside the overlay and failed after 30 s on an app that had
+ * started correctly, which the window list in its failure report showed.
+ */
+async function dashboardWindow(electronApp) {
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    const page = electronApp
+      .windows()
+      .find((w) => !w.isClosed() && w.url().includes('/dashboard/'));
+    if (page) return page;
+    if (Date.now() > deadline) throw new Error('No Dashboard window appeared within 30 s.');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
 }

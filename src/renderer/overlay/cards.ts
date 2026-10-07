@@ -119,3 +119,16 @@ export function reduceCards(cards: SuggestionCard[], event: CardEvent): Suggesti
 export function shouldShowIdle(cards: readonly SuggestionCard[], paused: boolean): boolean {
   return paused || cards.length === 0;
 }
+
+/**
+ * What the overlay's readiness report hangs on (FR-008, ADR-016).
+ *
+ * Null until the consent text has arrived, because the card cannot be on
+ * screen before it. After that, the session boundary alone: readiness is owed
+ * again at each boundary, when the card comes back, and never when only the
+ * text changes. An edit reported readiness again before, and main then made
+ * the window take clicks for a card the user had dismissed.
+ */
+export function readinessKey<T>(consent: string | null, boundary: T): T | null {
+  return consent === null ? null : boundary;
+}

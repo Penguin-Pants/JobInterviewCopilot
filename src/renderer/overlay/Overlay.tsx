@@ -12,7 +12,7 @@ import {
 import { createRoot } from 'react-dom/client';
 import { defaultSettings } from '../../shared/defaults.js';
 import type { Settings } from '../../shared/types.js';
-import { reduceCards, shouldShowIdle } from './cards.js';
+import { readinessKey, reduceCards, shouldShowIdle } from './cards.js';
 import { HoldBuffer } from './holdBuffer.js';
 import { invokeLogged, reportReady } from './invoke.js';
 import { lastSeen } from './earlyPushes.js';
@@ -106,10 +106,12 @@ function Overlay(): JSX.Element {
    *
    * A new object at each boundary, so the report runs again even for the same
    * id, and the report names the id so the main process can refuse it once
-   * that session is no longer current.
+   * that session is no longer current. `epoch` counts the boundaries, so a test
+   * can tell when the reset at one has run (`data-session-epoch`).
    */
-  const [readyFor, setReadyFor] = useState<{ sessionId: string | null }>(() => ({
+  const [readyFor, setReadyFor] = useState<{ sessionId: string | null; epoch: number }>(() => ({
     sessionId: lastSeen('state:session')?.sessionId ?? null,
+    epoch: 0,
   }));
 
   /**
@@ -259,7 +261,7 @@ function Overlay(): JSX.Element {
       // this same boundary, so until this is answered the next interview's
       // suggestions buffer rather than arriving over a reminder that has not
       // been re-shown yet.
-      setReadyFor({ sessionId });
+      setReadyFor((previous) => ({ sessionId, epoch: previous.epoch + 1 }));
     }
     lastSessionId.current = sessionId;
   }, [sessionId, holdBuffer]);
@@ -277,7 +279,8 @@ function Overlay(): JSX.Element {
    * reminder before the first suggestion of **every** session and the gate is
    * closed again at the same boundary. Reporting it once, with a latching ref,
    * answered for the first interview and then stood unchallenged over a
-   * reminder the user had dismissed.
+   * reminder the user had dismissed. It does not run again when only the text
+   * changes (`readinessKey`).
    *
    * The double `requestAnimationFrame` is the paint, and the cleanup flag is
    * what keeps a superseded report, or StrictMode's simulated remount, from
@@ -293,12 +296,13 @@ function Overlay(): JSX.Element {
    * next interview, so it opened that gate before the renewed reminder had
    * painted. `lastSeen` is updated as the push arrives, before any render.
    */
+  const readyKey = readinessKey(consent, readyFor);
   useEffect(() => {
-    if (consent === null) return;
+    if (readyKey === null) return;
     let cancelled = false;
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        void reportReady(readyFor.sessionId, {
+        void reportReady(readyKey.sessionId, {
           attempts: READY_ATTEMPTS,
           firstDelayMs: READY_FIRST_RETRY_MS,
           cancelled: () => cancelled,
@@ -309,7 +313,7 @@ function Overlay(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [consent, readyFor]);
+  }, [readyKey]);
 
   const dismiss = useCallback(() => {
     setDismissed(true);
@@ -490,6 +494,7 @@ function Overlay(): JSX.Element {
   return (
     <div
       data-testid="overlay"
+      data-session-epoch={readyFor.epoch}
       data-interactive={interactive ? 'true' : 'false'}
       data-overlay-state={idle ? 'idle' : 'active'}
       data-theme={resolved.mode}

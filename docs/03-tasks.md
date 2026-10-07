@@ -140,6 +140,8 @@ Follow-up work found during implementation:
 - **TASK-011** must add the `media` permission to the permission request
   handler, which Milestone 0 sets to deny everything. **Done.** The handler now
   lives in `src/main/audio-host.ts` and grants `media` only to the Audio Worker.
+  It grants `display-capture` on the same terms, because Electron 45 reports
+  `getDisplayMedia()` as that permission rather than `media`.
 - `Logger.rotateIfNeeded` calls `statSync` on every line. Harmless at Milestone 0
   volumes, worth revisiting if logging becomes hot during a live session.
 - The content security policy lists `file:` because the packaged app loads
@@ -260,7 +262,10 @@ Two process lessons, both fixed rather than noted:
   the chain is empty but the mechanism exists and is unit tested with a fake
   version 0.
 - Out-of-range values are clamped, not rejected: `overlayOpacity` to 0.30-1.00,
-  `overlayFontSizePx` to 16-32, `turnEndGapMs` to 500-1500.
+  `overlayFontSizePx` to 16-32, `turnEndGapMs` to 500-1500. Every other
+  bounded field in `02-architecture.md` section 2.1 is clamped to its range
+  too, and a file is clamped before it is validated, so one out-of-range value
+  never sends the whole file to quarantine.
 - `main.log` rotates at 5 MB keeping 3 files. At most 3
   `settings.corrupt-*.json` files are kept, oldest deleted first.
 **Verified by** TC-030, TC-031, TC-032, TC-033, TC-147

@@ -27,7 +27,9 @@ import { validateCredential } from './ai/validate.js';
 import { ConfigStore } from './config.js';
 import { CostMeter } from './cost.js';
 import { HotkeyManager } from './hotkeys.js';
+import { applySettingsPatch } from './config-apply.js';
 import { IpcRouter, push } from './ipc/router.js';
+import { appRendererUrlCheck } from './ipc/sender.js';
 import { saveProviderKey, type KeySaveDeps } from './key-save.js';
 import { LiveSessionLoop } from './live.js';
 import { getLogger, initLogger } from './logger.js';
@@ -66,6 +68,7 @@ import type {
   StreamState,
   ValidationResult,
 } from '../shared/types.js';
+import type { IpcWindowRole } from '../shared/ipc.js';
 import { findLlmProvider } from '../shared/registry/llm.js';
 import { findSttModel, findSttProvider } from '../shared/registry/stt.js';
 
@@ -319,10 +322,15 @@ async function bootstrap(): Promise<void> {
     onStreamState: ({ source, state, error }) => {
       // Tell the supervisor first, so `canStartSession` reflects the worker's
       // view rather than waiting for the first chunk to prove it.
-      audio.noteStreamState(source, state as StreamState, error);
-      if (state === 'error') {
-        // Never rejects. A failed restart lands in `error` (FR-045).
-        void audio.handleStreamEnded(source, error ?? 'The audio stream ended.');
+      // The restart runs even if recording the state throws: skipped, a failed
+      // stream stayed down for the rest of the session (FR-045).
+      try {
+        audio.noteStreamState(source, state as StreamState, error);
+      } finally {
+        if (state === 'error') {
+          // Never rejects. A failed restart lands in `error` (FR-045).
+          void audio.handleStreamEnded(source, error ?? 'The audio stream ended.');
+        }
       }
     },
   });
@@ -413,7 +421,7 @@ async function bootstrap(): Promise<void> {
   );
   bindHealthFromSettings(config.get());
 
-  installLoopbackHandler();
+  installLoopbackHandler((frame) => audioHost.ownsFrame(frame));
   installPermissionHandler((contents) => audioHost.owns(contents));
 
   // The knowledge base engine (CMP-06). Constructing it is cheap and touches no
@@ -469,7 +477,15 @@ async function bootstrap(): Promise<void> {
   });
 
   hotkeys = new HotkeyManager(globalShortcut);
-  router = new IpcRouter(ipcMain);
+  // The router checks every invoke against the window that sent it (FR-086).
+  // Read live, because both windows are rebuilt and reopened.
+  router = new IpcRouter(ipcMain, {
+    roleOf: windowRoleOf,
+    isAppUrl: appRendererUrlCheck(
+      process.env.ELECTRON_RENDERER_URL,
+      join(__dirname, '../renderer'),
+    ),
+  });
   registerIpcHandlers();
 
   const settings = config.get();
@@ -1381,39 +1397,51 @@ async function validateWithinDeadline(
   }
 }
 
+/**
+ * Which app window owns these contents, for the router's sender check (FR-086).
+ *
+ * The audio worker is neither: it speaks CH-301 to CH-304 over `ipc-message`
+ * and has no invoke channel at all.
+ */
+function windowRoleOf(sender: Electron.WebContents): IpcWindowRole | null {
+  const owns = (win: BrowserWindow | null): boolean =>
+    win !== null && !win.isDestroyed() && win.webContents === sender;
+  if (owns(dashboardWindow)) return 'dashboard';
+  if (owns(overlayWindow)) return 'overlay';
+  return null;
+}
+
 function registerIpcHandlers(): void {
   router.handle('config:get', () => config.get());
   router.handle('dashboard:setPromptDirty', ({ dirty }) => {
     dashboardPromptDirty = dirty;
     return { ok: true as const };
   });
-  router.handle('config:set', async (patch) => {
-    const before = config.get();
-    // `activeProfileId` is a plain string in the settings schema, so a Dashboard
-    // replaying a cached settings object could name a profile that has since
-    // been deleted, and nothing repaired it until the next launch. Only
-    // `profile:activate` is supposed to move it, and only to a profile that
-    // exists (FR-028).
-    if (patch.activeProfileId !== undefined && patch.activeProfileId !== before.activeProfileId) {
-      assertProfile(patch.activeProfileId);
-    }
-    const after = config.set(patch);
-    // A queued `CH-126` write is older than this one, and the throttle would
-    // otherwise re-read the theme this call just stored and put its own stale
-    // size back over it, reversing the user's last action. Only the newest
-    // writer may commit, so the pending one is dropped rather than delayed.
-    if (patch.theme !== undefined) overlayFontSizeWrites.cancel();
-    await applyThemeChange(before, after);
-    bindHealthFromSettings(after);
-    // The trigger holds its own copy of the gap and the guard, so a settings
-    // change has to reach it. Applying at the next armed timer rather than
-    // rewriting one in flight is the machine's own rule (FR-050).
-    trigger.setConfig(triggerConfigFrom(after, live.activeSttChoice));
-    // The meter holds its own copy too. A threshold already crossed stays
-    // crossed for the session whatever the new value is (FR-109).
-    cost.setThresholds(after.thresholds);
-    return after;
-  });
+  // The order and the refused fields live in `config-apply.ts`, where they are
+  // tested. `activeProfileId` is one of those fields: only `profile:activate`
+  // moves it, and only to a profile that exists (FR-028).
+  router.handle('config:set', (patch) =>
+    applySettingsPatch(
+      {
+        config,
+        cancelQueuedFontSize: () => overlayFontSizeWrites.cancel(),
+        applyLive: (after) => {
+          bindHealthFromSettings(after);
+          // The trigger holds its own copy of the gap and the guard, so a
+          // settings change has to reach it. Applying at the next armed timer
+          // rather than rewriting one in flight is the machine's own rule
+          // (FR-050).
+          trigger.setConfig(triggerConfigFrom(after, live.activeSttChoice));
+          // The meter holds its own copy too. A threshold already crossed stays
+          // crossed for the session whatever the new value is (FR-109).
+          cost.setThresholds(after.thresholds);
+        },
+        pushConsent: (text) => push(overlayWindow?.webContents, 'overlay:consent', { text }),
+        applyTheme: applyThemeChange,
+      },
+      patch,
+    ),
+  );
 
   router.handle('secrets:status', () => secrets.status());
   router.handle('llmCatalog:get', () => llmCatalog.get());

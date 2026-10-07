@@ -11,7 +11,11 @@ import ElectronStoreImport from 'electron-store';
  */
 type StoreShape = Record<string, unknown>;
 type ElectronStoreInstance = InstanceType<typeof ElectronStoreImport<StoreShape>>;
-import { defaultSettings, SETTINGS_LIMITS } from '../shared/defaults.js';
+import {
+  DEFAULT_CONSENT_REMINDER_TEXT,
+  defaultSettings,
+  SETTINGS_LIMITS,
+} from '../shared/defaults.js';
 import { settingsSchema } from '../shared/ipc.js';
 import { DEFAULT_PROMPT_NAME } from '../shared/prompts.js';
 import { findLlmProvider } from '../shared/registry/llm.js';
@@ -139,13 +143,37 @@ export const MIGRATIONS: Record<number, (input: UnknownRecord) => UnknownRecord>
 };
 
 function clamp(value: number, min: number, max: number): number {
+  // Only a number can be out of range. A value of another type is corruption,
+  // so it is left for the schema to refuse and the file goes to quarantine.
+  if (typeof value !== 'number') return value;
   if (!Number.isFinite(value)) return min;
   return Math.min(max, Math.max(min, value));
+}
+
+/** `clamp` for a field the schema requires to be a whole number. */
+function clampInt(value: number, limit: { readonly min: number; readonly max: number }): number {
+  return typeof value === 'number' ? Math.round(clamp(value, limit.min, limit.max)) : value;
+}
+
+/**
+ * The consent reminder, trimmed and cut to its maximum (FR-006, FR-032).
+ *
+ * A blank reminder is replaced with the shipped one rather than kept, because
+ * a reminder with no words is not a reminder.
+ */
+function clampConsentText(text: string): string {
+  if (typeof text !== 'string') return text;
+  const { min, max } = SETTINGS_LIMITS.consentReminderChars;
+  const trimmed = text.trim().slice(0, max).trimEnd();
+  return trimmed.length >= min ? trimmed : DEFAULT_CONSENT_REMINDER_TEXT;
 }
 
 /**
  * Clamp out-of-range values rather than rejecting them (FR-033, TC-033).
  * A user who types 5.0 for opacity gets 1.0, not a failed load.
+ *
+ * Every range is `SETTINGS_LIMITS`, the same one `settingsSchema` enforces, so
+ * the output of this function always passes the schema's bounds.
  */
 export function clampSettings(settings: Settings): Settings {
   const limits = SETTINGS_LIMITS;
@@ -163,42 +191,72 @@ export function clampSettings(settings: Settings): Settings {
         limits.overlayOpacity.min,
         limits.overlayOpacity.max,
       ),
-      overlayFontSizePx: Math.round(
-        clamp(
-          settings.theme.overlayFontSizePx,
-          limits.overlayFontSizePx.min,
-          limits.overlayFontSizePx.max,
-        ),
-      ),
+      overlayFontSizePx: clampInt(settings.theme.overlayFontSizePx, limits.overlayFontSizePx),
     },
     trigger: {
-      ...settings.trigger,
-      turnEndGapMs: Math.round(
-        clamp(settings.trigger.turnEndGapMs, limits.turnEndGapMs.min, limits.turnEndGapMs.max),
+      turnEndGapMs: clampInt(settings.trigger.turnEndGapMs, limits.turnEndGapMs),
+      minTurnWords: clampInt(settings.trigger.minTurnWords, limits.minTurnWords),
+      minTurnChars: clampInt(settings.trigger.minTurnChars, limits.minTurnChars),
+      candidateContextTurns: clampInt(
+        settings.trigger.candidateContextTurns,
+        limits.candidateContextTurns,
+      ),
+      candidateContextChars: clampInt(
+        settings.trigger.candidateContextChars,
+        limits.candidateContextChars,
       ),
     },
+    thresholds: {
+      costUsd: clamp(settings.thresholds.costUsd, limits.costUsd.min, limits.costUsd.max),
+      timeMinutes: clamp(
+        settings.thresholds.timeMinutes,
+        limits.timeMinutes.min,
+        limits.timeMinutes.max,
+      ),
+    },
+    consentReminderText: clampConsentText(settings.consentReminderText),
     // Null is the default size and must survive clamping as null. Clamping it
     // to the minimum would silently pin every never-resized overlay to 320 by
     // 180 on the first load after the upgrade (FR-081).
     overlayWindow: {
       ...settings.overlayWindow,
-      width: clampNullable(
-        settings.overlayWindow.width,
-        limits.overlayWidthPx.min,
-        limits.overlayWidthPx.max,
-      ),
-      height: clampNullable(
-        settings.overlayWindow.height,
-        limits.overlayHeightPx.min,
-        limits.overlayHeightPx.max,
-      ),
+      width: clampNullable(settings.overlayWindow.width, limits.overlayWidthPx),
+      height: clampNullable(settings.overlayWindow.height, limits.overlayHeightPx),
     },
   };
 }
 
-/** `clamp` for a value whose null means "unset", which is left alone. */
-function clampNullable(value: number | null, min: number, max: number): number | null {
-  return value === null ? null : Math.round(clamp(value, min, max));
+/** `clampInt` for a value whose null means "unset", which is left alone. */
+function clampNullable(
+  value: number | null,
+  limit: { readonly min: number; readonly max: number },
+): number | null {
+  return value === null ? null : clampInt(value, limit);
+}
+
+/**
+ * Migrate, clamp and validate a settings object read from disk (FR-033).
+ *
+ * Clamped **before** it is validated. The schema bounds every range, so
+ * validating first would send a file with one out-of-range number to
+ * quarantine and reset every other choice in it to the default, which is the
+ * opposite of what TC-033 asks for. A file that `clampSettings` cannot even
+ * walk is missing a whole section; the schema then reports it as invalid.
+ */
+export function settleStored(
+  raw: UnknownRecord,
+  onReplaced?: Parameters<typeof replaceUnknownProviders>[1],
+): ReturnType<typeof settingsSchema.safeParse> {
+  // A provider this build removed is repaired first, so one stale field does
+  // not quarantine the rest of the file (FR-037).
+  const migrated = replaceUnknownProviders(migrate(raw), onReplaced);
+  let candidate: unknown = migrated;
+  try {
+    candidate = clampSettings(migrated as unknown as Settings);
+  } catch {
+    // Left unclamped for the schema to refuse.
+  }
+  return settingsSchema.safeParse(candidate);
 }
 
 /** Run the migration chain from the file's claimed version up to current. */
@@ -367,7 +425,7 @@ export function quarantineIfCorrupt(dir: string): { path: string; reason: string
     return { path: quarantineCorruptFile(dir, file), reason: 'not an object' };
   }
 
-  const result = settingsSchema.safeParse(replaceUnknownProviders(migrate(parsed)));
+  const result = settleStored(parsed);
   if (!result.success) {
     return {
       path: quarantineCorruptFile(dir, file),
@@ -403,17 +461,14 @@ export class ConfigStore {
     });
 
     // Migrate, repair and clamp whatever survived, then write it back once.
-    const repaired = replaceUnknownProviders(
-      migrate(this.store.store as UnknownRecord),
-      (capability, slot, providerId) =>
-        options.onCorrupt?.(
-          this.pathFor(options.dir),
-          `${capability} ${slot} provider "${providerId}" is not in this build's registry and ` +
-            `was ${slot === 'primary' ? 'reset to the default' : 'cleared'} (FR-037)`,
-        ),
+    const parsed = settleStored(this.store.store as UnknownRecord, (capability, slot, providerId) =>
+      options.onCorrupt?.(
+        this.pathFor(options.dir),
+        `${capability} ${slot} provider "${providerId}" is not in this build's registry and ` +
+          `was ${slot === 'primary' ? 'reset to the default' : 'cleared'} (FR-037)`,
+      ),
     );
-    const parsed = settingsSchema.safeParse(repaired);
-    let settled = parsed.success ? clampSettings(parsed.data as Settings) : defaultSettings();
+    let settled = parsed.success ? (parsed.data as Settings) : defaultSettings();
 
     // The separation invariant has to hold on load too. A hand-edited or
     // badly migrated file can be schema-valid while naming the same provider

@@ -25,7 +25,7 @@ export async function launchApp(reuseUserDataDir?: string): Promise<LaunchedApp>
   const app = await electron.launch({
     args: [join(process.cwd(), 'out/main/index.js'), `--user-data-dir=${userDataDir}`],
   });
-  const dashboard = await app.firstWindow();
+  const dashboard = await dashboardPage(app);
   await dashboard.waitForSelector('[data-testid="dashboard"]');
   // The shell renders before the settings arrive. Waiting for the header keeps
   // every test from racing the first `config:get`, and waiting for a profile
@@ -40,6 +40,23 @@ export async function launchApp(reuseUserDataDir?: string): Promise<LaunchedApp>
   // that is about to appear.
   await dashboard.waitForSelector('[data-testid="model-gate"], [data-testid="model-ready"]');
   return { app, dashboard, userDataDir };
+}
+
+/**
+ * The Dashboard's page, found by its loaded URL.
+ *
+ * Not `app.firstWindow()`: the overlay's window can register first, even
+ * though bootstrap creates the Dashboard first, and a test then waited for
+ * the Dashboard inside the overlay until it timed out.
+ */
+export async function dashboardPage(app: ElectronApplication): Promise<Page> {
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    const page = app.windows().find((w) => !w.isClosed() && w.url().includes('/dashboard/'));
+    if (page) return page;
+    if (Date.now() > deadline) throw new Error('No Dashboard window appeared within 30s.');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
 }
 
 /**

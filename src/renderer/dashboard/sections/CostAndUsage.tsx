@@ -13,6 +13,7 @@
  * live detail and the threshold settings themselves.
  */
 import { useEffect, useState, type JSX } from 'react';
+import { SETTINGS_LIMITS } from '../../../shared/defaults.js';
 import type { Settings } from '../../../shared/types.js';
 import { call } from '../call.js';
 import { useInFlight } from '../inFlight.js';
@@ -24,6 +25,11 @@ import type { SessionState, UsageState } from '../state.js';
  * `Number('')` is 0, so an emptied cost field passed `cost >= 0` and was saved
  * as a $0 threshold, which warns at the first cent of every session. An empty
  * field is a missing value, not zero.
+ *
+ * The ranges are the ones the settings schema enforces (`SETTINGS_LIMITS`), so
+ * the user gets a sentence naming them rather than the router's generic
+ * refusal. A typed zero time is in range: the cost meter reads it as "no time
+ * warning" (FR-031).
  */
 export function parseThresholds(
   costUsd: string,
@@ -32,7 +38,9 @@ export function parseThresholds(
   if (costUsd.trim() === '' || timeMinutes.trim() === '') return null;
   const cost = Number(costUsd);
   const minutes = Number(timeMinutes);
-  if (!Number.isFinite(cost) || cost < 0 || !Number.isFinite(minutes) || minutes <= 0) return null;
+  const { costUsd: costRange, timeMinutes: timeRange } = SETTINGS_LIMITS;
+  if (!(cost >= costRange.min && cost <= costRange.max)) return null;
+  if (!(minutes >= timeRange.min && minutes <= timeRange.max)) return null;
   return { costUsd: cost, timeMinutes: minutes };
 }
 
@@ -65,7 +73,11 @@ export function CostAndUsage({
     setSaved(false);
     const thresholds = parseThresholds(costUsd, timeMinutes);
     if (!thresholds) {
-      setError('Give a cost of zero or more and a time of more than zero minutes.');
+      const { costUsd: costRange, timeMinutes: timeRange } = SETTINGS_LIMITS;
+      setError(
+        `Give a cost from ${costRange.min} to ${costRange.max} dollars and a time from ` +
+          `${timeRange.min} to ${timeRange.max} minutes.`,
+      );
       return;
     }
     const result = await call('config:set', { thresholds });
@@ -128,7 +140,7 @@ export function CostAndUsage({
         id="threshold-time"
         data-testid="threshold-time"
         type="number"
-        min="1"
+        min="0"
         step="5"
         value={timeMinutes}
         onChange={(e) => setTimeMinutes(e.target.value)}
