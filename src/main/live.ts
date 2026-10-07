@@ -81,6 +81,8 @@ interface OpenStream {
   session: SttSession;
   choice: ProviderChoice;
   sampleRate: number;
+  /** The session's `sentBytes` already billed, so each byte is billed once. */
+  billedBytes: number;
 }
 
 /** A transcription target that is usable: in the registry, and with a key. */
@@ -108,7 +110,12 @@ export interface LiveSessionLoopOptions {
   audio: Pick<AudioSupervisor, 'start' | 'stop'>;
   trigger: Pick<
     TriggerMachine,
-    'start' | 'stop' | 'handleTranscript' | 'handleEndpoint' | 'noteGenerationSettled'
+    | 'start'
+    | 'stop'
+    | 'handleTranscript'
+    | 'handleEndpoint'
+    | 'handleSpeechStart'
+    | 'noteGenerationSettled'
   >;
   sessions: Pick<SessionManager, 'appendTurn' | 'appendSuggestion'>;
   cost: Pick<CostMeter, 'noteAudio' | 'noteGeneration'>;
@@ -345,7 +352,6 @@ export class LiveSessionLoop {
     const stream = this.streams.get(chunk.source);
     if (!stream) return;
 
-    const before = stream.session.sentBytes;
     stream.session.push(chunk);
 
     // What the adapter says it put on the wire, when it can say. A streaming
@@ -353,12 +359,31 @@ export class LiveSessionLoop {
     // bound (ADR-027), and billing the chunk we handed over would charge an
     // outage as though it had been transcribed. An adapter with no counter
     // sends everything it is handed, so the chunk itself is the measurement.
-    const seconds =
-      before === undefined || stream.session.sentBytes === undefined
-        ? chunkSeconds(chunk.pcm.byteLength, stream.sampleRate)
-        : chunkSeconds(stream.session.sentBytes - before, stream.sampleRate);
+    if (stream.session.sentBytes === undefined) {
+      this.options.cost.noteAudio(
+        chunk.source,
+        stream.choice,
+        chunkSeconds(chunk.pcm.byteLength, stream.sampleRate),
+      );
+      return;
+    }
+    this.billSent(chunk.source, stream);
+  }
 
-    this.options.cost.noteAudio(chunk.source, stream.choice, seconds);
+  /**
+   * Bills what the adapter has sent since the last bill.
+   *
+   * Measured against the last bill, not around one `push`: an adapter can send
+   * outside `push`, as a socket flushing its queue on reconnect or a batch
+   * model posting a queued window, and around-the-push billing never saw that
+   * audio (FR-103).
+   */
+  private billSent(source: TranscriptSource, stream: OpenStream): void {
+    const sent = stream.session.sentBytes;
+    if (sent === undefined) return;
+    const seconds = chunkSeconds(sent - stream.billedBytes, stream.sampleRate);
+    stream.billedBytes = sent;
+    this.options.cost.noteAudio(source, stream.choice, seconds);
   }
 
   /* ---------------------------------------------------------------- *
@@ -518,6 +543,9 @@ export class LiveSessionLoop {
       session.on('endpoint', () => {
         this.options.trigger.handleEndpoint();
       });
+      session.on('speech', () => {
+        this.options.trigger.handleSpeechStart();
+      });
     }
 
     // A socket that dies after it opened is reported here, after the adapter's
@@ -535,6 +563,7 @@ export class LiveSessionLoop {
       session,
       choice: target.choice,
       sampleRate: target.sampleRate,
+      billedBytes: session.sentBytes ?? 0,
     });
   }
 
@@ -749,154 +778,177 @@ export class LiveSessionLoop {
     let attemptsBegun = 0;
 
     try {
-      await this.options.health.runFor('llm', async (target) => {
-        const bound = this.targetFor(target, primary, backup, 'language model');
-        /** This attempt's begin, held back because a card was already up. */
-        let heldBegin: Parameters<GenerationEvents['onBegin']>[0] | null = null;
-        /** The card this attempt's lines go to, once it has replaced a salvage. */
-        let cardId: string | null = null;
-        let linesThisAttempt = false;
+      await this.options.health.runFor(
+        'llm',
+        async (target) => {
+          const bound = this.targetFor(target, primary, backup, 'language model');
+          /** This attempt's begin, held back because a card was already up. */
+          let heldBegin: Parameters<GenerationEvents['onBegin']>[0] | null = null;
+          /** The card this attempt's lines go to, once it has replaced a salvage. */
+          let cardId: string | null = null;
+          let linesThisAttempt = false;
 
-        const outcome = await this.generate(
-          bound.provider,
-          {
-            generationId: turn.generationId,
-            question: turn.question,
-            candidateContext: turn.candidateContext,
-            chunks,
-            choice: bound.choice,
-            systemPrompt: this.systemPrompt ?? undefined,
-          },
-          turn.signal,
-          {
-            onBegin: (payload) => {
-              // This callback runs once per **attempt**, not once per
-              // generation: `runFor` re-enters the closure on each retry and on
-              // a failover (`health.ts` `runPrimaryWithLadder`, `runOnBackup`,
-              // `runDegraded`), and `runGeneration` calls `onBegin` at the top
-              // of every one. What it does here turns on whether a card is
-              // still on the overlay.
-              //
-              // Card still up: the retry's begin is held back, and checkpoint 1
-              // is not re-run. Re-running the clock stranded a card once -- a
-              // retry past the threshold marked the whole generation stale,
-              // which suppressed the real `onEnd` while the cancellation that
-              // clears a card lives in `onLine` alone. An already-begun
-              // generation is checkpoint 2's to catch. The held begin is sent
-              // only if this attempt produces a bullet (`onLine`).
-              //
-              // Card gone, because an empty failed attempt resolved
-              // `'cancelled'` and `reduceCards` removed it: this begin is the
-              // one that puts the retry's answer back on screen, so it is a
-              // first begin in every sense and checkpoint 1 applies to it.
-              attemptsBegun += 1;
-              if (cardUp) {
-                heldBegin = payload;
-                return;
-              }
-              if (Date.now() - turn.firedAt > STALE_DISCARD_MS) {
-                stale = true;
-                return;
-              }
-              cardUp = true;
-              this.options.onSuggestion({ channel: 'suggestion:begin', payload });
+          const outcome = await this.generate(
+            bound.provider,
+            {
+              generationId: turn.generationId,
+              question: turn.question,
+              candidateContext: turn.candidateContext,
+              chunks,
+              choice: bound.choice,
+              systemPrompt: this.systemPrompt ?? undefined,
             },
-            onLine: (payload) => {
-              if (stale) return;
-              if (!firstLineChecked) {
-                firstLineChecked = true;
-                if (Date.now() - turn.firedAt > STALE_DISCARD_MS) {
-                  stale = true;
-                  if (cardUp) {
-                    cardUp = false;
-                    staleEndSent = true;
-                    this.options.onSuggestion({
-                      channel: 'suggestion:end',
-                      payload: { generationId: turn.generationId, status: 'cancelled' },
-                    });
-                  }
+            turn.signal,
+            {
+              onBegin: (payload) => {
+                // This callback runs once per **attempt**, not once per
+                // generation: `runFor` re-enters the closure on each retry and on
+                // a failover (`health.ts` `runPrimaryWithLadder`, `runOnBackup`,
+                // `runDegraded`), and `runGeneration` calls `onBegin` at the top
+                // of every one. What it does here turns on whether a card is
+                // still on the overlay.
+                //
+                // Card still up: the retry's begin is held back, and checkpoint 1
+                // is not re-run. Re-running the clock stranded a card once -- a
+                // retry past the threshold marked the whole generation stale,
+                // which suppressed the real `onEnd` while the cancellation that
+                // clears a card lives in `onLine` alone. An already-begun
+                // generation is checkpoint 2's to catch. The held begin is sent
+                // only if this attempt produces a bullet (`onLine`).
+                //
+                // Card gone, because an empty failed attempt resolved
+                // `'cancelled'` and `reduceCards` removed it: this begin is the
+                // one that puts the retry's answer back on screen, so it is a
+                // first begin in every sense and checkpoint 1 applies to it.
+                attemptsBegun += 1;
+                if (cardUp) {
+                  heldBegin = payload;
                   return;
                 }
-              }
-              // A retry's first bullet, with an earlier attempt's salvage on
-              // screen: the retry's answer replaces the salvage on a card of
-              // its own. Its lines restart at index 0, and `reduceCards` keeps
-              // a card's first line for an index, so sent to the salvaged card
-              // they merged two answers into one. A begin for a new `cardId`
-              // replaces the held card in one commit (`ADR-047`, ADR-053). Only
-              // here and not at the begin: a retry that fails with nothing to
-              // show keeps the salvage (ADR-052).
-              if (!linesThisAttempt && heldBegin !== null && linesShown) {
-                cardId = `${heldBegin.cardId}#${String(attemptsBegun)}`;
+                if (Date.now() - turn.firedAt > STALE_DISCARD_MS) {
+                  stale = true;
+                  return;
+                }
+                cardUp = true;
+                this.options.onSuggestion({ channel: 'suggestion:begin', payload });
+              },
+              onLine: (payload) => {
+                if (stale) return;
+                if (!firstLineChecked) {
+                  firstLineChecked = true;
+                  if (Date.now() - turn.firedAt > STALE_DISCARD_MS) {
+                    stale = true;
+                    if (cardUp) {
+                      cardUp = false;
+                      staleEndSent = true;
+                      this.options.onSuggestion({
+                        channel: 'suggestion:end',
+                        payload: { generationId: turn.generationId, status: 'cancelled' },
+                      });
+                    }
+                    return;
+                  }
+                }
+                // A retry's first bullet, with an earlier attempt's salvage on
+                // screen: the retry's answer replaces the salvage on a card of
+                // its own. Its lines restart at index 0, and `reduceCards` keeps
+                // a card's first line for an index, so sent to the salvaged card
+                // they merged two answers into one. A begin for a new `cardId`
+                // replaces the held card in one commit (`ADR-047`, ADR-053). Only
+                // here and not at the begin: a retry that fails with nothing to
+                // show keeps the salvage (ADR-052).
+                if (!linesThisAttempt && heldBegin !== null && linesShown) {
+                  cardId = `${heldBegin.cardId}#${String(attemptsBegun)}`;
+                  this.options.onSuggestion({
+                    channel: 'suggestion:begin',
+                    payload: { ...heldBegin, cardId },
+                  });
+                }
+                linesThisAttempt = true;
+                linesShown = true;
                 this.options.onSuggestion({
-                  channel: 'suggestion:begin',
-                  payload: { ...heldBegin, cardId },
+                  channel: 'suggestion:line',
+                  payload: cardId === null ? payload : { ...payload, cardId },
                 });
-              }
-              linesThisAttempt = true;
-              linesShown = true;
-              this.options.onSuggestion({
-                channel: 'suggestion:line',
-                payload: cardId === null ? payload : { ...payload, cardId },
-              });
+              },
+              onEnd: (payload) => {
+                if (stale || staleEndSent) return;
+                if (payload.status === 'cancelled') {
+                  // A failed attempt with nothing of its own to show must not
+                  // clear an earlier attempt's salvage. A newer turn's
+                  // cancellation still clears it, because FR-054 removes that
+                  // partial output.
+                  if (linesShown && !turn.signal.aborted) return;
+                  // `reduceCards` removes a cancelled card, so this end is what
+                  // leaves the overlay empty and what a retry's own begin has to
+                  // fill again.
+                  cardUp = false;
+                }
+                this.options.onSuggestion({ channel: 'suggestion:end', payload });
+              },
             },
-            onEnd: (payload) => {
-              if (stale || staleEndSent) return;
-              if (payload.status === 'cancelled') {
-                // A failed attempt with nothing of its own to show must not
-                // clear an earlier attempt's salvage. A newer turn's
-                // cancellation still clears it, because FR-054 removes that
-                // partial output.
-                if (linesShown && !turn.signal.aborted) return;
-                // `reduceCards` removes a cancelled card, so this end is what
-                // leaves the overlay empty and what a retry's own begin has to
-                // fill again.
-                cardUp = false;
-              }
-              this.options.onSuggestion({ channel: 'suggestion:end', payload });
-            },
-          },
-        );
-        // An attempt that produced no bullet must not replace an earlier
-        // attempt's salvage. A failed one salvaged nothing of its own: `onEnd`
-        // keeps the salvage on the overlay, and recording the empty attempt
-        // instead wrote the card the user read as `'cancelled'` with no bullets.
-        // A cancelled one still marks the entry `'cancelled'`, and keeps the
-        // bullets shown before the cancel, as a cancelled single attempt does.
-        // A stale generation keeps its salvage too, because its entry records
-        // what was produced rather than what was shown (TASK-062).
-        const salvage = settled.outcome;
-        if (outcome.bullets.length > 0 || salvage === null || salvage.bullets.length === 0) {
-          settled.outcome = outcome;
-          settled.choice = bound.choice;
-        } else if (turn.signal.aborted) {
-          settled.outcome = { ...salvage, status: 'cancelled' };
-        }
+          );
+          // An attempt that produced no bullet must not replace an earlier
+          // attempt's salvage. A failed one salvaged nothing of its own: `onEnd`
+          // keeps the salvage on the overlay, and recording the empty attempt
+          // instead wrote the card the user read as `'cancelled'` with no bullets.
+          // A cancelled one still marks the entry `'cancelled'`, and keeps the
+          // bullets shown before the cancel, as a cancelled single attempt does.
+          // A stale generation keeps its salvage too, because its entry records
+          // what was produced rather than what was shown (TASK-062).
+          const salvage = settled.outcome;
+          if (outcome.bullets.length > 0 || salvage === null || salvage.bullets.length === 0) {
+            settled.outcome = outcome;
+            settled.choice = bound.choice;
+          } else if (turn.signal.aborted) {
+            settled.outcome = { ...salvage, status: 'cancelled' };
+          }
 
-        // Accounted per **attempt**, under a key of its own. `noteGeneration`
-        // replaces by id, which is right for one request reporting usage twice
-        // (ADR-033) and wrong across a retry or a failover: both requests are
-        // billable, possibly at different rates, and keying them alike would
-        // drop everything the earlier attempts cost.
-        attempt += 1;
-        this.options.cost.noteGeneration(
-          `${turn.generationId}#${String(attempt)}`,
-          bound.choice,
-          outcome.usage,
-        );
+          // Accounted per **attempt**, under a key of its own. `noteGeneration`
+          // replaces by id, which is right for one request reporting usage twice
+          // (ADR-033) and wrong across a retry or a failover: both requests are
+          // billable, possibly at different rates, and keying them alike would
+          // drop everything the earlier attempts cost.
+          attempt += 1;
+          this.options.cost.noteGeneration(
+            `${turn.generationId}#${String(attempt)}`,
+            bound.choice,
+            outcome.usage,
+          );
 
-        // `runGeneration` returns a provider failure rather than throwing it,
-        // because the overlay has no error state (`FR-076`). The health machine
-        // still has to see it or a dead key would never fail over, so it is
-        // rethrown here and the salvaged outcome is kept above (`FR-100`).
-        if (outcome.error) throw outcome.error;
-        return outcome;
-      });
+          // `runGeneration` returns a provider failure rather than throwing it,
+          // because the overlay has no error state (`FR-076`). The health machine
+          // still has to see it or a dead key would never fail over, so it is
+          // rethrown here and the salvaged outcome is kept above (`FR-100`).
+          if (outcome.error) throw outcome.error;
+          return outcome;
+        },
+        // The turn's signal ends a backoff sleep, so a turn a newer one replaced
+        // stops waiting at once instead of holding the newer one back (FR-054).
+        { signal: turn.signal },
+      );
     } catch (err) {
-      this.options.onError('the language model failed', err);
+      // An abort is a newer turn replacing this one, not a provider failure.
+      if (!turn.signal.aborted) this.options.onError('the language model failed', err);
+      // Aborted in a backoff with an earlier attempt's salvage still on the
+      // overlay. No later attempt runs to send the cancelled end, and the newer
+      // turn may never send a begin of its own (gated out, or non-actionable),
+      // so this end is what removes the partial output (FR-054, ADR-047).
+      if (turn.signal.aborted && cardUp) {
+        cardUp = false;
+        this.options.onSuggestion({
+          channel: 'suggestion:end',
+          payload: { generationId: turn.generationId, status: 'cancelled' },
+        });
+      }
     }
 
-    const outcome = settled.outcome;
+    // A turn aborted in a backoff has no later attempt to report the cancel,
+    // so its entry is marked here, as a cancelled attempt would mark it.
+    const outcome =
+      turn.signal.aborted && settled.outcome?.error
+        ? { ...settled.outcome, status: 'cancelled' as const }
+        : settled.outcome;
     if (!outcome) return;
 
     // Appended before the meter is told, and awaited, so the next turn's
@@ -1016,6 +1068,9 @@ export class LiveSessionLoop {
         } catch (err) {
           this.options.onError(`the ${source} transcription stream did not close cleanly`, err);
         }
+        // A batch adapter posts its tail inside `close`, so that audio is billed
+        // here, after the close, or never.
+        this.billSent(source, stream);
       }),
     );
 

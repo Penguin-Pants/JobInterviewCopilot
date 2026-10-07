@@ -79,8 +79,9 @@ class FakeSttSession implements SttSession {
 
   on(e: 'transcript', h: (t: TranscriptEvent) => void): void;
   on(e: 'endpoint', h: () => void): void;
+  on(e: 'speech', h: () => void): void;
   on(e: 'error', h: (err: ProviderError) => void): void;
-  on(e: 'transcript' | 'endpoint' | 'error', h: (...args: never[]) => void): void {
+  on(e: 'transcript' | 'endpoint' | 'speech' | 'error', h: (...args: never[]) => void): void {
     if (e === 'transcript') this.transcript.push(h as (t: TranscriptEvent) => void);
   }
 

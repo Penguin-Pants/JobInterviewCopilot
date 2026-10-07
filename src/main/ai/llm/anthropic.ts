@@ -13,6 +13,7 @@ import {
   classifyStatus,
   fetchStreamPost,
   isAbortError,
+  isProviderError,
   parseJson,
   parseSse,
   type StreamPost,
@@ -119,9 +120,16 @@ async function* stream(
 
   let res;
   try {
-    res = await post(ANTHROPIC_MESSAGES_URL, { headers: headers(key), body, signal });
+    res = await post(ANTHROPIC_MESSAGES_URL, {
+      providerId: 'anthropic',
+      headers: headers(key),
+      body,
+      signal,
+    });
   } catch (err) {
     if (isAbortError(err)) return;
+    // A timeout the transport raised is already classified (sse.ts).
+    if (isProviderError(err)) throw err;
     throw providerError('anthropic', 'network', 'Anthropic could not be reached.');
   }
 

@@ -20,6 +20,7 @@ import { createAnthropicProvider, validateAnthropicKey } from '../../src/main/ai
 import { createOpenAiLlmProvider } from '../../src/main/ai/llm/openai.js';
 import { registerAllLlmProviders } from '../../src/main/ai/llm/index.js';
 import { parseSse } from '../../src/main/ai/llm/sse.js';
+import { providerError } from '../../src/main/ai/stt.js';
 import { MAX_CARD_LINES } from '../../src/main/ai/llm/lineBuffer.js';
 import { SYSTEM_PROMPT } from '../../src/main/ai/prompt.js';
 import { clearRuntimeLlmModels, registerRuntimeLlmModels } from '../../src/shared/registry/llm.js';
@@ -262,6 +263,21 @@ describe('the OpenAI adapter handles the same failures', () => {
     await expect(
       drain(provider.generate(request('openai', 'gpt-4o-mini'), neverAbort())),
     ).rejects.toMatchObject({ class: 'network', retryable: true });
+  });
+
+  it('keeps a transport timeout a timeout, for both adapters', async () => {
+    // The transport classifies a silent provider as `timeout`. Rewrapping it as
+    // "could not be reached" hid the one class that says the request was sent.
+    const timedOut = () => Promise.reject(providerError('openai', 'timeout', 'no first byte'));
+    const openai = createOpenAiLlmProvider({ keyFor: () => 'k', post: timedOut });
+    const anthropic = createAnthropicProvider({ keyFor: () => 'k', post: timedOut });
+
+    await expect(
+      drain(openai.generate(request('openai', 'gpt-4o-mini'), neverAbort())),
+    ).rejects.toMatchObject({ class: 'timeout', retryable: true });
+    await expect(
+      drain(anthropic.generate(request('anthropic', 'claude-haiku-4-5-20251001'), neverAbort())),
+    ).rejects.toMatchObject({ class: 'timeout', retryable: true });
   });
 
   it('a transport aborted before the response arrives ends the stream quietly', async () => {

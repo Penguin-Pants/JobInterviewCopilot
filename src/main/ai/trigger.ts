@@ -22,6 +22,17 @@ export type TriggerState =
  */
 export const CONFIDENCE_THRESHOLD = 0.55;
 
+/**
+ * How long a native endpoint that arrived before its text is held (FR-050).
+ *
+ * OpenAI's server VAD sends `speech_stopped` and then the completed transcript
+ * once the utterance is transcribed, normally well inside this window
+ * (unverified assumption; check against `openai-realtime.ts` frame timings in
+ * a live session). An endpoint that outlives it ends nothing: the local gap
+ * then ends the turn, which costs `turnEndGapMs` and never splits a question.
+ */
+export const ENDPOINT_HOLD_MS = 2000;
+
 /** The trigger subset of `Settings`, plus the capability read off the STT model. */
 export interface TriggerConfig {
   /** `settings.trigger.turnEndGapMs`. Never hard-coded (FR-050, TC-159). */
@@ -184,10 +195,24 @@ export class TriggerMachine {
    * before it emits the completed item, so the signal can land while the
    * machine is still in `LISTENING` with nothing to evaluate. Dropping it there
    * would make the user wait a full local gap after the provider had already
-   * observed the silence. It is held for exactly the next interviewer final and
-   * cleared by anything that ends a turn.
+   * observed the silence. It is held for exactly the next interviewer final, for
+   * at most `ENDPOINT_HOLD_MS`, and cleared by anything that ends a turn.
    */
   private endpointPending = false;
+  private endpointHoldHandle: unknown = null;
+  /** A native endpoint arrived since the last evaluation, held or spent. */
+  private endpointSeen = false;
+  /**
+   * The last turn was evaluated by the local gap before its native endpoint
+   * arrived, and no interviewer speech has been heard since: no text, and no
+   * provider speech start (`handleSpeechStart`). An empty endpoint
+   * in this state ends the turn already evaluated, not a new one (FR-050).
+   *
+   * Correlated with what the provider sent, not with elapsed time. A time rule
+   * also dropped the endpoint of a rapid follow-up, whose `speech_stopped`
+   * comes before its own text in the OpenAI order.
+   */
+  private endpointOwed = false;
 
   private candidateTurns: string[] = [];
   /** The candidate segments accumulated for the turn being assembled. */
@@ -280,6 +305,10 @@ export class TriggerMachine {
     }
     if (this.state === 'IDLE' || this.state === 'PAUSED') return;
 
+    // New interviewer speech. An endpoint from now on ends this speech, so the
+    // evaluated turn's late endpoint is no longer expected.
+    if (event.text.trim() !== '') this.endpointOwed = false;
+
     if (event.isFinal) {
       this.turnText = appendSegment(this.turnText, event.text);
       this.lastFinalConfidence = event.confidence;
@@ -292,7 +321,7 @@ export class TriggerMachine {
     // A native endpoint that arrived before the text it ends fires now rather
     // than waiting out a gap the provider has already observed (FR-050).
     if (event.isFinal && this.endpointPending) {
-      this.endpointPending = false;
+      this.dropHeldEndpoint();
       this.clearGap();
       this.enterAwaitingIfIdle();
       this.evaluateTurn();
@@ -338,8 +367,10 @@ export class TriggerMachine {
     // Only the last `candidateContextTurns` are ever rendered, so the array is
     // trimmed here rather than growing for the length of the interview.
     const keep = Math.max(this.config.candidateContextTurns, 0);
+    // Sliced from an explicit start: `slice(-keep)` with `keep` 0 is `slice(0)`,
+    // which kept every turn.
     if (this.candidateTurns.length > keep) {
-      this.candidateTurns = this.candidateTurns.slice(-keep);
+      this.candidateTurns = this.candidateTurns.slice(this.candidateTurns.length - keep);
     }
   }
 
@@ -358,7 +389,16 @@ export class TriggerMachine {
     this.lastFinalConfidence = undefined;
     this.candidateText = '';
     this.candidateTurns = [];
+    this.endpointSeen = false;
+    this.endpointOwed = false;
+    this.dropHeldEndpoint();
+  }
+
+  private dropHeldEndpoint(): void {
     this.endpointPending = false;
+    if (this.endpointHoldHandle === null) return;
+    this.timers.clearTimeout(this.endpointHoldHandle);
+    this.endpointHoldHandle = null;
   }
 
   /**
@@ -375,9 +415,22 @@ export class TriggerMachine {
 
     // No text yet. The provider saw the silence before it sent the transcript
     // that ends with it, which is the order OpenAI's server VAD uses. Hold the
-    // signal for the next final rather than discarding it.
+    // signal for the next final rather than discarding it, but only briefly.
     if (this.turnText === '') {
+      // The local gap ended the last turn first and nothing was said since, so
+      // this endpoint ends that turn. Held, it fired the next question's first
+      // words alone. It is spent here, so a later endpoint is held as usual.
+      if (this.endpointOwed) {
+        this.endpointOwed = false;
+        return;
+      }
+      this.dropHeldEndpoint();
+      this.endpointSeen = true;
       this.endpointPending = true;
+      this.endpointHoldHandle = this.timers.setTimeout(() => {
+        this.endpointHoldHandle = null;
+        this.endpointPending = false;
+      }, ENDPOINT_HOLD_MS);
       return;
     }
 
@@ -385,8 +438,20 @@ export class TriggerMachine {
     // a generation streams the state is `GENERATING`, and refusing there made
     // the second question of a pair wait out a full local gap after the
     // provider had already reported the silence (FR-050).
+    this.endpointSeen = true;
     this.clearGap();
     this.evaluateTurn();
+  }
+
+  /**
+   * The provider heard new interviewer speech start. An endpoint from now on
+   * ends that speech, so the evaluated turn's late endpoint is no longer
+   * expected. OpenAI sends no text before a follow-up's `speech_stopped`, so
+   * this is the only sign of new speech it gives in time (FR-050).
+   */
+  handleSpeechStart(): void {
+    if (this.state === 'IDLE' || this.state === 'PAUSED') return;
+    this.endpointOwed = false;
   }
 
   /** `Ctrl+Shift+P` (FR-053, ASM-002). */
@@ -413,7 +478,9 @@ export class TriggerMachine {
     // a pre-pause low-confidence final gate the first turn after the resume
     // whose own finals carry no `confidence` field (FR-113).
     this.lastFinalConfidence = undefined;
-    this.endpointPending = false;
+    this.dropHeldEndpoint();
+    this.endpointSeen = false;
+    this.endpointOwed = false;
     this.transition('PAUSED');
     this.onOverlayIdle?.();
   }
@@ -429,7 +496,9 @@ export class TriggerMachine {
     if (this.state !== 'PAUSED') return;
     this.turnText = '';
     this.lastFinalConfidence = undefined;
-    this.endpointPending = false;
+    this.dropHeldEndpoint();
+    this.endpointSeen = false;
+    this.endpointOwed = false;
     this.transition('LISTENING');
   }
 
@@ -461,6 +530,7 @@ export class TriggerMachine {
   dispose(): void {
     this.clearGap();
     this.clearCandidateGap();
+    this.dropHeldEndpoint();
     this.abortInFlight();
   }
 
@@ -504,7 +574,10 @@ export class TriggerMachine {
     const confidence = this.lastFinalConfidence;
     this.turnText = '';
     this.lastFinalConfidence = undefined;
-    this.endpointPending = false;
+    this.dropHeldEndpoint();
+    // Only a turn the gap ended before any endpoint arrived can still get one.
+    this.endpointOwed = !this.endpointSeen;
+    this.endpointSeen = false;
 
     if (!passesTurnGuard(question, this.config)) {
       // A short turn is not an error and never reaches the overlay. Back to
