@@ -1399,6 +1399,26 @@ describe('TASK-050 Dashboard actions run one at a time', () => {
 });
 
 /**
+ * Audit regression: the packaged smoke test printed window URLs and the .exe
+ * path, which name the install path. Nothing may log a path outside
+ * `userData` (AGENTS.md), and CI output is a log.
+ */
+describe('the packaged smoke test prints no checkout path', () => {
+  const script = readFileSync('scripts/smoke-packaged.mjs', 'utf8');
+
+  it('redacts every report and every failure message', () => {
+    expect(script).toMatch(/\$\{redactPaths\(tail\)\}/);
+    expect(script).toMatch(/\$\{redactPaths\(err instanceof Error/);
+    expect(script).toContain('${redactPaths(unpackedDir)}');
+  });
+
+  it('names the executable by its file name only', () => {
+    expect(script).not.toMatch(/\$\{exe\}/);
+    expect(script).toContain('${basename(exe)}');
+  });
+});
+
+/**
  * NFR-010: no control that can become unavailable while it has focus uses
  * native `disabled`. Chromium moves focus to the page body and does not give it
  * back, which is the defect `inFlight.ts` fixed for five buttons. These scans
