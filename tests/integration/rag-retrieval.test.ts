@@ -1,4 +1,4 @@
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { RetrievalUnavailableError } from '../../src/main/rag.js';
 import { describe, expect, it } from 'vitest';
 import { makeHarness, NOTES_MD, RESUME_MD } from '../fakes/rag-harness.js';
@@ -158,5 +158,73 @@ describe('the query cache tracks ingests', () => {
     expect((await h.engine.query(profile.id, 'Acme Corp', 5)).length).toBeGreaterThan(0);
     await h.engine.deleteDocument(profile.id, record!.id);
     expect(await h.engine.query(profile.id, 'Acme Corp', 5)).toEqual([]);
+  });
+});
+
+describe('the query cache stays off the live path (NFR-001, TC-078)', () => {
+  it('is rebuilt after an ingest, so the next query reads nothing from disk', async () => {
+    const h = makeHarness();
+    const profile = await h.engine.createProfile('Acme');
+    await h.engine.importDocuments(profile.id, [
+      h.writeSourceFile('resume.md', RESUME_MD),
+      h.writeSourceFile('notes.md', NOTES_MD),
+    ]);
+    await h.engine.drain();
+
+    const real = h.engine.store.readChunkSet.bind(h.engine.store);
+    let reads = 0;
+    h.engine.store.readChunkSet = (profileId: string, docId: string) => {
+      reads += 1;
+      return real(profileId, docId);
+    };
+
+    // The ingest cleared the cache, and the first question after it decoded
+    // every vector file synchronously on the main thread, inside the budget.
+    expect((await h.engine.query(profile.id, 'Acme Corp', 3)).length).toBeGreaterThan(0);
+    expect(reads).toBe(0);
+  });
+
+  it('reads back exactly the vectors that were written', async () => {
+    const h = makeHarness();
+    const profile = await h.engine.createProfile('Acme');
+    const [record] = await h.engine.importDocuments(profile.id, [
+      h.writeSourceFile('resume.md', RESUME_MD),
+    ]);
+    const set = (await h.engine.store.readChunkSet(profile.id, record!.id))!;
+    const vectors = Float32Array.from(set.vectors, (_, i) => (i % 7) - 3.25 + i / 1024);
+
+    expect(h.engine.store.writeChunkSet(profile.id, record!.id, set.chunks, vectors)).toBe(true);
+
+    const reread = (await h.engine.store.readChunkSet(profile.id, record!.id))!;
+    expect(Array.from(reread.vectors)).toEqual(Array.from(vectors));
+  });
+
+  it('a vectors file that cannot be read is a failure, not an empty result', async () => {
+    const h = makeHarness();
+    const profile = await h.engine.createProfile('Acme');
+    const [record] = await h.engine.importDocuments(profile.id, [
+      h.writeSourceFile('resume.md', RESUME_MD),
+    ]);
+    await h.engine.drain();
+    const vectors = h.engine.store.vectorsPath(profile.id, record!.id);
+    rmSync(vectors);
+    mkdirSync(vectors);
+    // An unrelated change clears the cache, so the next query has to read.
+    await h.engine.importDocuments(profile.id, [h.writeSourceFile('notes.md', NOTES_MD)]);
+
+    await expect(h.engine.query(profile.id, 'Acme Corp', 3)).rejects.toThrow(
+      RetrievalUnavailableError,
+    );
+  });
+
+  it('a pair deleted under the reader is skipped, not thrown', async () => {
+    const h = makeHarness();
+    const profile = await h.engine.createProfile('Acme');
+    const [record] = await h.engine.importDocuments(profile.id, [
+      h.writeSourceFile('resume.md', RESUME_MD),
+    ]);
+    rmSync(h.engine.store.vectorsPath(profile.id, record!.id));
+
+    await expect(h.engine.store.readChunkSet(profile.id, record!.id)).resolves.toBeNull();
   });
 });

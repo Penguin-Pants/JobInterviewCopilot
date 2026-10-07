@@ -455,12 +455,12 @@ export class LiveSessionLoop {
    * A stream reported a terminal failure, after its adapter's own reconnect
    * ladder (ADR-036).
    *
-   * A streaming adapter's `open` resolves once it has asked its socket to
-   * connect, so a refused, revoked or dropped connection surfaces here rather
-   * than out of `openPair`. Without this the health machine never learned that
-   * the provider had failed: `runFor` had already recorded the open as a
-   * success, so no retry and no failover ever ran and the session transcribed
-   * nothing for the rest of the interview.
+   * A streaming adapter's `open` rejects when its socket is refused (ADR-056),
+   * so a failure at open reaches `runFor` directly. A socket that dies after it
+   * opened, or a provider error frame mid-session, surfaces here instead.
+   * Without this the health machine never learned that the provider had
+   * failed: no retry and no failover ran and the session transcribed nothing
+   * for the rest of the interview.
    *
    * The failure is raised **into** the machine so its policy decides what
    * happens next, and the pair is re-opened on whatever it then serves.
@@ -540,9 +540,9 @@ export class LiveSessionLoop {
       });
     }
 
-    // A streaming adapter's `open` resolves as soon as it has asked its socket
-    // to connect; a refused or revoked connection is reported here, after the
-    // adapter's own reconnect ladder has been spent. Logging it was not enough:
+    // A socket that dies after it opened is reported here, after the adapter's
+    // own reconnect ladder has been spent, as is a provider error frame that
+    // ends the session (ADR-056). Logging it was not enough:
     // the health machine never saw the failure, so a dead primary never failed
     // over and the session simply transcribed nothing for the rest of the
     // interview (ADR-036).
