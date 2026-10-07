@@ -1403,6 +1403,26 @@ describe('TASK-050 Dashboard actions run one at a time', () => {
 });
 
 /**
+ * Audit regression: the E2E launcher and the packaged smoke test took
+ * `app.firstWindow()` as the Dashboard. The overlay's window can register
+ * first, and the wait for the Dashboard then timed out inside the overlay.
+ */
+describe('the Dashboard window is found by its URL, never by order', () => {
+  it('no E2E helper or smoke script takes the first window as the Dashboard', () => {
+    for (const file of [
+      'tests/e2e/launch.ts',
+      'tests/e2e/app.spec.ts',
+      'tests/e2e/dashboard.spec.ts',
+      'tests/e2e/overlay.spec.ts',
+      'scripts/smoke-packaged.mjs',
+    ]) {
+      const code = readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+      expect(code, file).not.toMatch(/\.firstWindow\(\)/);
+    }
+  });
+});
+
+/**
  * Audit regression: the packaged smoke test printed window URLs and the .exe
  * path, which name the install path. Nothing may log a path outside
  * `userData` (AGENTS.md), and CI output is a log.
