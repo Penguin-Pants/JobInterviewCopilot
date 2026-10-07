@@ -1095,7 +1095,7 @@ describe('TASK-044 live loop wiring', () => {
     const text = source();
     const supervisor = text.slice(
       text.indexOf('audio = new AudioSupervisor('),
-      text.indexOf('registerAllSttProviders()'),
+      text.indexOf('registerAllSttProviders('),
     );
     expect(supervisor).toContain('live.handleChunk(chunk)');
     expect(supervisor).not.toMatch(/onChunk: \(\) => \{\}/);
@@ -1134,6 +1134,27 @@ describe('TASK-044 live loop wiring', () => {
     const loop = handler.indexOf('await live.start(');
     expect(pushed).toBeGreaterThan(-1);
     expect(pushed).toBeLessThan(loop);
+  });
+
+  /**
+   * NFR-001, ADR-011. Fired and forgotten, the warm-up raced the loop, so the
+   * first question could still pay the ONNX load. It is awaited after the
+   * state push, which must not wait for it (FR-088), and before the loop.
+   */
+  it('session:start loads the cached model before the loop comes up', () => {
+    const handler = handlerBody('session:start');
+    const pushed = handler.indexOf('pushSessionState()');
+    const warm = handler.indexOf('await rag.warmModel(');
+    const loop = handler.indexOf('await live.start(');
+    expect(handler).not.toContain('void rag.warmModel(');
+    expect(warm, 'the warm-up must be awaited').toBeGreaterThan(-1);
+    expect(pushed).toBeLessThan(warm);
+    expect(warm).toBeLessThan(loop);
+  });
+
+  /** A profile switched to is warmed then, so session start rarely waits at all. */
+  it('profile:activate warms the newly active profile', () => {
+    expect(handlerBody('profile:activate')).toContain('rag.warmModel(id)');
   });
 
   /**

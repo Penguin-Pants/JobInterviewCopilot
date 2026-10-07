@@ -3,7 +3,6 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { makeHarness, NOTES_MD, RESUME_MD, type Harness } from '../fakes/rag-harness.js';
 import { KB_CEILING } from '../../src/shared/defaults.js';
-import { withinReembedCeiling } from '../../src/main/rag.js';
 
 /**
  * TASK-025. TC-079 watcher behavior, TC-140 adoption and reconciliation,
@@ -71,7 +70,7 @@ describe('TC-079 watcher behavior', () => {
     await fire(h, profile.id, 'unlink', path);
 
     expect(h.engine.store.get(profile.id)!.documents).toEqual([]);
-    expect(h.engine.store.readChunkSet(profile.id, docId)).toBeNull();
+    expect(await h.engine.store.readChunkSet(profile.id, docId)).toBeNull();
     expect(await h.engine.query(profile.id, 'Acme Corp', 3)).toEqual([]);
   });
 
@@ -177,7 +176,7 @@ describe('TC-140 adoption and reconciliation', () => {
     expect(documents[0]!.originalFileName).toBe('dropped-by-explorer.md');
     expect(documents[0]!.docType).toBe('resume'); // auto-tagged
     expect(documents[0]!.state).toBe('ready'); // embedded
-    expect(h.engine.store.readChunkSet(profile.id, documents[0]!.id)).not.toBeNull();
+    expect(await h.engine.store.readChunkSet(profile.id, documents[0]!.id)).not.toBeNull();
   });
 
   it('resets a document left in converting or embedding to pending and re-processes it', async () => {
@@ -361,7 +360,7 @@ describe('FR-067 reconciliation revalidates what it trusts', () => {
     await h.engine.reconcile(profile.id);
 
     expect(h.engine.store.findDocument(profile.id, docId)).not.toBeNull();
-    expect(h.engine.store.readChunkSet(profile.id, docId)).not.toBeNull();
+    expect(await h.engine.store.readChunkSet(profile.id, docId)).not.toBeNull();
   });
 
   it('still removes a record whose file is genuinely gone', async () => {
@@ -376,7 +375,7 @@ describe('FR-067 reconciliation revalidates what it trusts', () => {
     await h.engine.reconcile(profile.id);
 
     expect(h.engine.store.findDocument(profile.id, docId)).toBeNull();
-    expect(h.engine.store.readChunkSet(profile.id, docId)).toBeNull();
+    expect(await h.engine.store.readChunkSet(profile.id, docId)).toBeNull();
   });
 });
 
@@ -396,13 +395,13 @@ describe('TC-141 chunk and vector integrity', () => {
     const bytes = readFileSync(vectorsPath);
     writeFileSync(vectorsPath, bytes.subarray(0, bytes.byteLength - stride));
 
-    expect(h.engine.store.readChunkSet(profile.id, record.id)).toBeNull();
+    expect(await h.engine.store.readChunkSet(profile.id, record.id)).toBeNull();
 
     h.embedder.reset();
     await h.engine.reconcile(profile.id);
 
     expect(h.embedder.embeddedCount).toBeGreaterThan(0);
-    const repaired = h.engine.store.readChunkSet(profile.id, record.id)!;
+    const repaired = (await h.engine.store.readChunkSet(profile.id, record.id))!;
     expect(repaired.chunks).toHaveLength(record.chunkCount);
     expect(repaired.vectors).toHaveLength(record.chunkCount * h.embedder.info().dimensions);
   });
@@ -432,9 +431,9 @@ describe('TC-141 chunk and vector integrity', () => {
 
     writeFileSync(h.engine.store.chunksPath(profile.id, record.id), '{ not json');
 
-    expect(h.engine.store.readChunkSet(profile.id, record.id)).toBeNull();
+    expect(await h.engine.store.readChunkSet(profile.id, record.id)).toBeNull();
     await h.engine.reconcile(profile.id);
-    expect(h.engine.store.readChunkSet(profile.id, record.id)).not.toBeNull();
+    expect(await h.engine.store.readChunkSet(profile.id, record.id)).not.toBeNull();
   });
 
   it('refuses to write a pair whose counts already disagree', async () => {
@@ -492,12 +491,12 @@ describe('TC-141 a torn pair the row count cannot see', () => {
     // text by the old text's vectors, forever, with no error anywhere.
     writeFileSync(h.engine.store.vectorsPath(profile.id, record.id), vectorsBefore);
 
-    expect(h.engine.store.readChunkSet(profile.id, record.id)).toBeNull();
+    expect(await h.engine.store.readChunkSet(profile.id, record.id)).toBeNull();
 
     h.embedder.reset();
     await h.engine.reconcile(profile.id);
     expect(h.embedder.embeddedCount).toBeGreaterThan(0);
-    expect(h.engine.store.readChunkSet(profile.id, record.id)).not.toBeNull();
+    expect(await h.engine.store.readChunkSet(profile.id, record.id)).not.toBeNull();
   });
 
   it('discards a chunks.json whose rows are not chunks', async () => {
@@ -514,7 +513,7 @@ describe('TC-141 a torn pair the row count cannot see', () => {
       JSON.stringify({ pairId: 'x'.repeat(32), chunks: [1, 2, 3] }),
     );
 
-    expect(h.engine.store.readChunkSet(profile.id, record.id)).toBeNull();
+    expect(await h.engine.store.readChunkSet(profile.id, record.id)).toBeNull();
     const fresh = makeHarness({ userDataDir: h.dir }, h.embedder);
     await expect(fresh.engine.query(profile.id, 'Acme Corp', 3)).resolves.toEqual([]);
   });
@@ -566,7 +565,8 @@ describe('TC-163 the re-embed SLA is bounded', () => {
     const elapsed = Date.now() - started;
 
     const record = h.engine.store.get(profile.id)!.documents[0]!;
-    expect(withinReembedCeiling(RESUME_MD.length, record.chunkCount)).toBe(true);
+    expect(Buffer.byteLength(RESUME_MD)).toBeLessThanOrEqual(KB_CEILING.maxBytes);
+    expect(record.chunkCount).toBeLessThanOrEqual(KB_CEILING.maxChunks);
     expect((await h.engine.query(profile.id, 'Acme Corp', 3)).length).toBeGreaterThan(0);
     // The real budget is 5 s of wall clock with a real model; with the fake
     // embedder this only proves the pipeline does not sit on the event.
@@ -588,7 +588,6 @@ describe('TC-163 the re-embed SLA is bounded', () => {
     const record = h.engine.store.get(profile.id)!.documents[0]!;
     expect(record.state).toBe('ready');
     expect(record.chunkCount).toBeGreaterThan(KB_CEILING.maxChunks);
-    expect(withinReembedCeiling(sections.join('\n\n').length, record.chunkCount)).toBe(false);
     expect(h.progress.filter((p) => p.docId === record.id).map((p) => p.state)).toEqual([
       'converting',
       'embedding',
@@ -600,8 +599,5 @@ describe('TC-163 the re-embed SLA is bounded', () => {
     expect(KB_CEILING.maxBytes).toBe(2 * 1024 * 1024);
     expect(KB_CEILING.maxChunks).toBe(200);
     expect(KB_CEILING.reembedTargetMs).toBe(5000);
-    expect(withinReembedCeiling(KB_CEILING.maxBytes, KB_CEILING.maxChunks)).toBe(true);
-    expect(withinReembedCeiling(KB_CEILING.maxBytes + 1, KB_CEILING.maxChunks)).toBe(false);
-    expect(withinReembedCeiling(KB_CEILING.maxBytes, KB_CEILING.maxChunks + 1)).toBe(false);
   });
 });

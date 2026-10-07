@@ -6,7 +6,7 @@ import { RagEngine, RetrievalUnavailableError } from '../../src/main/rag.js';
 import { modelDirectoryFor, XenovaEmbedder } from '../../src/main/rag/embed.js';
 import { EMBEDDING_MODEL } from '../../src/shared/registry/embedding.js';
 import { FakeEmbedder } from '../fakes/embedder.js';
-import { makeHarness, RESUME_MD } from '../fakes/rag-harness.js';
+import { makeHarness, ManualWatcher, RESUME_MD } from '../fakes/rag-harness.js';
 
 /**
  * TASK-022. TC-161 fresh install with no network and no model, and the
@@ -236,5 +236,54 @@ describe('TC-071 ingestion is blocked until the model is ready', () => {
     expect(h.engine.getModelState()).toEqual({ kind: 'ready' });
     await h.engine.ensureModelReady();
     expect(embedder.ensureReadyCalls).toBe(1);
+  });
+});
+
+describe('a cached model is warm before the first question (NFR-001, ADR-011)', () => {
+  /** A relaunch on the same userData, with the model on disk but not in memory. */
+  async function relaunch(): Promise<{ engine: RagEngine; embedder: FakeEmbedder; id: string }> {
+    const h = makeHarness();
+    const profile = await h.engine.createProfile('Acme');
+    await h.engine.importDocuments(profile.id, [h.writeSourceFile('resume.md', RESUME_MD)]);
+    await h.engine.stop();
+    const embedder = new FakeEmbedder();
+    const engine = new RagEngine({
+      userDataDir: h.dir,
+      embedder,
+      watcherFactory: () => new ManualWatcher(),
+    });
+    return { engine, embedder, id: profile.id };
+  }
+
+  it('loads the model in the background, not inside the first query', async () => {
+    const { engine, embedder, id } = await relaunch();
+    // Every document is a cache hit, so reconciliation never loads the model.
+    await engine.start();
+    expect(embedder.log).toEqual([]);
+
+    await engine.warmModel(id);
+    await engine.query(id, 'Acme Corp', 3);
+
+    // Without the warm-up the query's own `embed` paid for loading ONNX and
+    // the tokenizer, inside the question-to-suggestion budget.
+    expect(embedder.log).toEqual(['load', 'embed']);
+  });
+
+  it('never downloads: a model that is not on disk stays where it is', async () => {
+    const { engine, embedder, id } = await relaunch();
+    embedder.ready = false;
+
+    await engine.warmModel(id);
+
+    expect(embedder.ensureReadyCalls).toBe(0);
+  });
+
+  it('leaves the model alone for a profile with nothing to search', async () => {
+    const { engine, embedder } = await relaunch();
+    const empty = await engine.createProfile('Empty');
+
+    await engine.warmModel(empty.id);
+
+    expect(embedder.ensureReadyCalls).toBe(0);
   });
 });

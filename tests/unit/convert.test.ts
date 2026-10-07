@@ -1,31 +1,21 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { Worker } from 'node:worker_threads';
+import { describe, expect, it, vi } from 'vitest';
 import {
   ConversionError,
   convertToMarkdown,
+  runConversionWorker,
   pdfTextToMarkdown,
   sourceFormatFor,
   stripPageSeparators,
   SUPPORTED_EXTENSIONS,
 } from '../../src/main/rag/convert.js';
+import { extractMarkdown } from '../../src/main/rag/extract.js';
 import { buildDocx, buildPdf } from '../fakes/documents.js';
 
 /**
  * TASK-020. The pure half of the converter, plus the failure paths that turn a
  * parser error into a Dashboard sentence (TC-060, TC-063).
  */
-
-function tmp(): string {
-  return mkdtempSync(join(tmpdir(), 'icp-convert-'));
-}
-
-function write(name: string, contents: string | Buffer): string {
-  const path = join(tmp(), name);
-  writeFileSync(path, contents);
-  return path;
-}
 
 describe('sourceFormatFor', () => {
   it('maps the supported extensions, case-insensitively', () => {
@@ -102,38 +92,118 @@ describe('stripPageSeparators', () => {
 describe('convertToMarkdown failure paths (TC-063)', () => {
   it('reads .md as-is, byte for byte', async () => {
     const source = '# Heading\n\nBody with  odd   spacing.\n';
-    const result = await convertToMarkdown(write('a.md', source), 'md');
+    const result = await convertToMarkdown(Buffer.from(source), 'md');
     expect(result).toEqual({ markdown: source, extractionQuality: 'native' });
   });
 
   it('turns a corrupt PDF into a ConversionError with a sentence', async () => {
-    const path = write('broken.pdf', Buffer.from('%PDF-1.4\nnot actually a pdf'));
+    const bytes = Buffer.from('%PDF-1.4\nnot actually a pdf');
 
-    await expect(convertToMarkdown(path, 'pdf')).rejects.toBeInstanceOf(ConversionError);
-    await expect(convertToMarkdown(path, 'pdf')).rejects.toThrow(/PDF text extraction failed/);
+    await expect(convertToMarkdown(bytes, 'pdf')).rejects.toBeInstanceOf(ConversionError);
+    await expect(convertToMarkdown(bytes, 'pdf')).rejects.toThrow(/PDF text extraction failed/);
   }, 30000);
 
   it('names the scanned-PDF case rather than reporting an empty document', async () => {
     // A valid PDF with no text operators: what a scan without OCR looks like.
-    const path = write('scanned.pdf', buildPdf([]));
-
-    await expect(convertToMarkdown(path, 'pdf')).rejects.toThrow(/no text layer/i);
+    await expect(convertToMarkdown(buildPdf([]), 'pdf')).rejects.toThrow(/no text layer/i);
   }, 30000);
 
   it('turns a corrupt DOCX into a ConversionError', async () => {
-    const path = write('broken.docx', Buffer.from('PK not a real zip'));
+    const bytes = Buffer.from('PK not a real zip');
 
-    await expect(convertToMarkdown(path, 'docx')).rejects.toBeInstanceOf(ConversionError);
-    await expect(convertToMarkdown(path, 'docx')).rejects.toThrow(/DOCX conversion failed/);
+    await expect(convertToMarkdown(bytes, 'docx')).rejects.toBeInstanceOf(ConversionError);
+    await expect(convertToMarkdown(bytes, 'docx')).rejects.toThrow(/DOCX conversion failed/);
   }, 30000);
 
   it('names an empty DOCX rather than producing an empty document', async () => {
-    const path = write('empty.docx', buildDocx([{ text: '' }]));
+    await expect(convertToMarkdown(buildDocx([{ text: '' }]), 'docx')).rejects.toThrow(
+      /contains no text/i,
+    );
+  }, 30000);
+});
 
-    await expect(convertToMarkdown(path, 'docx')).rejects.toThrow(/contains no text/i);
+describe('a conversion is bounded by its signal (ADR-055)', () => {
+  it('stops a DOCX conversion when the signal aborts', async () => {
+    const controller = new AbortController();
+    const converting = convertToMarkdown(
+      buildDocx([{ text: 'Experience', heading: 2 }, { text: 'Acme Corp' }]),
+      'docx',
+      controller.signal,
+    );
+    // mammoth took no signal, so the conversion finished anyway after its
+    // document had failed, and could overlap a retry of the same file.
+    controller.abort();
+
+    await expect(converting).rejects.toThrow(/stopped/);
   }, 30000);
 
-  it('rejects a missing file rather than returning empty Markdown', async () => {
-    await expect(convertToMarkdown(join(tmp(), 'nope.md'), 'md')).rejects.toThrow();
+  it('starts no parse for a signal aborted before the parser was ready', async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    // The PDF abort listener was added after the parser loaded. An abort in
+    // that window does not replay its event, so the parse ran unbounded.
+    await expect(
+      convertToMarkdown(buildPdf(['# Company', 'Founded in 2015.']), 'pdf', controller.signal),
+    ).rejects.toThrow(/stopped/);
+  }, 30000);
+
+  it('starts no worker when the signal is already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    let spawned = 0;
+
+    await expect(
+      runConversionWorker(
+        () => {
+          spawned += 1;
+          return new Worker('', { eval: true });
+        },
+        Buffer.from('x'),
+        'docx',
+        controller.signal,
+      ),
+    ).rejects.toBeInstanceOf(ConversionError);
+    expect(spawned).toBe(0);
   });
+
+  it('terminates a parse that never yields', async () => {
+    // A worker that spins forever and counts, standing in for a parser stuck
+    // in a loop. Only terminating the thread stops it.
+    const counter = new Int32Array(new SharedArrayBuffer(4));
+    const spin = `
+      const { workerData } = require('node:worker_threads');
+      for (;;) Atomics.add(workerData, 0, 1);
+    `;
+    const controller = new AbortController();
+    const converting = runConversionWorker(
+      () => new Worker(spin, { eval: true, workerData: counter }),
+      Buffer.from('x'),
+      'docx',
+      controller.signal,
+    );
+    await vi.waitFor(() => expect(Atomics.load(counter, 0)).toBeGreaterThan(0));
+    controller.abort();
+    await expect(converting).rejects.toThrow(/stopped/);
+
+    const settled = Atomics.load(counter, 0);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(Atomics.load(counter, 0)).toBe(settled);
+  });
+
+  it('reports a worker that exits without a reply as a ConversionError', async () => {
+    await expect(
+      runConversionWorker(
+        () => new Worker('process.exit(3)', { eval: true }),
+        Buffer.from('x'),
+        'pdf',
+      ),
+    ).rejects.toThrow(/stopped unexpectedly/);
+  });
+
+  it('extracts a DOCX in this thread, for the worker to call', async () => {
+    const result = await extractMarkdown(buildDocx([{ text: 'Body text here.' }]), 'docx');
+    expect(result.markdown).toContain('Body text here');
+    expect(result.extractionQuality).toBe('native');
+  }, 30000);
 });

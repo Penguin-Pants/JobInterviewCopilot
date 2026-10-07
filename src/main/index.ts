@@ -341,8 +341,12 @@ async function bootstrap(): Promise<void> {
   });
 
   // The STT adapters must be registered before any key is validated or any
-  // session is opened. Registration is pure; it opens no socket.
-  registerAllSttProviders();
+  // session is opened. Registration is pure; it opens no socket. The logger is
+  // passed in because the adapters may not import a module that writes to disk
+  // (NFR-002); a dropped frame or a throwing listener is reported here.
+  registerAllSttProviders({
+    log: (level, message, ...detail) => getLogger().log(level, message, ...detail),
+  });
 
   // The LLM adapters, the same way (TASK-032). `secrets.peek` rather than a
   // copied key, so a credential replaced mid-session takes effect on the next
@@ -413,8 +417,8 @@ async function bootstrap(): Promise<void> {
   installPermissionHandler((contents) => audioHost.owns(contents));
 
   // The knowledge base engine (CMP-06). Constructing it is cheap and touches no
-  // network: the embedding model is only loaded when a document is ingested
-  // (ADR-011).
+  // network: the embedding model is loaded when a document is ingested, or
+  // from disk by `warmModel`, never here (ADR-011).
   rag = new RagEngine({
     userDataDir: userData,
     onDocumentProgress: (docId, state, percent) =>
@@ -582,6 +586,9 @@ async function startKnowledgeBase(): Promise<void> {
     // exist, and `rag.start()` reconciles every document behind it.
     markProfilesReady();
     await rag.start();
+    // In the background: a cached model then loads now rather than inside the
+    // first question's budget. It never downloads (NFR-001, ADR-011).
+    void rag.warmModel(config.get().activeProfileId);
   } catch (err) {
     getLogger().error('the knowledge base failed to start', err);
   } finally {
@@ -1695,6 +1702,12 @@ function registerIpcHandlers(): void {
       // sockets up takes long enough that a Dashboard told afterwards would
       // render the session as inactive for the whole of it (FR-088).
       pushSessionState();
+      // Awaited after the push and before the loop. Fired and forgotten, it
+      // raced the loop, and the first question could still pay the ONNX load
+      // inside its budget. It never downloads and never throws, and it is a
+      // no-op when the model is already in memory, which `profile:activate`
+      // and startup normally make true (NFR-001, ADR-011).
+      if (profile) await rag.warmModel(profile.id);
       await live.start(active.profileId);
 
       return { sessionId: active.id };
@@ -1815,6 +1828,9 @@ function registerIpcHandlers(): void {
   router.handle('profile:activate', ({ id }) => {
     assertProfile(id);
     config.set({ activeProfileId: id });
+    // In the background, so a session started next finds the model in memory.
+    // It never downloads (NFR-001, ADR-011).
+    void rag.warmModel(id);
     return { ok: true as const };
   });
 

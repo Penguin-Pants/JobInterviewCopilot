@@ -223,8 +223,10 @@ interface LlmModelDescriptor {
 | `elevenlabs` | `scribe-v2-realtime` | yes | partial then committed | committed segments | WebSocket, `pcm_16000` |
 | `openai` | `whisper-1` | **no** | no | no | REST, 4 s buffers |
 
-Every streaming model above accepts 16 kHz, 16-bit, mono linear PCM, which is
-exactly what `FR-041` produces. No per-provider resampling is needed.
+`FR-041` produces 16 kHz, 16-bit, mono linear PCM. Deepgram and ElevenLabs
+accept it as is. OpenAI realtime accepts `pcm16` only at 24 kHz, so its adapter
+upsamples (ADR-056). That is the one per-provider resampling step, and it lives
+inside the adapter.
 
 **v1 LLM registry contents.** `anthropic` with `claude-haiku-4-5-20251001`
 (default), `openai` with `gpt-4o-mini`. No new providers in v1.
@@ -289,14 +291,17 @@ the file.
 which documents exist. `profile.json` is a derived index. A file that appears in
 `kb/` outside `doc:import` is adopted, not ignored. A file that disappears takes
 its record, chunks and vectors with it. A startup reconciliation pass runs before
-the watcher starts and resets any document left in a non-terminal state.
+the watcher starts and resets any document left in a non-terminal state. The
+pass ends by removing derived files that no record owns. When `profile.json`
+exists but cannot be read, every write is refused, so the pass does nothing and
+is tried again after 5 s, 30 s, 2 min and 10 min, then left to the next launch.
 
 ```ts
 interface Profile {
-  id: string;            // uuid v4
+  id: string;            // uuid v4, the folder name; never read from the file
   name: string;
   createdAt: string;     // ISO 8601
-  kbPath: string;        // absolute
+  kbPath: string;        // absolute, recomputed on every read
   documents: DocumentRecord[];
 }
 
@@ -304,9 +309,9 @@ interface DocumentRecord {
   id: string;                  // uuid v4
   profileId: string;
   originalFileName: string;
-  originalPath: string;        // inside kb/
+  originalPath: string;        // kb/<originalFileName>, recomputed on every read
   sourceFormat: 'md' | 'pdf' | 'docx';
-  derivedMarkdownPath: string | null;   // null when sourceFormat === 'md'
+  derivedMarkdownPath: string | null;   // null when sourceFormat === 'md'; else recomputed on read
   docType: DocType;
   docTypeSource: 'auto' | 'user';       // a user override is never re-guessed
   contentHash: string;                  // sha256 of original bytes
@@ -587,19 +592,38 @@ All three v1 streaming providers take the gap as a parameter, so all three are
 |---|---|
 | `deepgram:nova-*` | `endpointing` on the socket URL |
 | `openai:gpt-4o*-transcribe` | `turn_detection.silence_duration_ms`, server VAD |
-| `elevenlabs:scribe-v2-realtime` | `min_silence_duration_ms`, VAD commit strategy |
+| `elevenlabs:scribe-v2-realtime` | `vad_silence_threshold_secs` (gap / 1000, clamped to 0.3 to 3.0), VAD commit strategy |
 
 `openai:whisper-1` has no turn signal at all and is `false`.
 
 **Two properties of this interface, added in TASK-044 and recorded as ADR-036.**
 
-`open` resolving does **not** mean the provider accepted the connection. Every
-streaming adapter asks its socket to connect and returns; a refused, revoked or
-dropped connection arrives later on the `error` event, after the adapter's own
-reconnect ladder. The caller must therefore treat that event as the provider
-failing, not as a line for the log: `CMP-15` raises it into `CMP-12` and
-re-opens the pair on whatever the machine then serves. Without that, a dead
-primary never failed over, because the open had already been recorded a success.
+A streaming `open` resolves only once the provider has accepted the socket: on
+the socket's `open` event, or on the session-start frame for a provider that
+sends one (ElevenLabs `session_started`). It rejects with a classified
+`ProviderError` if the socket closes first, the provider sends an error frame,
+or nothing answers within 10 s; a refused upgrade is classified by its HTTP
+status, so a revoked key is `auth` and is not retried. A failure in the same
+tick as the accept, before the caller has the session, also rejects. A session
+that never opened does not run its own reconnect ladder, because `CMP-12` owns
+the retry and the failover (ADR-056). After a successful open, a dropped socket
+runs the adapter's reconnect ladder. Each reconnect must be accepted the same
+way within the same 10 s, and audio waits in the bounded queue until it is; a
+reconnect not accepted in time is closed and the ladder goes on. A failure
+after that ladder, or a provider error frame that ends the session, arrives on
+the `error` event. The caller
+must treat that event as the provider failing, not as a line for the log:
+`CMP-15` raises it into `CMP-12` and re-opens the pair on whatever the machine
+then serves (ADR-036).
+
+A provider error frame is mapped to a class (auth, rate-limit, server, client)
+and ends the session. A frame the adapter cannot read is dropped and logged
+without its contents. A listener that throws is logged as an error and the
+other listeners still get the event; it never reaches `CMP-12`.
+
+The `ws` transport bounds the HTTP upgrade at 10 s and pings an open socket
+every 15 s. A peer that misses a pong is terminated, which is an ordinary
+abnormal close, so the reconnect ladder runs (ADR-056).
 
 `sentBytes` is what the session has actually put on the wire, and it is optional.
 `SocketSttSession` drops queued chunks during an outage rather than buffering
@@ -610,7 +634,12 @@ caller bills the chunk it handed over.
 
 `close` on a **batch** adapter posts its remaining buffer and answers from it,
 so a caller must stay routable until `close` resolves. Clearing the route first
-discarded the last thing said before Stop.
+discarded the last thing said before Stop. A **streaming** adapter with a close
+frame (Deepgram `CloseStream`, an ElevenLabs final commit) does the same: it
+keeps routing transcripts until the provider closes the socket or 1.5 s
+passes, and only then closes (ADR-056). An answer frame does not end the
+drain, because an ElevenLabs commit answer does not say which commit it
+answers. No chunk is accepted once `close` is called.
 
 Adapter notes:
 - `deepgram`: WebSocket with `encoding=linear16`, `sample_rate=16000`,
@@ -623,11 +652,23 @@ Adapter notes:
   configured with the chosen model and server VAD. Deltas map to
   `isFinal: false`, completed items to `isFinal: true`, the VAD stop event to
   `endpoint`. Audio goes up base64-encoded inside an
-  `input_audio_buffer.append` frame; this is the one v1 provider that does not
-  take raw binary frames.
+  `input_audio_buffer.append` frame. `pcm16` input must be 24 kHz, so the
+  adapter upsamples the worker's 16 kHz PCM with a stateful 2:3 linear
+  interpolation before encoding; `sentBytes` still counts the 16 kHz bytes it
+  was handed (ADR-056). There is no close frame.
 - `elevenlabs`: Scribe v2 Realtime WebSocket, input format `pcm_16000`, commit
-  strategy `vad`. Partial transcripts map to `isFinal: false`, committed
-  segments to `isFinal: true` and to `endpoint`.
+  strategy `vad`, `vad_silence_threshold_secs` from the gap. The protocol is the
+  official SDK's: every frame is JSON keyed by `message_type`. Audio goes up
+  base64 in `input_audio_chunk` frames (`audio_base_64`, `commit: false`,
+  `sample_rate: 16000`). `open` waits for `session_started`.
+  `partial_transcript` maps to `isFinal: false`, `committed_transcript` to
+  `isFinal: true` and to `endpoint`. Error frames (`auth_error`,
+  `quota_exceeded`, `rate_limited` and the rest) end the session with their
+  class. A rejected payload (`invalid_request`, `input_error`,
+  `chunk_size_exceeded`) is classed `server`, not `client`: it is not a
+  credential fault, so it must not put the key into `config-required`.
+  `close` sends an empty chunk with `commit: true` and drains until the
+  provider closes or the drain bound passes (ADR-056).
 - `openai` `whisper-1`: the one non-streaming model. Buffers 4000 ms, posts an
   in-memory WAV body, emits one final event per request, never an interim, never
   an endpoint. Held to `NFR-017`. (ADR-022)
@@ -2100,7 +2141,9 @@ src/
       prompt.ts        TASK-031, section 6 assembled once for both providers
     overlay-gate.ts    FR-008, ADR-016, the overlay readiness buffer
     rag.ts             CMP-06 facade
-    rag/convert.ts     TASK-020, pdf-parse and mammoth to Markdown
+    rag/convert.ts     TASK-020, runs each conversion in a worker thread (ADR-055)
+    rag/convert-worker.ts  TASK-020, the worker entry, bundled as its own file
+    rag/extract.ts     TASK-020, pdf-parse and mammoth to Markdown
     rag/chunk.ts       TASK-021, pure and deterministic
     rag/embed.ts       TASK-022, @xenova/transformers, cache key, model gate
     rag/store.ts       TASK-020/022/024, profiles, chunks, vectors, the top-k scan
