@@ -137,6 +137,14 @@ export class CredentialHealth {
   /** Set when probes have passed twice. The switch waits for a clean boundary. */
   private switchBackPending = false;
 
+  /**
+   * Every primary ladder asleep in a backoff, with the attempt it is on.
+   *
+   * Per ladder, not one flag for the key: STT and the LLM can share a key and
+   * climb at once, and the end of one ladder must not hide the other's retry.
+   */
+  private readonly retrying = new Map<symbol, number>();
+
   /** Grows while a capability is DEGRADED, capped. Reset by its next success. */
   private readonly degradedAttempts = new Map<string, number>();
 
@@ -209,18 +217,28 @@ export class CredentialHealth {
     return this.onBackup.size > 0 ? { kind: 'using-backup' } : { kind: 'using-primary' };
   }
 
+  /**
+   * The state the badge shows: `settled`, or `RETRYING` while any ladder is in
+   * a backoff and nothing worse is true of the key.
+   */
+  private shown(): HealthState {
+    const settled = this.settled();
+    if (settled.kind !== 'using-primary' || this.retrying.size === 0) return settled;
+    return { kind: 'retrying', attempt: Math.max(...this.retrying.values()) };
+  }
+
   /** One capability is in `DEGRADED`. The newest reason is the one shown. */
   private markDegraded(scope: string, reason: string): void {
     this.degraded.delete(scope);
     this.degraded.set(scope, reason);
-    this.setState(this.settled());
+    this.setState(this.shown());
   }
 
   /** A success on the primary ends this capability's DEGRADED, and no other's. */
   private primaryAnswered(run: Run): void {
     this.degraded.delete(run.scope);
     this.degradedAttempts.delete(run.scope);
-    this.setState(this.settled());
+    this.setState(this.shown());
   }
 
   private clearScopes(): void {
@@ -231,10 +249,12 @@ export class CredentialHealth {
 
   private async runPrimaryWithLadder<T>(fn: (t: Target) => Promise<T>, run: Run): Promise<T> {
     let lastError: ProviderError | null = null;
+    const ladder = Symbol('ladder');
 
     for (let attempt = 0; attempt <= MAX_RETRY_ATTEMPTS; attempt += 1) {
       try {
         const result = await fn('primary');
+        this.retrying.delete(ladder);
         this.primaryAnswered(run);
         return result;
       } catch (err) {
@@ -247,21 +267,23 @@ export class CredentialHealth {
         if (attempt === MAX_RETRY_ATTEMPTS) break;
 
         // Shown only while nothing worse is true of the key, so a retry here
-        // does not hide another capability's DEGRADED or backup.
-        if (this.settled().kind === 'using-primary') {
-          this.setState({ kind: 'retrying', attempt: attempt + 1 });
-        }
+        // does not hide another capability's DEGRADED or backup (`shown`).
+        this.retrying.set(ladder, attempt + 1);
+        this.setState(this.shown());
         try {
           await this.backoff(RETRY_BACKOFF_MS[attempt] ?? DEGRADED_MAX_BACKOFF_MS, run.signal);
         } catch (abort) {
           // An aborted ladder must not leave RETRYING behind: the classifier
-          // runs only on USING_PRIMARY, and no retry is running any more.
-          if (this.state.kind === 'retrying') this.setState(this.settled());
+          // runs only on USING_PRIMARY. Another ladder still climbing on this
+          // key keeps it, because its retry is still running.
+          this.retrying.delete(ladder);
+          this.setState(this.shown());
           throw abort;
         }
       }
     }
 
+    this.retrying.delete(ladder);
     const error = lastError ?? unknownError(this.credentialId);
     return this.failOver(error, fn, run);
   }
@@ -273,7 +295,7 @@ export class CredentialHealth {
   ): Promise<T> {
     if (run.hasBackup) {
       this.onBackup.add(run.scope);
-      this.setState(this.settled());
+      this.setState(this.shown());
       this.startProbing();
       return this.runOnBackup(fn);
     }

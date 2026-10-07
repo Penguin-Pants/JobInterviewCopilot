@@ -681,6 +681,41 @@ describe('a backoff sleep ends when the run is aborted', () => {
     expect(states.at(-1)).toBe('using-primary');
   });
 
+  it('keeps showing a retry while another ladder on the key is still climbing', async () => {
+    // Audit regression: STT and the LLM share the key and both sleep in a
+    // backoff. Aborting the LLM turn reset the key to USING_PRIMARY, which hid
+    // the STT retry and let the classifier send to the failing key.
+    const sleep = vi.fn(neverWakes);
+    const h = new CredentialHealth({
+      credentialId: 'openai',
+      hasBackup: false,
+      probe: () => Promise.resolve(true),
+      onChange: () => undefined,
+      deps: { ...testDeps().deps, sleep },
+    });
+    const llm = new AbortController();
+    const stt = new AbortController();
+    const llmRun = h.run(() => Promise.reject(err('server')), {
+      scope: 'llm',
+      signal: llm.signal,
+    });
+    const sttRun = h.run(() => Promise.reject(err('server')), {
+      scope: 'stt',
+      signal: stt.signal,
+    });
+    await vi.waitFor(() => {
+      expect(sleep).toHaveBeenCalledTimes(2);
+    });
+
+    llm.abort(new Error('a newer turn replaced this one'));
+    await expect(llmRun).rejects.toThrow('a newer turn replaced this one');
+    expect(h.current.kind).toBe('retrying');
+
+    stt.abort(new Error('the stream closed'));
+    await expect(sttRun).rejects.toThrow('the stream closed');
+    expect(h.current.kind).toBe('using-primary');
+  });
+
   it('passes the signal through runFor', async () => {
     const r = new ProviderHealthRegistry(
       () => undefined,

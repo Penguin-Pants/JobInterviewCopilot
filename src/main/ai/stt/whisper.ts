@@ -47,11 +47,14 @@ export const WHISPER_REQUEST_TIMEOUT_MS = 10_000;
 export const WHISPER_RETRY_DELAY_MS = 250;
 
 /**
- * Windows that may wait behind the request in flight. A slow provider must not
- * grow the backlog for the rest of the interview (ADR-027). When it is full the
- * oldest waiting window is dropped: it is the one least likely to still matter.
+ * Requests that may be open at once. A window is posted when it fills, not
+ * when the one before it answers: one at a time made the time between
+ * transcripts equal to the provider's latency, and past the trigger's window
+ * plus gap that read as silence and split one question in two. Three windows
+ * cover one request's timeout. Past the cap a new window is not sent, so a slow
+ * provider cannot grow the work for the rest of the interview (ADR-027).
  */
-export const WHISPER_MAX_QUEUED_WINDOWS = 2;
+export const WHISPER_MAX_IN_FLIGHT = 3;
 
 /**
  * How long `close` waits for the tail before it gives up on it. One request's
@@ -94,24 +97,17 @@ export class WhisperSttSession implements SttSession {
   private sent = 0;
 
   /**
-   * Full windows waiting for the request in flight, oldest first.
+   * Every window's result, delivered in the order the windows were spoken.
    *
-   * One request at a time, so windows are emitted in the order they were
-   * spoken. Concurrent requests emitted whichever answered first, and a slow
-   * window landed after the one that followed it.
+   * Requests run at once, so they answer in any order. Each window's delivery
+   * waits for the one before it, and a slow window no longer lands after the
+   * one that followed it. `close` waits on this for the tail (ADR-036): a batch
+   * model answers once per window, so the last thing said before Stop is
+   * sitting in a request that has not come back yet.
    */
-  private readonly queue: ArrayBuffer[][] = [];
-
-  /**
-   * The loop posting the queue, so `close` can wait for the tail.
-   *
-   * A batch model answers once per window, so the last thing said before Stop
-   * is sitting in a request that has not come back yet. Closing without waiting
-   * discarded it, and the final spoken segment of every interview went missing
-   * (ADR-036).
-   */
-  private draining: Promise<void> | null = null;
-  private current: AbortController | null = null;
+  private delivered: Promise<void> = Promise.resolve();
+  /** One per open request, so a failure or `close` can abort them all. */
+  private readonly controllers = new Set<AbortController>();
 
   private readonly handlers: Handlers = { transcript: [], error: [] };
 
@@ -143,9 +139,9 @@ export class WhisperSttSession implements SttSession {
   }
 
   /**
-   * PCM bytes posted, each window counted once (`FR-103`, ADR-036). A window
-   * dropped from a full backlog was never sent and is never billed; a retry
-   * resends audio already counted.
+   * PCM bytes posted (`FR-103`, ADR-036), counted per upload: a retry sends
+   * the window again, and the provider bills it again. A window refused at the
+   * cap, or dropped after a failure, was never sent and is never billed.
    */
   get sentBytes(): number {
     return this.sent;
@@ -158,65 +154,62 @@ export class WhisperSttSession implements SttSession {
     this.flush();
   }
 
-  /** Queues whatever is buffered and releases it. Safe to call with a partial buffer. */
+  /** Posts whatever is buffered and releases it. Safe to call with a partial buffer. */
   private flush(): void {
     if (this.buffer.length === 0) return;
-    // Hand the array off and replace it, so the queue holds the only reference
-    // and the buffer retains nothing.
-    this.queue.push(this.buffer);
+    // Hand the array off and replace it, so the request holds the only
+    // reference and the buffer retains nothing.
+    const window = this.buffer;
     this.buffer = [];
-    while (this.queue.length > WHISPER_MAX_QUEUED_WINDOWS) this.queue.shift();
-    this.draining ??= this.drain();
+    if (this.abandoned || this.inFlight >= WHISPER_MAX_IN_FLIGHT) return;
+    const result = this.transcribe(window);
+    this.delivered = this.delivered.then(async () => {
+      this.deliver(await result);
+    });
   }
 
-  private async drain(): Promise<void> {
-    try {
-      for (let window = this.queue.shift(); window; window = this.queue.shift()) {
-        if (this.abandoned) return;
-        await this.transcribe(window);
-      }
-    } finally {
-      // Cleared in the same step that finds the queue empty, so a window queued
-      // after it always starts a new loop rather than waiting behind a dead one.
-      this.draining = null;
-    }
-  }
-
-  private async transcribe(window: ArrayBuffer[]): Promise<void> {
+  /** One window, retried once on a transient failure. Never throws. */
+  private async transcribe(window: ArrayBuffer[]): Promise<Attempt | null> {
     this.inFlight += 1;
     try {
       const wav = encodeWav(window);
-      this.sent += window.reduce((bytes, pcm) => bytes + pcm.byteLength, 0);
-      let attempt = await this.attempt(wav);
+      const pcmBytes = window.reduce((bytes, pcm) => bytes + pcm.byteLength, 0);
+      let attempt = await this.attempt(wav, pcmBytes);
       // One retry for a transient failure. Raising it at once made the session
       // reopen both streams and lose this window over a single 429 or 5xx.
       if ('error' in attempt && attempt.error.retryable && !this.abandoned) {
         await new Promise((resolve) => setTimeout(resolve, WHISPER_RETRY_DELAY_MS));
-        if (this.abandoned) return;
-        attempt = await this.attempt(wav);
+        if (this.abandoned) return null;
+        attempt = await this.attempt(wav, pcmBytes);
       }
-      if (this.abandoned) return;
-      if ('error' in attempt) {
-        this.fail(attempt.error);
-        return;
-      }
-      if (attempt.text === '' || this.closed) return;
-      const event: TranscriptEvent = {
-        source: this.source,
-        text: attempt.text,
-        // Whisper has no interim state. Everything it returns is final.
-        isFinal: true,
-        timestamp: Date.now(),
-        providerId: this.choice.providerId,
-      };
-      for (const h of this.handlers.transcript) h(event);
+      return this.abandoned ? null : attempt;
     } finally {
       this.inFlight -= 1;
     }
   }
 
+  /** Emits one window's result, in its turn. */
+  private deliver(attempt: Attempt | null): void {
+    if (attempt === null || this.abandoned) return;
+    if ('error' in attempt) {
+      this.fail(attempt.error);
+      return;
+    }
+    if (attempt.text === '' || this.closed) return;
+    const event: TranscriptEvent = {
+      source: this.source,
+      text: attempt.text,
+      // Whisper has no interim state. Everything it returns is final.
+      isFinal: true,
+      timestamp: Date.now(),
+      providerId: this.choice.providerId,
+    };
+    for (const h of this.handlers.transcript) h(event);
+  }
+
   /** One request, bounded by `WHISPER_REQUEST_TIMEOUT_MS`. Never throws. */
-  private async attempt(wav: Uint8Array): Promise<Attempt> {
+  private async attempt(wav: Uint8Array, pcmBytes: number): Promise<Attempt> {
+    this.sent += pcmBytes;
     const form = new FormData();
     // A Blob, never a path and never a stream. Nothing here can touch disk.
     form.append('file', new Blob([wav as BlobPart], { type: 'audio/wav' }), 'audio.wav');
@@ -224,7 +217,7 @@ export class WhisperSttSession implements SttSession {
     form.append('response_format', 'text');
 
     const controller = new AbortController();
-    this.current = controller;
+    this.controllers.add(controller);
     const timedOut = providerError(
       this.choice.providerId,
       'timeout',
@@ -234,7 +227,7 @@ export class WhisperSttSession implements SttSession {
       controller.abort(timedOut);
     }, WHISPER_REQUEST_TIMEOUT_MS);
     // Raced as well as passed, so a transport that ignores the signal still
-    // cannot hold the queue.
+    // cannot hold delivery.
     const aborted = new Promise<never>((_, reject) => {
       controller.signal.addEventListener('abort', () => {
         reject(controller.signal.reason as Error);
@@ -260,56 +253,54 @@ export class WhisperSttSession implements SttSession {
           };
     } finally {
       clearTimeout(timer);
-      if (this.current === controller) this.current = null;
+      this.controllers.delete(controller);
     }
   }
 
   /**
-   * Raises a failure the retry did not cure, after stopping the queue.
+   * Raises a failure the retry did not cure, after stopping everything else.
    *
    * The handler starts the live loop's reopen, and the reopen closes this
-   * session, which waits for the drain. Left running, the drain posted the next
-   * waiting window, even after a terminal 401, so failover waited for it up to
-   * `WHISPER_CLOSE_TIMEOUT_MS`. The dropped windows were never sent, so they
-   * are never billed.
+   * session, which waits for delivery. Left running, the other requests held
+   * that close open, and more windows were posted even after a terminal 401,
+   * so failover waited up to `WHISPER_CLOSE_TIMEOUT_MS`.
    */
   private fail(err: ProviderError): void {
     if (this.closed) return;
-    this.abandoned = true;
-    this.queue.length = 0;
-    this.buffer = [];
+    this.abandon(new Error('An earlier window failed, so this one was abandoned.'));
     for (const h of this.handlers.error) h(err);
   }
 
+  /** Posts nothing more, drops the buffer and aborts every open request. */
+  private abandon(reason: Error): void {
+    this.abandoned = true;
+    this.buffer = [];
+    for (const controller of this.controllers) controller.abort(reason);
+  }
+
   /**
-   * Post the tail, wait for the queue to drain, then close (ADR-036).
+   * Post the tail, wait for every window to be delivered, then close (ADR-036).
    *
    * `closed` is set **after** the wait, not before it. Set first, it made
-   * `transcribe` discard the very response this flush exists to collect, so the
+   * delivery discard the very response this flush exists to collect, so the
    * last thing the interviewer said before Stop was posted, paid for, answered,
    * and thrown away.
    *
-   * The wait is bounded by `WHISPER_CLOSE_TIMEOUT_MS`. Past it, the queue is
-   * dropped and the request in flight aborted, so a provider that never answers
-   * cannot keep Stop, the transcript compaction and the session lock waiting.
+   * The wait is bounded by `WHISPER_CLOSE_TIMEOUT_MS`. Past it, every open
+   * request is aborted, so a provider that never answers cannot keep Stop, the
+   * transcript compaction and the session lock waiting.
    */
   async close(): Promise<void> {
     // The tail of the last turn is worth one more request, not worth dropping.
     this.flush();
-    const draining = this.draining;
-    if (draining) {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const expired = new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, WHISPER_CLOSE_TIMEOUT_MS);
-      });
-      await Promise.race([draining, expired]);
-      clearTimeout(timer);
-    }
-    this.abandoned = true;
-    this.queue.length = 0;
-    this.current?.abort(new Error('The session closed before OpenAI answered.'));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, WHISPER_CLOSE_TIMEOUT_MS);
+    });
+    await Promise.race([this.delivered, expired]);
+    clearTimeout(timer);
+    this.abandon(new Error('The session closed before OpenAI answered.'));
     this.closed = true;
-    this.buffer = [];
   }
 
   on(e: 'transcript', h: (t: TranscriptEvent) => void): void;

@@ -109,6 +109,10 @@ export const fetchStreamPost: StreamPost = async (url, init) => {
       try {
         return await res.text();
       } catch (err) {
+        // The status already arrived and is what classifies the failure. A
+        // body that stalls is only missing detail, so it must not turn a 401
+        // into a retryable timeout; the adapter names the status instead.
+        if (timedOut) return '';
         return rethrow(err);
       } finally {
         disarm();

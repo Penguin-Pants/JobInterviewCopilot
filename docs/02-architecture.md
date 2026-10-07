@@ -676,21 +676,22 @@ Adapter notes:
 - `openai` `whisper-1`: the one non-streaming model. Buffers 4000 ms, posts an
   in-memory WAV body, emits one final event per request, never an interim, never
   an endpoint. Held to `NFR-017`. (ADR-022)
-  - One request at a time, so windows are emitted in the order they were
-    spoken. At most `WHISPER_MAX_QUEUED_WINDOWS` (2) full windows wait behind
-    it; when the backlog is full the oldest waiting window is dropped. A
-    dropped window was never sent, so `sentBytes` (counted once per posted
-    window) never bills it.
+  - Each window is posted when it fills, so up to `WHISPER_MAX_IN_FLIGHT` (3)
+    requests run at once. Results are delivered in the order the windows were
+    spoken, each after the one before it. One request at a time made the time
+    between transcripts equal to the provider latency, and past the trigger's
+    window plus gap that read as silence and split one question in two. A
+    window that fills while the cap is in flight is not sent, so it is never
+    billed. `sentBytes` counts every upload, a retry included.
   - Each request is bounded by `WHISPER_REQUEST_TIMEOUT_MS` (10 s, the
     `NFR-017` p95) and aborted when it expires, as a retryable `timeout`. A
     retryable failure is retried once after 250 ms before it is raised on
     `error`, so one 429 or 5xx does not reopen both streams and lose the window.
-    Before it raises a failure, the session drops its queue and buffer and
-    takes no more audio. The reopen that the failure starts closes the session,
-    and that close then ends at once instead of waiting for the next window's
-    post. The dropped windows are never billed.
+    Before it raises a failure, the session aborts every other open request,
+    drops its buffer and takes no more audio. The reopen that the failure
+    starts closes the session, and that close then ends at once.
   - `close` waits for the tail at most `WHISPER_CLOSE_TIMEOUT_MS` (10 s), then
-    drops the queue and aborts the request in flight. A provider that never
+    aborts every open request. A provider that never
     answers can no longer hold Stop, the compaction and the session lock.
 
 ### 3.2 LLM adapter (`CMP-07`)

@@ -193,6 +193,35 @@ describe('fetchStreamPost timeouts', () => {
     });
   });
 
+  it('keeps a received error status when its body never arrives', async () => {
+    // Audit regression: a 401 whose body stalled became a retryable timeout,
+    // so the adapter never classified the status and a revoked key was
+    // retried instead of reaching CONFIG_REQUIRED.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_url: string, init: { signal: AbortSignal }) =>
+        Promise.resolve({
+          ok: false,
+          status: 401,
+          text: () =>
+            new Promise<string>((_resolve, reject) => {
+              init.signal.addEventListener('abort', () => {
+                reject(init.signal.reason as Error);
+              });
+            }),
+          body: null,
+        }),
+      ),
+    );
+    const res = await post();
+    expect(res.status).toBe(401);
+    const detail = res.errorText().catch((e: unknown) => e);
+
+    await vi.advanceTimersByTimeAsync(LLM_FIRST_BYTE_TIMEOUT_MS);
+    // No detail, so the adapter falls back to naming the status it classifies.
+    expect(await Promise.race([detail, Promise.resolve('still waiting')])).toBe('');
+  });
+
   it('reports a caller abort as a cancellation, never as a timeout', async () => {
     vi.stubGlobal('fetch', silentFetch());
     const controller = new AbortController();
