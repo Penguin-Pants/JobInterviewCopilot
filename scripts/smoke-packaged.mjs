@@ -64,6 +64,10 @@ const userDataDir = mkdtempSync(join(tmpdir(), 'icp-packaged-'));
 let app;
 /** What the packaged app wrote to stdout and stderr, in order. */
 const output = [];
+/** What the Dashboard page logged or threw, in order. */
+const pageEvents = [];
+/** The window the checks below run against, once it exists. */
+let dashboard;
 
 try {
   // The same `--user-data-dir` the E2E suite uses. Without it the smoke run
@@ -74,7 +78,9 @@ try {
   app.process().stdout?.on('data', (d) => output.push(String(d)));
   app.process().stderr?.on('data', (d) => output.push(String(d)));
 
-  const dashboard = await dashboardWindow(app);
+  dashboard = await dashboardWindow(app);
+  dashboard.on('console', (m) => pageEvents.push(`console.${m.type()}: ${m.text()}`));
+  dashboard.on('pageerror', (e) => pageEvents.push(`pageerror: ${e.message}`));
   await dashboard.waitForSelector('[data-testid="dashboard"]', { timeout: 30_000 });
   await dashboard.waitForSelector('[data-testid="dashboard-header"]', { timeout: 30_000 });
 
@@ -142,6 +148,15 @@ try {
       : '(not launched)',
   );
   report('app stdout and stderr', output.join(''));
+  report('dashboard console and page errors', pageEvents.join('\n'));
+  // What the window actually holds, so a blank page, an error page and a slow
+  // render can be told apart.
+  report(
+    'dashboard page',
+    dashboard
+      ? `${dashboard.url()}\n${await dashboard.content().catch((e) => String(e))}`
+      : '(no window)',
+  );
   const failedLog = join(userDataDir, 'logs', 'main.log');
   report('main.log', existsSync(failedLog) ? readFileSync(failedLog, 'utf8') : '(not written)');
 } finally {

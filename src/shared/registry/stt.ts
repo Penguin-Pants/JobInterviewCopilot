@@ -147,11 +147,6 @@ export function findSttModel(
   );
 }
 
-/** The `providerId:modelId` key used by the price table and the health map. */
-export function choiceKey(choice: ProviderChoice): string {
-  return `${choice.providerId}:${choice.modelId}`;
-}
-
 /** Every `providerId:modelId` in the registry, for price-table coverage (TC-156). */
 export function sttChoiceKeys(
   registry: ProviderDescriptor<SttModelDescriptor>[] = STT_REGISTRY,

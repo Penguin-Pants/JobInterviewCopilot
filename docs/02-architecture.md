@@ -141,7 +141,6 @@ interface Settings {
     displayId: string | null;
     clickThrough: boolean;              // default true (FR-083)
   };
-  firstRun: { modelDownloaded: boolean };
 }
 
 // Every range above is `SETTINGS_LIMITS` in src/shared/defaults.ts. Every

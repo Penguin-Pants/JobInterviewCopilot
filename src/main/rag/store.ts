@@ -310,11 +310,6 @@ export class ProfileStore {
     writeAtomic(this.profileFile(profile.id), JSON.stringify(profile, null, 2));
   }
 
-  /** Whether this profile still has an index on disk. Public for the engine's guards. */
-  hasProfile(profileId: string): boolean {
-    return this.exists(profileId);
-  }
-
   /**
    * Delete a profile and everything belonging to it (FR-069, TC-160).
    *
@@ -484,9 +479,6 @@ export class ProfileStore {
   private exists(profileId: string): boolean {
     return SAFE_ID.test(profileId) && existsSync(this.profileFile(profileId));
   }
-
-  /** Raised when a write arrives for a profile that has been deleted (FR-069). */
-  static readonly DELETED = 'profile-deleted';
 
   writeDerivedMarkdown(profileId: string, docId: string, markdown: string): string | null {
     if (!this.exists(profileId)) return null;

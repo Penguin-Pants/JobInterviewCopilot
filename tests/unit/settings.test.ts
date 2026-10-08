@@ -47,7 +47,8 @@ describe('TC-030 defaults', () => {
     expect(s.trigger.candidateContextChars).toBe(400);
     expect(s.thresholds.costUsd).toBe(2.0);
     expect(s.thresholds.timeMinutes).toBe(60);
-    expect(s.firstRun.modelDownloaded).toBe(false);
+    // The unused first-run flag was removed; it must not come back as a default.
+    expect(s).not.toHaveProperty('firstRun');
   });
 
   it('default consent copy states that transcripts are unencrypted and kept (FR-007, FR-110)', () => {
@@ -324,6 +325,20 @@ describe('ConfigStore round trip', () => {
 
     expect(seen).toHaveLength(1);
     expect(store.get().theme.overlayFontSizePx).toBe(22);
+  });
+
+  it('loads a file that still has the removed firstRun field and drops it on write-back', () => {
+    const dir = tmp();
+    const legacy = { ...defaultSettings(), firstRun: { modelDownloaded: true } };
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify(legacy), 'utf8');
+
+    const seen: string[] = [];
+    const store = new ConfigStore({ dir, onCorrupt: (_p, reason) => seen.push(reason) });
+
+    expect(seen).toEqual([]);
+    expect(store.get()).not.toHaveProperty('firstRun');
+    const onDisk = JSON.parse(readFileSync(join(dir, 'settings.json'), 'utf8')) as object;
+    expect(onDisk).not.toHaveProperty('firstRun');
   });
 });
 

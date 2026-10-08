@@ -4,7 +4,6 @@ import { copyFile, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { existsSync, mkdirSync } from 'node:fs';
 import { basename, extname, join, resolve } from 'node:path';
 import { KB_INGEST_LIMITS } from '../shared/defaults.js';
-import { EMBEDDING_MODEL } from '../shared/registry/embedding.js';
 import type { DocType, DocumentRecord, DocumentState, Profile } from '../shared/types.js';
 import { guessDocType } from './rag/autotag.js';
 import { CHUNKER_VERSION, chunkMarkdown, ensureHeadings } from './rag/chunk.js';
@@ -60,7 +59,6 @@ export class RetrievalUnavailableError extends Error {
 }
 /** The embedding model's lifecycle, as CH-124 and CH-214 carry it (ADR-011, ADR-026). */
 export type { ModelDownloadState } from './rag/embed.js';
-export { KB_CEILING } from '../shared/defaults.js';
 /**
  * The file extensions the knowledge base accepts (FR-060).
  *
@@ -1346,6 +1344,3 @@ function tooLargeMessage(): string {
   const megabytes = KB_INGEST_LIMITS.maxFileBytes / (1024 * 1024);
   return `This file is larger than the ${megabytes} MB limit for one document.`;
 }
-
-/** The embedding model this build ships with. Re-exported for the Dashboard badge. */
-export { EMBEDDING_MODEL };

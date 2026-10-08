@@ -126,6 +126,5 @@ export function defaultSettings(): Settings {
       displayId: null,
       clickThrough: true,
     },
-    firstRun: { modelDownloaded: false },
   };
 }
