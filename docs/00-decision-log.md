@@ -2527,3 +2527,51 @@ the inspector, so the release gate could no longer run.
 **Consequence.** A new channel fails typecheck until the table names its window.
 `onlyLoadAppFromAsar` and the integrity fuse are proved only by `smoke:packaged`
 on the Windows runner, which also proves `asarUnpack` still loads.
+
+### ADR-058: Accept the sharp 0.32.6 advisories until transformers moves past it
+
+**Decided 2026-10-23** by the project owner, after the audit reported the
+advisories.
+
+**Context.** `npm audit` reports three high-severity advisories against
+`sharp` 0.32.6:
+
+- GHSA-f88m-g3jw-g9cj: libvips (CVE-2026-33327, CVE-2026-33328,
+  CVE-2026-35590, CVE-2026-35591), fixed in 0.35.0.
+- GHSA-rgj7-g3m4-5g8c: libheif, fixed in 0.35.4.
+- GHSA-wq5f-xc86-pv6w: librsvg (CVE-2026-96889), fixed in 0.35.5.
+
+`sharp` is not a direct dependency. `@xenova/transformers` 2.17.2 declares
+`sharp: ^0.32.0`, and the lockfile resolves that range to 0.32.6. No 0.32.x
+release has the fixes, and only 0.35.5 or later fixes all three. The only fix
+npm offers is a downgrade of `transformers` to 1.4.2, a major step back. All
+three defects are in image decoding.
+
+**Decision.** Accept the advisories. Do not override `sharp` and do not stub
+it.
+
+- The app runs one `transformers` pipeline, `feature-extraction`, on text
+  (`src/main/rag/embed.ts`). `sharp` is called only from `RawImage`, which reads
+  an image, and no app path builds one.
+- Document conversion uses `pdf-parse` and `mammoth` (`src/main/rag/extract.ts`)
+  and never calls `sharp`. Mammoth does read the images embedded in a DOCX, and
+  its default converter writes each one as a data URI, but it decodes nothing
+  and has no `sharp` dependency.
+- So no input reaches the vulnerable decoders. `sharp` is loaded with the
+  library and stays packaged (`asarUnpack`), but it is never given data.
+
+**Rejected.** An `overrides` entry that forces `sharp` 0.35.x. `transformers`
+2.17.2 is built against the 0.32 API, and a new native `sharp` changes what
+`electron-builder` unpacks, which `smoke:packaged` would have to prove again.
+
+**Rejected.** A stub package in place of `sharp`. It removes the code, but it
+replaces a dependency with a local fake that every install and every
+`transformers` upgrade must keep in step.
+
+**Consequence.** Look at this again when any of these happen:
+
+- `@xenova/transformers` (or its successor) depends on `sharp` 0.35.5 or
+  later, the first release that fixes all three advisories.
+- The app passes image bytes to `sharp`, directly or through a `transformers`
+  image pipeline (`RawImage`).
+- `npm audit` reports a `sharp` advisory that is not about image decoding.
