@@ -142,21 +142,47 @@ export interface DocxParagraph {
   text: string;
   /** 1 to 3 produce `Heading1` to `Heading3`; omit for body text. */
   heading?: 1 | 2 | 3;
+  /** PNG bytes to embed as a picture after the text, as Word does. */
+  image?: Buffer;
+}
+
+const WORD_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+const REL_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+const IMAGE_REL = `${REL_NS}/image`;
+
+/** One inline picture that points at relationship `rId`. */
+function drawing(rId: string, index: number): string {
+  return (
+    '<w:r><w:drawing>' +
+    '<wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">' +
+    `<wp:docPr id="${String(index)}" name="Picture ${String(index)}"/>` +
+    '<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">' +
+    '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+    '<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+    `<pic:blipFill><a:blip r:embed="${rId}"/></pic:blipFill>` +
+    '</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>'
+  );
 }
 
 /** Build a `.docx` mammoth can convert to Markdown. */
 export function buildDocx(paragraphs: DocxParagraph[]): Buffer {
+  const media: { name: string; data: Buffer }[] = [];
   const body = paragraphs
-    .map(({ text, heading }) => {
+    .map(({ text, heading, image }) => {
       const style = heading ? `<w:pPr><w:pStyle w:val="Heading${heading}"/></w:pPr>` : '';
       const escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      return `<w:p>${style}<w:r><w:t xml:space="preserve">${escaped}</w:t></w:r></w:p>`;
+      let picture = '';
+      if (image) {
+        media.push({ name: `word/media/image${String(media.length + 1)}.png`, data: image });
+        picture = drawing(`rIdImage${String(media.length)}`, media.length);
+      }
+      return `<w:p>${style}<w:r><w:t xml:space="preserve">${escaped}</w:t></w:r>${picture}</w:p>`;
     })
     .join('');
 
   const document =
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
-    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+    `<w:document xmlns:w="${WORD_NS}" xmlns:r="${REL_NS}">` +
     `<w:body>${body}</w:body></w:document>`;
 
   const contentTypes =
@@ -164,6 +190,7 @@ export function buildDocx(paragraphs: DocxParagraph[]): Buffer {
     '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
     '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
     '<Default Extension="xml" ContentType="application/xml"/>' +
+    '<Default Extension="png" ContentType="image/png"/>' +
     '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
     '</Types>';
 
@@ -174,9 +201,22 @@ export function buildDocx(paragraphs: DocxParagraph[]): Buffer {
     'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" ' +
     'Target="word/document.xml"/></Relationships>';
 
+  const documentRels =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    media
+      .map(
+        (_, i) =>
+          `<Relationship Id="rIdImage${String(i + 1)}" Type="${IMAGE_REL}" Target="media/image${String(i + 1)}.png"/>`,
+      )
+      .join('') +
+    '</Relationships>';
+
   return buildZip([
     { name: '[Content_Types].xml', data: Buffer.from(contentTypes, 'utf8') },
     { name: '_rels/.rels', data: Buffer.from(rels, 'utf8') },
     { name: 'word/document.xml', data: Buffer.from(document, 'utf8') },
+    { name: 'word/_rels/document.xml.rels', data: Buffer.from(documentRels, 'utf8') },
+    ...media,
   ]);
 }

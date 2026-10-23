@@ -122,6 +122,42 @@ describe('convertToMarkdown failure paths (TC-063)', () => {
   }, 30000);
 });
 
+/** A 1 by 1 transparent PNG, the smallest picture Word could embed. */
+const PNG_1X1 = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+  'base64',
+);
+
+/**
+ * Audit regression: mammoth's default image converter wrote every picture in a
+ * DOCX into the Markdown as a base64 data URI. The chunker kept it, so a resume
+ * with a photo filled the knowledge base with chunks of image data that cost
+ * embedding time and could be retrieved as context (FR-060).
+ */
+describe('a DOCX picture does not reach the Markdown', () => {
+  it('keeps the text around a picture and drops the picture', async () => {
+    const { markdown } = await convertToMarkdown(
+      buildDocx([
+        { text: 'Before the picture.' },
+        { text: '', image: PNG_1X1 },
+        { text: 'After the picture.' },
+      ]),
+      'docx',
+    );
+
+    expect(markdown).toContain('Before the picture');
+    expect(markdown).toContain('After the picture');
+    expect(markdown).not.toMatch(/data:image/);
+    expect(markdown).not.toMatch(/!\[/);
+  }, 30000);
+
+  it('treats a DOCX with only pictures as one with no text', async () => {
+    await expect(
+      convertToMarkdown(buildDocx([{ text: '', image: PNG_1X1 }]), 'docx'),
+    ).rejects.toThrow(/contains no text/i);
+  }, 30000);
+});
+
 describe('a conversion is bounded by its signal (ADR-055)', () => {
   it('stops a DOCX conversion when the signal aborts', async () => {
     const controller = new AbortController();

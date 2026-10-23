@@ -152,7 +152,21 @@ async function loadPdfParse(): Promise<PdfParseConstructor> {
   return candidate as PdfParseConstructor;
 }
 
-type DocxConverter = (input: { buffer: Buffer }) => Promise<{ value: string }>;
+type DocxConverter = (
+  input: { buffer: Buffer },
+  options: { convertImage: () => [] },
+) => Promise<{ value: string }>;
+
+/**
+ * mammoth's image hook, set to drop every picture (FR-060).
+ *
+ * The default writes each picture into the Markdown as a base64 data URI. The
+ * chunker kept it, so a resume with a photo filled the knowledge base with
+ * image data that cost embedding time and could be retrieved as context. No
+ * HTML node is returned, so the picture leaves no mark, and its bytes are never
+ * read.
+ */
+const dropImage = (): [] => [];
 
 /**
  * mammoth's Markdown converter.
@@ -227,7 +241,7 @@ export async function extractMarkdown(
   const convert = await loadDocxConverter();
   let value: string;
   try {
-    value = (await convert({ buffer: bytes })).value;
+    value = (await convert({ buffer: bytes }, { convertImage: dropImage })).value;
   } catch (err) {
     throw new ConversionError(`DOCX conversion failed: ${(err as Error).message}`);
   }
