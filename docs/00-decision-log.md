@@ -2554,7 +2554,9 @@ it.
   (`src/main/rag/embed.ts`). `sharp` is called only from `RawImage`, which reads
   an image, and no app path builds one.
 - Document conversion uses `pdf-parse` and `mammoth` (`src/main/rag/extract.ts`)
-  and never calls `sharp`.
+  and never calls `sharp`. Mammoth does read the images embedded in a DOCX, and
+  its default converter writes each one as a data URI, but it decodes nothing
+  and has no `sharp` dependency.
 - So no input reaches the vulnerable decoders. `sharp` is loaded with the
   library and stays packaged (`asarUnpack`), but it is never given data.
 
@@ -2570,5 +2572,6 @@ replaces a dependency with a local fake that every install and every
 
 - `@xenova/transformers` (or its successor) depends on `sharp` 0.35.5 or
   later, the first release that fixes all three advisories.
-- The app adds an image pipeline or reads images from documents.
+- The app passes image bytes to `sharp`, directly or through a `transformers`
+  image pipeline (`RawImage`).
 - `npm audit` reports a `sharp` advisory that is not about image decoding.
