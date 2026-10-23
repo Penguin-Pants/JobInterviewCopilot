@@ -2543,9 +2543,9 @@ advisories.
 
 `sharp` is not a direct dependency. `@xenova/transformers` 2.17.2 declares
 `sharp: ^0.32.0`, and the lockfile resolves that range to 0.32.6. No 0.32.x
-release has the fixes, which start at 0.35.0. The only fix npm offers is a
-downgrade of `transformers` to 1.4.2, a major step back. All three defects are
-in image decoding.
+release has the fixes, and only 0.35.5 or later fixes all three. The only fix
+npm offers is a downgrade of `transformers` to 1.4.2, a major step back. All
+three defects are in image decoding.
 
 **Decision.** Accept the advisories. Do not override `sharp` and do not stub
 it.
@@ -2568,6 +2568,7 @@ replaces a dependency with a local fake that every install and every
 
 **Consequence.** Look at this again when any of these happen:
 
-- `@xenova/transformers` (or its successor) depends on a fixed `sharp`.
+- `@xenova/transformers` (or its successor) depends on `sharp` 0.35.5 or
+  later, the first release that fixes all three advisories.
 - The app adds an image pipeline or reads images from documents.
 - `npm audit` reports a `sharp` advisory that is not about image decoding.
