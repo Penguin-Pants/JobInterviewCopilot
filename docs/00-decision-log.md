@@ -2541,9 +2541,11 @@ advisories.
 - GHSA-rgj7-g3m4-5g8c: libheif, fixed in 0.35.4.
 - GHSA-wq5f-xc86-pv6w: librsvg (CVE-2026-96889), fixed in 0.35.5.
 
-`sharp` is not a direct dependency. `@xenova/transformers` 2.17.2 pins it, and
-the only fix npm offers is a downgrade of that package to 1.4.2, a major step
-back. All three defects are in image decoding.
+`sharp` is not a direct dependency. `@xenova/transformers` 2.17.2 declares
+`sharp: ^0.32.0`, and the lockfile resolves that range to 0.32.6. No 0.32.x
+release has the fixes, which start at 0.35.0. The only fix npm offers is a
+downgrade of `transformers` to 1.4.2, a major step back. All three defects are
+in image decoding.
 
 **Decision.** Accept the advisories. Do not override `sharp` and do not stub
 it.
