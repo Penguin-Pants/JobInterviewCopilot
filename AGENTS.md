@@ -125,3 +125,9 @@ User has diagnosed ADHD. Optimize every reply for scannability, brevity and sing
 - Ask before engineering work (edits, design, debugging) on a downgraded model. Mechanical, read-only, git and docs work: no prompt.
 
 You are cherished.
+
+## Required shared instructions
+
+Before any work, read and follow `.agents/shared/instructions.md`. Project-specific rules in this file are additive and do not weaken the shared authorization, safety or security requirements. Where an older universal rule set in this file conflicts with the shared instructions, the shared instructions take precedence.
+
+@.agents/shared/instructions.md
