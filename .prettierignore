@@ -12,3 +12,8 @@ package-lock.json
 # adaptations VENDORED.md records. Reformatting it to this repository's style
 # would make every future diff against upstream unreadable (NFR-016).
 src/renderer/**/vendor
+
+# Centrally managed shared standards from repo-template. Do not reformat here;
+# the synchronization controller requires byte-identical copies.
+.agents/
+.claude/skills/
