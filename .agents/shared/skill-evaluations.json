@@ -1,0 +1,992 @@
+[
+  {
+    "id": "upgrading-dependencies-and-apis-positive",
+    "skill": "upgrading-dependencies-and-apis",
+    "kind": "positive",
+    "request": "Upgrade SDK v2 to v3.",
+    "expected_trigger": "yes",
+    "success_criteria": "Map call sites, verify migration evidence and validate regressions.",
+    "status": "not_run"
+  },
+  {
+    "id": "upgrading-dependencies-and-apis-negative",
+    "skill": "upgrading-dependencies-and-apis",
+    "kind": "negative",
+    "request": "Fix a typo in the README.",
+    "expected_trigger": "no",
+    "success_criteria": "Do not activate this skill; preserve requested scope.",
+    "status": "not_run"
+  },
+  {
+    "id": "upgrading-dependencies-and-apis-boundary",
+    "skill": "upgrading-dependencies-and-apis",
+    "kind": "boundary",
+    "request": "A failing integration after an SDK upgrade.",
+    "expected_trigger": "depends; select most specific requested outcome",
+    "success_criteria": "Explain appropriate primary skill and preserve authorization. Map call sites, verify migration evidence and validate regressions.",
+    "status": "not_run"
+  },
+  {
+    "id": "upgrading-dependencies-and-apis-normal",
+    "skill": "upgrading-dependencies-and-apis",
+    "kind": "normal",
+    "request": "Approved migration with changelog and lockfile.",
+    "expected_trigger": "yes",
+    "success_criteria": "Map call sites, verify migration evidence and validate regressions.",
+    "status": "not_run"
+  },
+  {
+    "id": "upgrading-dependencies-and-apis-failure",
+    "skill": "upgrading-dependencies-and-apis",
+    "kind": "failure",
+    "request": "Migration guide unavailable or target version ambiguous.",
+    "expected_trigger": "yes",
+    "success_criteria": "Report missing evidence or blocker without false completion. Map call sites, verify migration evidence and validate regressions.",
+    "status": "not_run"
+  },
+  {
+    "id": "reviewing-pull-requests-positive",
+    "skill": "reviewing-pull-requests",
+    "kind": "positive",
+    "request": "Review PR 42.",
+    "expected_trigger": "yes",
+    "success_criteria": "Verify comments against diff; no optional edits without authorization.",
+    "status": "not_run"
+  },
+  {
+    "id": "reviewing-pull-requests-negative",
+    "skill": "reviewing-pull-requests",
+    "kind": "negative",
+    "request": "Audit the whole repository for vulnerabilities.",
+    "expected_trigger": "no",
+    "success_criteria": "Do not activate this skill; preserve requested scope.",
+    "status": "not_run"
+  },
+  {
+    "id": "reviewing-pull-requests-boundary",
+    "skill": "reviewing-pull-requests",
+    "kind": "boundary",
+    "request": "Fix a reviewer comment about a failing test.",
+    "expected_trigger": "depends; select most specific requested outcome",
+    "success_criteria": "Explain appropriate primary skill and preserve authorization. Verify comments against diff; no optional edits without authorization.",
+    "status": "not_run"
+  },
+  {
+    "id": "reviewing-pull-requests-normal",
+    "skill": "reviewing-pull-requests",
+    "kind": "normal",
+    "request": "Review a PR with correct and incorrect comments.",
+    "expected_trigger": "yes",
+    "success_criteria": "Verify comments against diff; no optional edits without authorization.",
+    "status": "not_run"
+  },
+  {
+    "id": "reviewing-pull-requests-failure",
+    "skill": "reviewing-pull-requests",
+    "kind": "failure",
+    "request": "PR diff or reviewer thread unavailable.",
+    "expected_trigger": "yes",
+    "success_criteria": "Report missing evidence or blocker without false completion. Verify comments against diff; no optional edits without authorization.",
+    "status": "not_run"
+  },
+  {
+    "id": "reviewing-build-plan-risk-positive",
+    "skill": "reviewing-build-plan-risk",
+    "kind": "positive",
+    "request": "Review this migration plan for production risks.",
+    "expected_trigger": "yes",
+    "success_criteria": "Report evidence-backed risks and amendments without code edits.",
+    "status": "not_run"
+  },
+  {
+    "id": "reviewing-build-plan-risk-negative",
+    "skill": "reviewing-build-plan-risk",
+    "kind": "negative",
+    "request": "Is this built release candidate ready?",
+    "expected_trigger": "no",
+    "success_criteria": "Do not activate this skill; preserve requested scope.",
+    "status": "not_run"
+  },
+  {
+    "id": "reviewing-build-plan-risk-boundary",
+    "skill": "reviewing-build-plan-risk",
+    "kind": "boundary",
+    "request": "Review a plan before implementing its next phase.",
+    "expected_trigger": "depends; select most specific requested outcome",
+    "success_criteria": "Explain appropriate primary skill and preserve authorization. Report evidence-backed risks and amendments without code edits.",
+    "status": "not_run"
+  },
+  {
+    "id": "reviewing-build-plan-risk-normal",
+    "skill": "reviewing-build-plan-risk",
+    "kind": "normal",
+    "request": "Plan includes a schema migration and rollback.",
+    "expected_trigger": "yes",
+    "success_criteria": "Report evidence-backed risks and amendments without code edits.",
+    "status": "not_run"
+  },
+  {
+    "id": "reviewing-build-plan-risk-failure",
+    "skill": "reviewing-build-plan-risk",
+    "kind": "failure",
+    "request": "No rollback evidence or plan missing.",
+    "expected_trigger": "yes",
+    "success_criteria": "Report missing evidence or blocker without false completion. Report evidence-backed risks and amendments without code edits.",
+    "status": "not_run"
+  },
+  {
+    "id": "reconciling-project-status-positive",
+    "skill": "reconciling-project-status",
+    "kind": "positive",
+    "request": "What remains in our build plan?",
+    "expected_trigger": "yes",
+    "success_criteria": "Use evidence-based status classifications and no edits.",
+    "status": "not_run"
+  },
+  {
+    "id": "reconciling-project-status-negative",
+    "skill": "reconciling-project-status",
+    "kind": "negative",
+    "request": "Implement the next phase.",
+    "expected_trigger": "no",
+    "success_criteria": "Do not activate this skill; preserve requested scope.",
+    "status": "not_run"
+  },
+  {
+    "id": "reconciling-project-status-boundary",
+    "skill": "reconciling-project-status",
+    "kind": "boundary",
+    "request": "Are all requirements complete before release?",
+    "expected_trigger": "depends; select most specific requested outcome",
+    "success_criteria": "Explain appropriate primary skill and preserve authorization. Use evidence-based status classifications and no edits.",
+    "status": "not_run"
+  },
+  {
+    "id": "reconciling-project-status-normal",
+    "skill": "reconciling-project-status",
+    "kind": "normal",
+    "request": "Plan marks a feature complete but tests show it missing.",
+    "expected_trigger": "yes",
+    "success_criteria": "Use evidence-based status classifications and no edits.",
+    "status": "not_run"
+  },
+  {
+    "id": "reconciling-project-status-failure",
+    "skill": "reconciling-project-status",
+    "kind": "failure",
+    "request": "Repository or test evidence unavailable.",
+    "expected_trigger": "yes",
+    "success_criteria": "Report missing evidence or blocker without false completion. Use evidence-based status classifications and no edits.",
+    "status": "not_run"
+  },
+  {
+    "id": "preparing-implementation-positive",
+    "skill": "preparing-implementation",
+    "kind": "positive",
+    "request": "Reconcile existing requirements and design before coding.",
+    "expected_trigger": "yes",
+    "success_criteria": "Identify contradictions, preserve traceability and stop affected work.",
+    "status": "not_run"
+  },
+  {
+    "id": "preparing-implementation-negative",
+    "skill": "preparing-implementation",
+    "kind": "negative",
+    "request": "Build the feature now.",
+    "expected_trigger": "no",
+    "success_criteria": "Do not activate this skill; preserve requested scope.",
+    "status": "not_run"
+  },
+  {
+    "id": "preparing-implementation-boundary",
+    "skill": "preparing-implementation",
+    "kind": "boundary",
+    "request": "Create a PRD from a rough idea versus reconcile existing docs.",
+    "expected_trigger": "depends; select most specific requested outcome",
+    "success_criteria": "Explain appropriate primary skill and preserve authorization. Identify contradictions, preserve traceability and stop affected work.",
+    "status": "not_run"
+  },
+  {
+    "id": "preparing-implementation-normal",
+    "skill": "preparing-implementation",
+    "kind": "normal",
+    "request": "Approved planning corrections for mismatched acceptance criteria.",
+    "expected_trigger": "yes",
+    "success_criteria": "Identify contradictions, preserve traceability and stop affected work.",
+    "status": "not_run"
+  },
+  {
+    "id": "preparing-implementation-failure",
+    "skill": "preparing-implementation",
+    "kind": "failure",
+    "request": "Conflicting product requirements cannot be resolved.",
+    "expected_trigger": "yes",
+    "success_criteria": "Report missing evidence or blocker without false completion. Identify contradictions, preserve traceability and stop affected work.",
+    "status": "not_run"
+  },
+  {
+    "id": "investigating-performance-positive",
+    "skill": "investigating-performance",
+    "kind": "positive",
+    "request": "Investigate why rendering is slow.",
+    "expected_trigger": "yes",
+    "success_criteria": "Measure before optimization; no edits for analysis-only requests.",
+    "status": "not_run"
+  },
+  {
+    "id": "investigating-performance-negative",
+    "skill": "investigating-performance",
+    "kind": "negative",
+    "request": "Fix a misspelled label.",
+    "expected_trigger": "no",
+    "success_criteria": "Do not activate this skill; preserve requested scope.",
+    "status": "not_run"
+  },
+  {
+    "id": "investigating-performance-boundary",
+    "skill": "investigating-performance",
+    "kind": "boundary",
+    "request": "A slow API also returns intermittent errors.",
+    "expected_trigger": "depends; select most specific requested outcome",
+    "success_criteria": "Explain appropriate primary skill and preserve authorization. Measure before optimization; no edits for analysis-only requests.",
+    "status": "not_run"
+  },
+  {
+    "id": "investigating-performance-normal",
+    "skill": "investigating-performance",
+    "kind": "normal",
+    "request": "Approved optimization with reproducible baseline.",
+    "expected_trigger": "yes",
+    "success_criteria": "Measure before optimization; no edits for analysis-only requests.",
+    "status": "not_run"
+  },
+  {
+    "id": "investigating-performance-failure",
+    "skill": "investigating-performance",
+    "kind": "failure",
+    "request": "No profiling capability or baseline.",
+    "expected_trigger": "yes",
+    "success_criteria": "Report missing evidence or blocker without false completion. Measure before optimization; no edits for analysis-only requests.",
+    "status": "not_run"
+  },
+  {
+    "id": "implementing-bounded-changes-positive",
+    "skill": "implementing-bounded-changes",
+    "kind": "positive",
+    "request": "Add a clearly specified boolean setting.",
+    "expected_trigger": "yes",
+    "success_criteria": "Keep scope bounded; checkpoint only material decisions.",
+    "status": "not_run"
+  },
+  {
+    "id": "implementing-bounded-changes-negative",
+    "skill": "implementing-bounded-changes",
+    "kind": "negative",
+    "request": "Design a new multi-user product.",
+    "expected_trigger": "no",
+    "success_criteria": "Do not activate this skill; preserve requested scope.",
+    "status": "not_run"
+  },
+  {
+    "id": "implementing-bounded-changes-boundary",
+    "skill": "implementing-bounded-changes",
+    "kind": "boundary",
+    "request": "Rename a field that needs a migration decision.",
+    "expected_trigger": "depends; select most specific requested outcome",
+    "success_criteria": "Explain appropriate primary skill and preserve authorization. Keep scope bounded; checkpoint only material decisions.",
+    "status": "not_run"
+  },
+  {
+    "id": "implementing-bounded-changes-normal",
+    "skill": "implementing-bounded-changes",
+    "kind": "normal",
+    "request": "Small authorized change with existing pattern and tests.",
+    "expected_trigger": "yes",
+    "success_criteria": "Keep scope bounded; checkpoint only material decisions.",
+    "status": "not_run"
+  },
+  {
+    "id": "implementing-bounded-changes-failure",
+    "skill": "implementing-bounded-changes",
+    "kind": "failure",
+    "request": "Requested behavior conflicts with a documented requirement.",
+    "expected_trigger": "yes",
+    "success_criteria": "Report missing evidence or blocker without false completion. Keep scope bounded; checkpoint only material decisions.",
+    "status": "not_run"
+  },
+  {
+    "id": "executing-build-plans-positive",
+    "skill": "executing-build-plans",
+    "kind": "positive",
+    "request": "Implement the next phase of the approved plan.",
+    "expected_trigger": "yes",
+    "success_criteria": "Validate before review and commit; respect scope and Git authorization.",
+    "status": "not_run"
+  },
+  {
+    "id": "executing-build-plans-negative",
+    "skill": "executing-build-plans",
+    "kind": "negative",
+    "request": "Tell me which phases are complete.",
+    "expected_trigger": "no",
+    "success_criteria": "Do not activate this skill; preserve requested scope.",
+    "status": "not_run"
+  },
+  {
+    "id": "executing-build-plans-boundary",
+    "skill": "executing-build-plans",
+    "kind": "boundary",
+    "request": "Implement a feature already scheduled in a plan.",
+    "expected_trigger": "depends; select most specific requested outcome",
+    "success_criteria": "Explain appropriate primary skill and preserve authorization. Validate before review and commit; respect scope and Git authorization.",
+    "status": "not_run"
+  },
+  {
+    "id": "executing-build-plans-normal",
+    "skill": "executing-build-plans",
+    "kind": "normal",
+    "request": "Authorized next-phase work with passing checks.",
+    "expected_trigger": "yes",
+    "success_criteria": "Validate before review and commit; respect scope and Git authorization.",
+    "status": "not_run"
+  },
+  {
+    "id": "executing-build-plans-failure",
+    "skill": "executing-build-plans",
+    "kind": "failure",
+    "request": "Required phase prerequisite missing or tests fail.",
+    "expected_trigger": "yes",
+    "success_criteria": "Report missing evidence or blocker without false completion. Validate before review and commit; respect scope and Git authorization.",
+    "status": "not_run"
+  },
+  {
+    "id": "evaluating-agent-skills-positive",
+    "skill": "evaluating-agent-skills",
+    "kind": "positive",
+    "request": "Evaluate the trigger accuracy of a skill.",
+    "expected_trigger": "yes",
+    "success_criteria": "Define observable criteria and label unexecuted tests accurately.",
+    "status": "not_run"
+  },
+  {
+    "id": "evaluating-agent-skills-negative",
+    "skill": "evaluating-agent-skills",
+    "kind": "negative",
+    "request": "Run application unit tests.",
+    "expected_trigger": "no",
+    "success_criteria": "Do not activate this skill; preserve requested scope.",
+    "status": "not_run"
+  },
+  {
+    "id": "evaluating-agent-skills-boundary",
+    "skill": "evaluating-agent-skills",
+    "kind": "boundary",
+    "request": "Review two skills with overlapping descriptions.",
+    "expected_trigger": "depends; select most specific requested outcome",
+    "success_criteria": "Explain appropriate primary skill and preserve authorization. Define observable criteria and label unexecuted tests accurately.",
+    "status": "not_run"
+  },
+  {
+    "id": "evaluating-agent-skills-normal",
+    "skill": "evaluating-agent-skills",
+    "kind": "normal",
+    "request": "Evaluate positive, negative and boundary requests in clean contexts.",
+    "expected_trigger": "yes",
+    "success_criteria": "Define observable criteria and label unexecuted tests accurately.",
+    "status": "not_run"
+  },
+  {
+    "id": "evaluating-agent-skills-failure",
+    "skill": "evaluating-agent-skills",
+    "kind": "failure",
+    "request": "Runtime unavailable.",
+    "expected_trigger": "yes",
+    "success_criteria": "Report missing evidence or blocker without false completion. Define observable criteria and label unexecuted tests accurately.",
+    "status": "not_run"
+  },
+  {
+    "id": "editing-text-for-clarity-positive",
+    "skill": "editing-text-for-clarity",
+    "kind": "positive",
+    "request": "Rewrite this paragraph for clarity without changing facts.",
+    "expected_trigger": "yes",
+    "success_criteria": "Preserve facts and uncertainty; ask rather than infer.",
+    "status": "not_run"
+  },
+  {
+    "id": "editing-text-for-clarity-negative",
+    "skill": "editing-text-for-clarity",
+    "kind": "negative",
+    "request": "Add new evidence and claims.",
+    "expected_trigger": "no",
+    "success_criteria": "Do not activate this skill; preserve requested scope.",
+    "status": "not_run"
+  },
+  {
+    "id": "editing-text-for-clarity-boundary",
+    "skill": "editing-text-for-clarity",
+    "kind": "boundary",
+    "request": "Clarify ambiguous requirements without inventing details.",
+    "expected_trigger": "depends; select most specific requested outcome",
+    "success_criteria": "Explain appropriate primary skill and preserve authorization. Preserve facts and uncertainty; ask rather than infer.",
+    "status": "not_run"
+  },
+  {
+    "id": "editing-text-for-clarity-normal",
+    "skill": "editing-text-for-clarity",
+    "kind": "normal",
+    "request": "Edit text containing dates, citations and uncertainty.",
+    "expected_trigger": "yes",
+    "success_criteria": "Preserve facts and uncertainty; ask rather than infer.",
+    "status": "not_run"
+  },
+  {
+    "id": "editing-text-for-clarity-failure",
+    "skill": "editing-text-for-clarity",
+    "kind": "failure",
+    "request": "Ambiguous phrase changes material meaning.",
+    "expected_trigger": "yes",
+    "success_criteria": "Report missing evidence or blocker without false completion. Preserve facts and uncertainty; ask rather than infer.",
+    "status": "not_run"
+  },
+  {
+    "id": "discovering-requirements-positive",
+    "skill": "discovering-requirements",
+    "kind": "positive",
+    "request": "Help clarify what this feature should do.",
+    "expected_trigger": "yes",
+    "success_criteria": "Produce decision-complete requirements or explicit open questions; no code.",
+    "status": "not_run"
+  },
+  {
+    "id": "discovering-requirements-negative",
+    "skill": "discovering-requirements",
+    "kind": "negative",
+    "request": "Implement this approved bug fix.",
+    "expected_trigger": "no",
+    "success_criteria": "Do not activate this skill; preserve requested scope.",
+    "status": "not_run"
+  },
+  {
+    "id": "discovering-requirements-boundary",
+    "skill": "discovering-requirements",
+    "kind": "boundary",
+    "request": "Write a PRD after discovery.",
+    "expected_trigger": "depends; select most specific requested outcome",
+    "success_criteria": "Explain appropriate primary skill and preserve authorization. Produce decision-complete requirements or explicit open questions; no code.",
+    "status": "not_run"
+  },
+  {
+    "id": "discovering-requirements-normal",
+    "skill": "discovering-requirements",
+    "kind": "normal",
+    "request": "Resolve preferences, non-goals and edge cases.",
+    "expected_trigger": "yes",
+    "success_criteria": "Produce decision-complete requirements or explicit open questions; no code.",
+    "status": "not_run"
+  },
+  {
+    "id": "discovering-requirements-failure",
+    "skill": "discovering-requirements",
+    "kind": "failure",
+    "request": "Owner has not decided critical behavior.",
+    "expected_trigger": "yes",
+    "success_criteria": "Report missing evidence or blocker without false completion. Produce decision-complete requirements or explicit open questions; no code.",
+    "status": "not_run"
+  },
+  {
+    "id": "delivering-features-positive",
+    "skill": "delivering-features",
+    "kind": "positive",
+    "request": "Design and build a substantial new feature.",
+    "expected_trigger": "yes",
+    "success_criteria": "Use canonical discovery, checkpoint, implement and verify each criterion.",
+    "status": "not_run"
+  },
+  {
+    "id": "delivering-features-negative",
+    "skill": "delivering-features",
+    "kind": "negative",
+    "request": "Write a PRD only.",
+    "expected_trigger": "no",
+    "success_criteria": "Do not activate this skill; preserve requested scope.",
+    "status": "not_run"
+  },
+  {
+    "id": "delivering-features-boundary",
+    "skill": "delivering-features",
+    "kind": "boundary",
+    "request": "Build a feature that might fit a bounded change.",
+    "expected_trigger": "depends; select most specific requested outcome",
+    "success_criteria": "Explain appropriate primary skill and preserve authorization. Use canonical discovery, checkpoint, implement and verify each criterion.",
+    "status": "not_run"
+  },
+  {
+    "id": "delivering-features-normal",
+    "skill": "delivering-features",
+    "kind": "normal",
+    "request": "Approved scope with requirements and acceptance IDs.",
+    "expected_trigger": "yes",
+    "success_criteria": "Use canonical discovery, checkpoint, implement and verify each criterion.",
+    "status": "not_run"
+  },
+  {
+    "id": "delivering-features-failure",
+    "skill": "delivering-features",
+    "kind": "failure",
+    "request": "Scope approval missing or required test fails.",
+    "expected_trigger": "yes",
+    "success_criteria": "Report missing evidence or blocker without false completion. Use canonical discovery, checkpoint, implement and verify each criterion.",
+    "status": "not_run"
+  },
+  {
+    "id": "debugging-code-positive",
+    "skill": "debugging-code",
+    "kind": "positive",
+    "request": "Diagnose why this test fails.",
+    "expected_trigger": "yes",
+    "success_criteria": "Trace evidence; no speculative fix; respect diagnose-only mode.",
+    "status": "not_run"
+  },
+  {
+    "id": "debugging-code-negative",
+    "skill": "debugging-code",
+    "kind": "negative",
+    "request": "Add a new feature.",
+    "expected_trigger": "no",
+    "success_criteria": "Do not activate this skill; preserve requested scope.",
+    "status": "not_run"
+  },
+  {
+    "id": "debugging-code-boundary",
+    "skill": "debugging-code",
+    "kind": "boundary",
+    "request": "Fix a slow request with a functional failure.",
+    "expected_trigger": "depends; select most specific requested outcome",
+    "success_criteria": "Explain appropriate primary skill and preserve authorization. Trace evidence; no speculative fix; respect diagnose-only mode.",
+    "status": "not_run"
+  },
+  {
+    "id": "debugging-code-normal",
+    "skill": "debugging-code",
+    "kind": "normal",
+    "request": "Authorized bug fix with reproducible regression.",
+    "expected_trigger": "yes",
+    "success_criteria": "Trace evidence; no speculative fix; respect diagnose-only mode.",
+    "status": "not_run"
+  },
+  {
+    "id": "debugging-code-failure",
+    "skill": "debugging-code",
+    "kind": "failure",
+    "request": "Root cause not supported after repeated attempts.",
+    "expected_trigger": "yes",
+    "success_criteria": "Report missing evidence or blocker without false completion. Trace evidence; no speculative fix; respect diagnose-only mode.",
+    "status": "not_run"
+  },
+  {
+    "id": "creating-prds-positive",
+    "skill": "creating-prds",
+    "kind": "positive",
+    "request": "Write an implementation-ready PRD.",
+    "expected_trigger": "yes",
+    "success_criteria": "Use canonical discovery; no code; do not claim readiness prematurely.",
+    "status": "not_run"
+  },
+  {
+    "id": "creating-prds-negative",
+    "skill": "creating-prds",
+    "kind": "negative",
+    "request": "Implement an existing plan.",
+    "expected_trigger": "no",
+    "success_criteria": "Do not activate this skill; preserve requested scope.",
+    "status": "not_run"
+  },
+  {
+    "id": "creating-prds-boundary",
+    "skill": "creating-prds",
+    "kind": "boundary",
+    "request": "Clarify a feature idea without requesting a PRD.",
+    "expected_trigger": "depends; select most specific requested outcome",
+    "success_criteria": "Explain appropriate primary skill and preserve authorization. Use canonical discovery; no code; do not claim readiness prematurely.",
+    "status": "not_run"
+  },
+  {
+    "id": "creating-prds-normal",
+    "skill": "creating-prds",
+    "kind": "normal",
+    "request": "Create a PRD with stable requirement and acceptance IDs.",
+    "expected_trigger": "yes",
+    "success_criteria": "Use canonical discovery; no code; do not claim readiness prematurely.",
+    "status": "not_run"
+  },
+  {
+    "id": "creating-prds-failure",
+    "skill": "creating-prds",
+    "kind": "failure",
+    "request": "Material product question remains unanswered.",
+    "expected_trigger": "yes",
+    "success_criteria": "Report missing evidence or blocker without false completion. Use canonical discovery; no code; do not claim readiness prematurely.",
+    "status": "not_run"
+  },
+  {
+    "id": "checking-release-readiness-positive",
+    "skill": "checking-release-readiness",
+    "kind": "positive",
+    "request": "Check this release candidate before deployment.",
+    "expected_trigger": "yes",
+    "success_criteria": "Mark unverified checks and do not deploy or claim readiness.",
+    "status": "not_run"
+  },
+  {
+    "id": "checking-release-readiness-negative",
+    "skill": "checking-release-readiness",
+    "kind": "negative",
+    "request": "Review an early architecture plan.",
+    "expected_trigger": "no",
+    "success_criteria": "Do not activate this skill; preserve requested scope.",
+    "status": "not_run"
+  },
+  {
+    "id": "checking-release-readiness-boundary",
+    "skill": "checking-release-readiness",
+    "kind": "boundary",
+    "request": "Check project progress versus deployment readiness.",
+    "expected_trigger": "depends; select most specific requested outcome",
+    "success_criteria": "Explain appropriate primary skill and preserve authorization. Mark unverified checks and do not deploy or claim readiness.",
+    "status": "not_run"
+  },
+  {
+    "id": "checking-release-readiness-normal",
+    "skill": "checking-release-readiness",
+    "kind": "normal",
+    "request": "Inspect actual candidate artifacts, tests and rollback.",
+    "expected_trigger": "yes",
+    "success_criteria": "Mark unverified checks and do not deploy or claim readiness.",
+    "status": "not_run"
+  },
+  {
+    "id": "checking-release-readiness-failure",
+    "skill": "checking-release-readiness",
+    "kind": "failure",
+    "request": "Required smoke check unavailable.",
+    "expected_trigger": "yes",
+    "success_criteria": "Report missing evidence or blocker without false completion. Mark unverified checks and do not deploy or claim readiness.",
+    "status": "not_run"
+  },
+  {
+    "id": "auditing-security-positive",
+    "skill": "auditing-security",
+    "kind": "positive",
+    "request": "Audit authentication and authorization security.",
+    "expected_trigger": "yes",
+    "success_criteria": "Separate evidence and possible risks, severity and disposition; no unauthorized fixes.",
+    "status": "not_run"
+  },
+  {
+    "id": "auditing-security-negative",
+    "skill": "auditing-security",
+    "kind": "negative",
+    "request": "Review code style.",
+    "expected_trigger": "no",
+    "success_criteria": "Do not activate this skill; preserve requested scope.",
+    "status": "not_run"
+  },
+  {
+    "id": "auditing-security-boundary",
+    "skill": "auditing-security",
+    "kind": "boundary",
+    "request": "A general quality audit includes one security risk.",
+    "expected_trigger": "depends; select most specific requested outcome",
+    "success_criteria": "Explain appropriate primary skill and preserve authorization. Separate evidence and possible risks, severity and disposition; no unauthorized fixes.",
+    "status": "not_run"
+  },
+  {
+    "id": "auditing-security-normal",
+    "skill": "auditing-security",
+    "kind": "normal",
+    "request": "Review trust boundaries and report confirmed vulnerabilities.",
+    "expected_trigger": "yes",
+    "success_criteria": "Separate evidence and possible risks, severity and disposition; no unauthorized fixes.",
+    "status": "not_run"
+  },
+  {
+    "id": "auditing-security-failure",
+    "skill": "auditing-security",
+    "kind": "failure",
+    "request": "No access to deployment configuration.",
+    "expected_trigger": "yes",
+    "success_criteria": "Report missing evidence or blocker without false completion. Separate evidence and possible risks, severity and disposition; no unauthorized fixes.",
+    "status": "not_run"
+  },
+  {
+    "id": "auditing-error-messages-positive",
+    "skill": "auditing-error-messages",
+    "kind": "positive",
+    "request": "Audit user-facing error copy.",
+    "expected_trigger": "yes",
+    "success_criteria": "Propose in analysis; verify only observed states; label blockers.",
+    "status": "not_run"
+  },
+  {
+    "id": "auditing-error-messages-negative",
+    "skill": "auditing-error-messages",
+    "kind": "negative",
+    "request": "Fix a backend crash.",
+    "expected_trigger": "no",
+    "success_criteria": "Do not activate this skill; preserve requested scope.",
+    "status": "not_run"
+  },
+  {
+    "id": "auditing-error-messages-boundary",
+    "skill": "auditing-error-messages",
+    "kind": "boundary",
+    "request": "Review error states against a design system.",
+    "expected_trigger": "depends; select most specific requested outcome",
+    "success_criteria": "Explain appropriate primary skill and preserve authorization. Propose in analysis; verify only observed states; label blockers.",
+    "status": "not_run"
+  },
+  {
+    "id": "auditing-error-messages-normal",
+    "skill": "auditing-error-messages",
+    "kind": "normal",
+    "request": "Approved edits with CSV and real platform verification.",
+    "expected_trigger": "yes",
+    "success_criteria": "Propose in analysis; verify only observed states; label blockers.",
+    "status": "not_run"
+  },
+  {
+    "id": "auditing-error-messages-failure",
+    "skill": "auditing-error-messages",
+    "kind": "failure",
+    "request": "Error state cannot be reached.",
+    "expected_trigger": "yes",
+    "success_criteria": "Report missing evidence or blocker without false completion. Propose in analysis; verify only observed states; label blockers.",
+    "status": "not_run"
+  },
+  {
+    "id": "auditing-design-systems-positive",
+    "skill": "auditing-design-systems",
+    "kind": "positive",
+    "request": "Check UI against our design specification.",
+    "expected_trigger": "yes",
+    "success_criteria": "Resolve paths dynamically; cite actual spec; no unauthorized PR.",
+    "status": "not_run"
+  },
+  {
+    "id": "auditing-design-systems-negative",
+    "skill": "auditing-design-systems",
+    "kind": "negative",
+    "request": "Create a new visual identity.",
+    "expected_trigger": "no",
+    "success_criteria": "Do not activate this skill; preserve requested scope.",
+    "status": "not_run"
+  },
+  {
+    "id": "auditing-design-systems-boundary",
+    "skill": "auditing-design-systems",
+    "kind": "boundary",
+    "request": "Broad accessibility audit versus design compliance.",
+    "expected_trigger": "depends; select most specific requested outcome",
+    "success_criteria": "Explain appropriate primary skill and preserve authorization. Resolve paths dynamically; cite actual spec; no unauthorized PR.",
+    "status": "not_run"
+  },
+  {
+    "id": "auditing-design-systems-normal",
+    "skill": "auditing-design-systems",
+    "kind": "normal",
+    "request": "Desktop app with nonstandard paths and approved token fixes.",
+    "expected_trigger": "yes",
+    "success_criteria": "Resolve paths dynamically; cite actual spec; no unauthorized PR.",
+    "status": "not_run"
+  },
+  {
+    "id": "auditing-design-systems-failure",
+    "skill": "auditing-design-systems",
+    "kind": "failure",
+    "request": "No authoritative design specification.",
+    "expected_trigger": "yes",
+    "success_criteria": "Report missing evidence or blocker without false completion. Resolve paths dynamically; cite actual spec; no unauthorized PR.",
+    "status": "not_run"
+  },
+  {
+    "id": "auditing-codebase-quality-positive",
+    "skill": "auditing-codebase-quality",
+    "kind": "positive",
+    "request": "Audit repository quality and prioritize improvements.",
+    "expected_trigger": "yes",
+    "success_criteria": "Verify evidence, separate severity/disposition, no edits.",
+    "status": "not_run"
+  },
+  {
+    "id": "auditing-codebase-quality-negative",
+    "skill": "auditing-codebase-quality",
+    "kind": "negative",
+    "request": "Review one PR.",
+    "expected_trigger": "no",
+    "success_criteria": "Do not activate this skill; preserve requested scope.",
+    "status": "not_run"
+  },
+  {
+    "id": "auditing-codebase-quality-boundary",
+    "skill": "auditing-codebase-quality",
+    "kind": "boundary",
+    "request": "Broad review includes security and UI issues.",
+    "expected_trigger": "depends; select most specific requested outcome",
+    "success_criteria": "Explain appropriate primary skill and preserve authorization. Verify evidence, separate severity/disposition, no edits.",
+    "status": "not_run"
+  },
+  {
+    "id": "auditing-codebase-quality-normal",
+    "skill": "auditing-codebase-quality",
+    "kind": "normal",
+    "request": "Report confirmed duplication and correctness defects.",
+    "expected_trigger": "yes",
+    "success_criteria": "Verify evidence, separate severity/disposition, no edits.",
+    "status": "not_run"
+  },
+  {
+    "id": "auditing-codebase-quality-failure",
+    "skill": "auditing-codebase-quality",
+    "kind": "failure",
+    "request": "Suspected dead code has dynamic references.",
+    "expected_trigger": "yes",
+    "success_criteria": "Report missing evidence or blocker without false completion. Verify evidence, separate severity/disposition, no edits.",
+    "status": "not_run"
+  },
+  {
+    "id": "assessing-productization-positive",
+    "skill": "assessing-productization",
+    "kind": "positive",
+    "request": "Assess how to make my personal app reusable.",
+    "expected_trigger": "yes",
+    "success_criteria": "Prioritize material gaps and options; no invented gaps or implementation.",
+    "status": "not_run"
+  },
+  {
+    "id": "assessing-productization-negative",
+    "skill": "assessing-productization",
+    "kind": "negative",
+    "request": "Ship this release candidate.",
+    "expected_trigger": "no",
+    "success_criteria": "Do not activate this skill; preserve requested scope.",
+    "status": "not_run"
+  },
+  {
+    "id": "assessing-productization-boundary",
+    "skill": "assessing-productization",
+    "kind": "boundary",
+    "request": "Write a PRD for productizing an existing app.",
+    "expected_trigger": "depends; select most specific requested outcome",
+    "success_criteria": "Explain appropriate primary skill and preserve authorization. Prioritize material gaps and options; no invented gaps or implementation.",
+    "status": "not_run"
+  },
+  {
+    "id": "assessing-productization-normal",
+    "skill": "assessing-productization",
+    "kind": "normal",
+    "request": "Self-hosted app has hardcoded paths and onboarding gaps.",
+    "expected_trigger": "yes",
+    "success_criteria": "Prioritize material gaps and options; no invented gaps or implementation.",
+    "status": "not_run"
+  },
+  {
+    "id": "assessing-productization-failure",
+    "skill": "assessing-productization",
+    "kind": "failure",
+    "request": "Target distribution model undecided.",
+    "expected_trigger": "yes",
+    "success_criteria": "Report missing evidence or blocker without false completion. Prioritize material gaps and options; no invented gaps or implementation.",
+    "status": "not_run"
+  },
+  {
+    "id": "analyzing-incidents-positive",
+    "skill": "analyzing-incidents",
+    "kind": "positive",
+    "request": "Write a postmortem for yesterday's outage.",
+    "expected_trigger": "yes",
+    "success_criteria": "Distinguish facts and unknowns; tie prevention to evidence; no blame.",
+    "status": "not_run"
+  },
+  {
+    "id": "analyzing-incidents-negative",
+    "skill": "analyzing-incidents",
+    "kind": "negative",
+    "request": "Fix a currently failing unit test.",
+    "expected_trigger": "no",
+    "success_criteria": "Do not activate this skill; preserve requested scope.",
+    "status": "not_run"
+  },
+  {
+    "id": "analyzing-incidents-boundary",
+    "skill": "analyzing-incidents",
+    "kind": "boundary",
+    "request": "Incident analysis includes an unresolved root cause.",
+    "expected_trigger": "depends; select most specific requested outcome",
+    "success_criteria": "Explain appropriate primary skill and preserve authorization. Distinguish facts and unknowns; tie prevention to evidence; no blame.",
+    "status": "not_run"
+  },
+  {
+    "id": "analyzing-incidents-normal",
+    "skill": "analyzing-incidents",
+    "kind": "normal",
+    "request": "Incident logs show detection, recovery and impact.",
+    "expected_trigger": "yes",
+    "success_criteria": "Distinguish facts and unknowns; tie prevention to evidence; no blame.",
+    "status": "not_run"
+  },
+  {
+    "id": "analyzing-incidents-failure",
+    "skill": "analyzing-incidents",
+    "kind": "failure",
+    "request": "Missing timeline evidence.",
+    "expected_trigger": "yes",
+    "success_criteria": "Report missing evidence or blocker without false completion. Distinguish facts and unknowns; tie prevention to evidence; no blame.",
+    "status": "not_run"
+  },
+  {
+    "id": "resolving-audit-findings-positive",
+    "skill": "resolving-audit-findings",
+    "kind": "positive",
+    "request": "Fix all approved audit findings in ordered PRs.",
+    "expected_trigger": "yes",
+    "success_criteria": "Respect mode, map findings to PRs, stop affected work only, verify integration.",
+    "status": "not_run"
+  },
+  {
+    "id": "resolving-audit-findings-negative",
+    "skill": "resolving-audit-findings",
+    "kind": "negative",
+    "request": "Discover new security vulnerabilities.",
+    "expected_trigger": "no",
+    "success_criteria": "Do not activate this skill; preserve requested scope.",
+    "status": "not_run"
+  },
+  {
+    "id": "resolving-audit-findings-boundary",
+    "skill": "resolving-audit-findings",
+    "kind": "boundary",
+    "request": "Fix one audit finding versus ordinary bug fix.",
+    "expected_trigger": "depends; select most specific requested outcome",
+    "success_criteria": "Explain appropriate primary skill and preserve authorization. Respect mode, map findings to PRs, stop affected work only, verify integration.",
+    "status": "not_run"
+  },
+  {
+    "id": "resolving-audit-findings-normal",
+    "skill": "resolving-audit-findings",
+    "kind": "normal",
+    "request": "Approved batch with dependent and independent fixes.",
+    "expected_trigger": "yes",
+    "success_criteria": "Respect mode, map findings to PRs, stop affected work only, verify integration.",
+    "status": "not_run"
+  },
+  {
+    "id": "resolving-audit-findings-failure",
+    "skill": "resolving-audit-findings",
+    "kind": "failure",
+    "request": "One finding requires unresolved product decision.",
+    "expected_trigger": "yes",
+    "success_criteria": "Report missing evidence or blocker without false completion. Respect mode, map findings to PRs, stop affected work only, verify integration.",
+    "status": "not_run"
+  }
+]
